@@ -1,0 +1,93 @@
+@import url('https://fonts.googleapis.com/css2?family=Syne:wght@400;500;600;700;800&family=Barlow+Condensed:ital,wght@0,400;0,600;0,700;1,700&display=swap');
+@import "tailwindcss";
+
+@theme {
+  --font-sans: "Syne", sans-serif;
+  --font-display: "Syne", sans-serif;
+  --font-accent: "Barlow Condensed", sans-serif;
+  --color-torqued-red: #FF1800;
+  --color-torqued-dark: #150402;
+  
+  --color-background: var(--bg-color);
+  --color-foreground: var(--fg-color);
+  --color-card: var(--card-bg);
+  --color-border: var(--border-color);
+  --color-muted: var(--muted-color);
+}
+
+:root {
+  --bg-color: #ffffff;
+  --fg-color: #150402;
+  --card-bg: rgba(21, 4, 2, 0.03);
+  --border-color: rgba(21, 4, 2, 0.1);
+  --muted-color: rgba(21, 4, 2, 0.6);
+}
+
+.dark {
+  --bg-color: #150402;
+  --fg-color: #ffffff;
+  --card-bg: rgba(255, 255, 255, 0.05);
+  --border-color: rgba(255, 255, 255, 0.1);
+  --muted-color: rgba(255, 255, 255, 0.6);
+}
+
+@layer base {
+  html, body {
+    font-family: "Syne", sans-serif;
+    @apply text-foreground bg-background selection:bg-torqued-red selection:text-white antialiased transition-colors duration-300;
+  }
+  
+  h1, h2, h3, h4, h5, h6 {
+    font-family: "Syne", sans-serif;
+    @apply font-black uppercase tracking-tighter text-foreground;
+  }
+
+  input:-webkit-autofill,
+  input:-webkit-autofill:hover, 
+  input:-webkit-autofill:focus, 
+  input:-webkit-autofill:active {
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: var(--fg-color) !important;
+      transition: background-color 5000s ease-in-out 0s;
+      box-shadow: inset 0 0 20px 20px rgba(var(--fg-color), 0.05);
+  }
+
+  /* Smooth scroll */
+  html {
+    scroll-behavior: smooth;
+  }
+}
+
+.torqued-badge {
+  font-family: "Barlow Condensed", sans-serif;
+  @apply bg-torqued-red text-white px-2 py-1 italic font-bold skew-x-[-10deg] inline-block;
+}
+
+.glass-card {
+  @apply bg-card backdrop-blur-xl border border-border rounded-2xl shadow-xl transition-all duration-300;
+}
+
+.liquid-glass {
+  background: var(--card-bg);
+  backdrop-filter: blur(20px);
+  border: 1px solid var(--border-color);
+  box-shadow: 0 8px 32px 0 rgba(0, 0, 0, 0.2);
+}
+
+.dark .liquid-glass {
+  box-shadow: 0 8px 32px 0 rgba(0, 0, 0, 0.8);
+}
+
+.liquid-glass-dark {
+  background: var(--bg-color);
+  backdrop-filter: blur(40px);
+  border: 1px solid var(--border-color);
+}
+
+.btn-primary {
+  @apply bg-torqued-red text-white px-6 py-3 rounded-lg font-bold uppercase tracking-wide transition-all hover:bg-red-700 active:scale-95 disabled:opacity-50;
+}
+
+.btn-outline {
+  @apply border-2 border-border text-foreground px-6 py-3 rounded-lg font-bold uppercase tracking-wide transition-all hover:bg-foreground hover:text-background active:scale-95;
+}

@@ -1,0 +1,6 @@
+{
+  "name": "Torqued",
+  "description": "Automotive repair marketplace connecting car owners with independent mechanics in NZ and Australia.",
+  "requestFramePermissions": ["geolocation"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
