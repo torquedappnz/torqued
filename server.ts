@@ -11,6 +11,9 @@ dotenv.config();
 const app = express();
 const PORT = 3000;
 
+// Public URL of the Torqued logo for email templates
+const LOGO_URL = 'https://torquednz.vercel.app/torqued-logo.png';
+
 // Capture raw body for Stripe webhook signature verification
 app.use(express.json({
   verify: (req, _res, buf) => {
@@ -34,19 +37,29 @@ function getStripe(): Stripe | null {
 }
 
 // Lazy-initialized Email Transporter
+// Cached transporter — reused across warm serverless invocations with a
+// pooled, keep-alive connection so we skip the TLS+auth handshake each time.
+let cachedTransporter: nodemailer.Transporter | null = null;
 function getMailTransporter() {
+  if (cachedTransporter) return cachedTransporter;
+
   const host = process.env.SMTP_HOST;
-  const port = process.env.SMTP_PORT ? parseInt(process.env.SMTP_PORT) : 587;
+  const port = process.env.SMTP_PORT ? parseInt(process.env.SMTP_PORT) : 465;
   const user = process.env.SMTP_USER;
   const pass = process.env.SMTP_PASS;
 
   if (host && user && pass) {
-    return nodemailer.createTransport({
+    cachedTransporter = nodemailer.createTransport({
       host,
       port,
       secure: port === 465,
-      auth: { user, pass }
+      auth: { user, pass },
+      pool: true,
+      maxConnections: 3,
+      connectionTimeout: 8000,
+      greetingTimeout: 8000,
     });
+    return cachedTransporter;
   }
   return null;
 }
@@ -92,7 +105,7 @@ function generateOtpEmailHtml(rego: string, code: string): string {
       <table border="0" cellpadding="0" cellspacing="0" width="100%" style="max-width:480px;background:#150402;border-radius:20px;border:1px solid rgba(255,24,0,0.15);overflow:hidden;">
         <tr>
           <td style="background:#050100;padding:24px 32px;border-bottom:3px solid #FF1800;text-align:center;">
-            <span style="font-size:26px;font-weight:900;color:#fff;text-transform:uppercase;letter-spacing:-1px;">TORQ<span style="color:#FF1800;">UED</span></span>
+            <img src="${LOGO_URL}" alt="Torqued" width="200" style="display:inline-block;max-width:200px;height:auto;" />
           </td>
         </tr>
         <tr>
@@ -250,6 +263,51 @@ app.post('/api/customer/register', async (req, res) => {
     res.json({ success: true, maskedEmail: maskEmail(email) });
   } catch (err) {
     console.error('[customer/register]', err);
+    res.status(500).json({ error: 'Registration failed' });
+  }
+});
+
+// POST /api/mechanic/register — creates a pre-confirmed mechanic account (no email link required)
+app.post('/api/mechanic/register', async (req, res) => {
+  try {
+    const { email, password, name } = req.body;
+    if (!email || !password || !name) {
+      return res.status(400).json({ error: 'Name, email and password are required' });
+    }
+    if ((password as string).length < 6) {
+      return res.status(400).json({ error: 'Password must be at least 6 characters' });
+    }
+
+    const supabase = getSupabaseAdmin();
+    if (!supabase) return res.status(500).json({ error: 'Database not configured' });
+
+    // Create the auth user already email-confirmed so they can log in immediately
+    const { data: authData, error: authError } = await supabase.auth.admin.createUser({
+      email,
+      password,
+      email_confirm: true,
+      user_metadata: { name, role: 'mechanic' },
+    });
+
+    if (authError) {
+      if (authError.message.toLowerCase().includes('already')) {
+        return res.status(409).json({ error: 'An account with this email already exists. Please log in instead.' });
+      }
+      return res.status(400).json({ error: authError.message });
+    }
+
+    // Create the mechanic profile row
+    await supabase.from('profiles').upsert({
+      id: authData.user.id,
+      email,
+      name,
+      role: 'mechanic',
+      subscription_active: false,
+    }, { onConflict: 'id' });
+
+    res.json({ success: true });
+  } catch (err) {
+    console.error('[mechanic/register]', err);
     res.status(500).json({ error: 'Registration failed' });
   }
 });
@@ -599,15 +657,13 @@ function generateBookingEmailHtml(data: any): string {
               <table border="0" cellpadding="0" cellspacing="0" width="100%">
                 <tr>
                   <td align="center">
-                    <span style="font-family: 'Syne', -apple-system, Arial, sans-serif; font-size: 30px; font-weight: 900; letter-spacing: -1.2px; color: #ffffff; text-transform: uppercase; display: inline-block;">
-                      TORQ<span style="color: #FF1800;">UED</span>
-                    </span>
+                    <img src="${LOGO_URL}" alt="Torqued" width="220" style="display:inline-block;max-width:220px;height:auto;" />
                   </td>
                 </tr>
                 <tr>
-                  <td align="center" style="padding-top: 4px;">
+                  <td align="center" style="padding-top: 8px;">
                     <span style="font-family: -apple-system, Arial, sans-serif; font-size: 10px; font-weight: bold; color: rgba(255,255,255,0.5); letter-spacing: 2px; text-transform: uppercase;">
-                      DUNEDIN HIGH-PERFORMANCE MARKETPLACE
+                      NZ REPAIR MARKETPLACE
                     </span>
                   </td>
                 </tr>
@@ -721,7 +777,7 @@ function generateBookingEmailHtml(data: any): string {
             </td>
           </tr>
 
-          <!-- HELPFUL LOGISTICS FOR DUNEDIN ROADS -->
+          <!-- DROP-OFF CHECKLIST -->
           <tr>
             <td style="padding: 30px 32px 10px 32px;">
               <div style="border-top: 1px solid rgba(21, 4, 2, 0.06); padding-top: 24px;">
@@ -742,7 +798,7 @@ function generateBookingEmailHtml(data: any): string {
                 Need help or modifications?
               </p>
               <p style="margin: 3px 0 12px 0; font-family: -apple-system, Arial, sans-serif; font-size: 11px; font-weight: bold; color: #FF1800;">
-                torquedapp.nz@gmail.com • (0800) TORQUED-NZ
+                torquedapp.nz@gmail.com • 022 389 5249
               </p>
               <p style="margin: 0; font-family: -apple-system, Arial, sans-serif; font-size: 9.5px; color: rgba(21,4,2,0.45); font-weight: 500; line-height: 1.4;">
                 This automated booking is generated through Torqued. All transactions are secure and PCI-DSS compliant. All fees include 15% NZ GST. 
@@ -810,9 +866,8 @@ function generateMechanicEmailHtml(data: any): string {
               <table border="0" cellpadding="0" cellspacing="0" width="100%">
                 <tr>
                   <td>
-                    <span style="font-family: -apple-system, Arial, sans-serif; font-size: 26px; font-weight: 900; color: #ffffff; text-transform: uppercase; letter-spacing: -1px;">
-                      TORQ<span style="color: #FF1800;">UED</span> <span style="font-size: 14px; font-weight: normal; color: rgba(255,255,255,0.6); margin-left: 8px;">PARTNER HUB</span>
-                    </span>
+                    <img src="${LOGO_URL}" alt="Torqued" width="180" style="display:inline-block;max-width:180px;height:auto;vertical-align:middle;" />
+                    <span style="font-family: -apple-system, Arial, sans-serif; font-size: 14px; font-weight: normal; color: rgba(255,255,255,0.6); margin-left: 10px; vertical-align:middle;">PARTNER HUB</span>
                   </td>
                 </tr>
               </table>
@@ -826,7 +881,7 @@ function generateMechanicEmailHtml(data: any): string {
                 HIGH-VALUE MECHANICAL LEAD STATUS: SECURED
               </span>
               <h1 style="margin: 0; font-family: -apple-system, Arial, sans-serif; font-size: 22px; font-weight: 950; color: #ffffff; text-transform: uppercase; letter-spacing: -0.5px;">
-                NEW DUNEDIN JOB DISPATCH: #${bookingId}
+                NEW JOB DISPATCH: #${bookingId}
               </h1>
               <p style="margin: 10px 0 0 0; font-family: -apple-system, Arial, sans-serif; font-size: 13.5px; color: rgba(255,255,255,0.7); line-height: 1.5;">
                 G'day Team, a new client booking has been scheduled for your workshop, <strong>${mechanicName}</strong>. Client detail validation and payment processing are fully settled on client confirmation.
@@ -898,30 +953,11 @@ function generateMechanicEmailHtml(data: any): string {
             </td>
           </tr>
 
-          <!-- SIGNATURE SIGN-OFF -->
-          <tr>
-            <td style="padding: 10px 32px 28px 32px; border-top: 1px solid rgba(255,255,255,0.05); margin-top: 15px;">
-              <table border="0" cellpadding="0" cellspacing="0" width="100%">
-                <tr>
-                  <td width="60%">
-                    <p style="margin: 0; font-family: -apple-system, Arial, sans-serif; font-size: 9.5px; color: rgba(255,255,255,0.45); font-weight: bold; text-transform: uppercase; letter-spacing: 0.5px;">Automated Clearance Dispatch Authority</p>
-                    <p style="margin: 3px 0 0 0; font-family: -apple-system, Arial, sans-serif; font-size: 12.5px; color: #ffffff; font-weight: bold;">Torqued Otago Field Manager</p>
-                  </td>
-                  <td width="40%" style="text-align: right; vertical-align: middle;">
-                    <div style="display: inline-block; padding: 4px 10px; border: 1px solid #FF1800; border-radius: 6px; font-family: 'Brush Script MT', 'Dancing Script', 'Caveat', cursive, sans-serif; font-size: 19px; color: #FF1800; font-weight: bold; transform: rotate(-3deg);">
-                      Dean Robinson
-                    </div>
-                  </td>
-                </tr>
-              </table>
-            </td>
-          </tr>
-
           <!-- CONTACT FOOTER -->
           <tr>
             <td style="background-color: #050100; padding: 20px 32px; text-align: center;">
               <p style="margin: 0; font-family: -apple-system, Arial, sans-serif; font-size: 10px; color: rgba(255,255,255,0.45); font-weight: 500;">
-                Questions? Otago Operational Logistics Hub: crew@torqued.nz or (0800) TORQUED-NZ
+                Questions? torquedapp.nz@gmail.com or 022 389 5249
               </p>
             </td>
           </tr>
@@ -963,9 +999,7 @@ function generateDropoffReminderEmailHtml(data: any): string {
           <!-- BRAND HEADER -->
           <tr>
             <td style="background-color: #150402; padding: 28px; text-align: center;">
-              <span style="font-family: -apple-system, Arial, sans-serif; font-size: 26px; font-weight: 900; color: #ffffff; text-transform: uppercase;">
-                TORQ<span style="color: #FF1800;">UED</span>
-              </span>
+              <img src="${LOGO_URL}" alt="Torqued" width="200" style="display:inline-block;max-width:200px;height:auto;" />
             </td>
           </tr>
 
@@ -1017,30 +1051,11 @@ function generateDropoffReminderEmailHtml(data: any): string {
             </td>
           </tr>
 
-          <!-- DIGITAL AUTHORIZATION -->
-          <tr>
-            <td style="padding: 10px 32px 28px 32px; border-top: 1px solid rgba(21,4,2,0.05);">
-              <table border="0" cellpadding="0" cellspacing="0" width="100%">
-                <tr>
-                  <td>
-                    <p style="margin: 0; font-family: -apple-system, Arial, sans-serif; font-size: 10px; color: rgba(21,4,2,0.4); text-transform: uppercase; font-weight: bold;">Authorized Dispatch</p>
-                    <p style="margin: 2px 0 0 0; font-family: -apple-system, Arial, sans-serif; font-size: 12px; color: #150402; font-weight: bold;">Torqued Digital Dispatch Assistant</p>
-                  </td>
-                  <td style="text-align: right; vertical-align: middle;">
-                    <div style="font-family: 'Brush Script MT', 'Dancing Script', 'Caveat', cursive, sans-serif; font-size: 16px; color: #ff1800; transform: rotate(-3deg); font-weight: bold; display: inline-block; padding: 2px 6px;">
-                      Torqued Core
-                    </div>
-                  </td>
-                </tr>
-              </table>
-            </td>
-          </tr>
-
           <!-- CONTACT -->
           <tr>
             <td style="padding: 24px 32px 32px 32px; text-align: center; border-top: 1px solid rgba(21,4,2,0.04); background-color: rgba(21, 4, 2, 0.015);">
               <p style="margin: 0; font-family: -apple-system, Arial, sans-serif; font-size: 10px; font-weight: bold; color: rgba(21,4,2,0.4); letter-spacing: 1px; text-transform: uppercase;">SUPPORT & LOGISTICS</p>
-              <p style="margin: 3px 0 0 0; font-family: -apple-system, Arial, sans-serif; font-size: 11px; font-weight: bold; color: #FF1800;">(0800) TORQUED-NZ • torquedapp.nz@gmail.com</p>
+              <p style="margin: 3px 0 0 0; font-family: -apple-system, Arial, sans-serif; font-size: 11px; font-weight: bold; color: #FF1800;">022 389 5249 • torquedapp.nz@gmail.com</p>
             </td>
           </tr>
         </table>
@@ -1079,9 +1094,7 @@ function generateServiceReminderEmailHtml(data: any): string {
           <!-- BRAND HEADER -->
           <tr>
             <td style="padding: 32px 32px 20px 32px; text-align: center;">
-              <span style="font-family: -apple-system, Arial, sans-serif; font-size: 28px; font-weight: 950; color: #ffffff; text-transform: uppercase; letter-spacing: -1px;">
-                TORQ<span style="color: #FF1800;">UED</span>
-              </span>
+              <img src="${LOGO_URL}" alt="Torqued" width="200" style="display:inline-block;max-width:200px;height:auto;" />
             </td>
           </tr>
 
@@ -1095,7 +1108,7 @@ function generateServiceReminderEmailHtml(data: any): string {
                 DCT CALIBRATION SCHEDULE REACHED
               </h1>
               <p style="margin: 10px 0 0 0; font-family: -apple-system, Arial, sans-serif; font-size: 13.5px; color: rgba(255,255,255,0.7); line-height: 1.5;">
-                G'day ${customerName}, Otago seasonal road adjustments are starting. Under Otago's high humidity and cold winters, we recommend a <strong>12-month dual-clutch transmission (DCT) mechatronics calibration</strong> for your <strong>${vehicle} (${plate})</strong> to ensure perfect shift pressures.
+                G'day ${customerName}, it's time for scheduled maintenance. We recommend a <strong>12-month dual-clutch transmission (DCT) mechatronics calibration</strong> for your <strong>${vehicle} (${plate})</strong> to ensure perfect shift pressures.
               </p>
             </td>
           </tr>
@@ -1118,30 +1131,12 @@ function generateServiceReminderEmailHtml(data: any): string {
             </td>
           </tr>
 
-          <!-- WET SIGNATURE FIELD -->
-          <tr>
-            <td style="padding: 10px 32px 28px 32px; border-top: 1px solid rgba(255,255,255,0.05);">
-              <table border="0" cellpadding="0" cellspacing="0" width="100%">
-                <tr>
-                  <td width="60%">
-                    <p style="margin: 0; font-family: -apple-system, Arial, sans-serif; font-size: 9.5px; color: rgba(255,255,255,0.4); text-transform: uppercase; font-weight: bold;">Performance Operations Lead</p>
-                    <p style="margin: 2px 0 0 0; font-family: -apple-system, Arial, sans-serif; font-size: 12px; color: rgba(255,255,255,0.8); font-weight: bold;">Torqued Otago Field Manager</p>
-                  </td>
-                  <td width="40%" style="text-align: right; vertical-align: middle;">
-                    <div style="font-family: 'Brush Script MT', 'Dancing Script', 'Caveat', cursive, sans-serif; font-size: 18px; color: #FF1800; transform: rotate(-4deg); font-weight: bold; display: inline-block; padding: 2px 8px;">
-                      Dean Robinson
-                    </div>
-                  </td>
-                </tr>
-              </table>
-            </td>
-          </tr>
 
           <!-- FOOTER WITH SERVICE UN-SUBSCRIBE CONTROL (REQUIRED BY NZ CAN-SPAM COMPLIANCE) -->
           <tr>
             <td style="background-color: #050100; padding: 30px 32px; text-align: center; border-top: 1px solid rgba(255,255,255,0.03);">
               <p style="margin: 0; font-family: -apple-system, Arial, sans-serif; font-size: 10px; color: rgba(255,255,255,0.4); line-weight: 1.4;">
-                This communication is generated through Torqued Otago Field Operations. All advisory bulletins are aligned with New Zealand manufacturer standards.
+                This communication is generated through Torqued. All advisory bulletins are aligned with New Zealand manufacturer standards.
               </p>
               <table border="0" cellpadding="0" cellspacing="0" width="100%" style="margin-top: 18px;">
                 <tr>
@@ -1292,7 +1287,7 @@ app.post('/api/email/confirm-booking', async (req, res) => {
     const mechanicHtml = generateMechanicEmailHtml(data);
     const dropoffHtml = generateDropoffReminderEmailHtml(data);
     const serviceReminderHtml = generateServiceReminderEmailHtml(data);
-    const smsText = `TORQUED DUNEDIN: Booking Ref #${data.bookingId} is confirmed at ${data.mechanicName}! Drop off your vehicle (${data.vehicle} - ${data.plate}) on ${data.date} at ${data.time} at ${data.mechanicAddress}. Overnight lock-box passcode is 9944.`;
+    const smsText = `TORQUED: Booking Ref #${data.bookingId} is confirmed at ${data.mechanicName}! Drop off your vehicle (${data.vehicle} - ${data.plate}) on ${data.date} at ${data.time} at ${data.mechanicAddress}. Overnight lock-box passcode is 9944.`;
 
     // Initialise mail SMTP transporter if present in environment settings
     const transporter = getMailTransporter();
@@ -1414,7 +1409,7 @@ app.post('/api/email/send-test-single', async (req, res) => {
         break;
       case 'mechanic':
         html = generateMechanicEmailHtml(finalData);
-        subject = `⚙️ [Torqued Hub Test] LIVE Otago Workshop Dispatch: Ref #${finalData.bookingId}`;
+        subject = `⚙️ [Torqued Hub Test] LIVE Workshop Dispatch: Ref #${finalData.bookingId}`;
         break;
       case 'dropoff':
         html = generateDropoffReminderEmailHtml(finalData);
@@ -1428,7 +1423,7 @@ app.post('/api/email/send-test-single', async (req, res) => {
         return res.status(400).json({ error: 'Invalid templateType' });
     }
 
-    const SMS = `TORQUED DUNEDIN TEST: Booking Ref #${finalData.bookingId} is confirmed for vehicle (${finalData.vehicle} - ${finalData.plate}). Drop off time: ${finalData.time}! Passcode: 9944.`;
+    const SMS = `TORQUED TEST: Booking Ref #${finalData.bookingId} is confirmed for vehicle (${finalData.vehicle} - ${finalData.plate}). Drop off time: ${finalData.time}! Passcode: 9944.`;
 
     const transporter = getMailTransporter();
     let sentRealEmail = false;

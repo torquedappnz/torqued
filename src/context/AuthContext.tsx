@@ -135,13 +135,18 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   };
 
   const signUpMechanic = async (email: string, password: string, name: string): Promise<string | null> => {
-    const { data, error } = await supabase.auth.signUp({
-      email,
-      password,
-      options: { data: { name, role: 'mechanic' } },
+    // Create a pre-confirmed account server-side (no confirmation email needed)
+    const res = await fetch('/api/mechanic/register', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email, password, name }),
     });
+    const data = await res.json();
+    if (!res.ok) return data.error || 'Sign up failed';
+
+    // Log them in immediately
+    const { error } = await supabase.auth.signInWithPassword({ email, password });
     if (error) return error.message;
-    if (!data.user) return 'Sign up failed';
     return null;
   };
 

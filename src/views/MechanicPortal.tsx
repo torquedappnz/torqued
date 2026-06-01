@@ -1880,13 +1880,8 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                         await loginMechanic(mechEmail, mechPassword);
                       } else {
                         const err = await signUpMechanic(mechEmail, mechPassword, mechName);
-                        if (err) {
-                          if (err.toLowerCase().includes('email') || err.toLowerCase().includes('confirmation')) {
-                            setMechAuthError('Account created! Check your inbox for a confirmation email and click the link to activate your account.');
-                          } else {
-                            setMechAuthError(err);
-                          }
-                        }
+                        if (err) setMechAuthError(err);
+                        // On success the user is logged in automatically and the view re-renders
                       }
                     } catch (e: any) {
                       setMechAuthError(e.message || 'Authentication failed');
