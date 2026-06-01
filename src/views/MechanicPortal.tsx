@@ -181,7 +181,7 @@ const RECOMMENDATIONS_RAH190: Recommendation[] = [
 
 export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) => {
   const { theme, setTheme } = useTheme();
-  const { user, userProfile, loginMechanic, signUpMechanic, logout, updateProfile } = useAuth();
+  const { user, userProfile, loginMechanic, signUpMechanic, resendMechanicLink, logout, updateProfile } = useAuth();
   const [mechEmail, setMechEmail] = useState('');
   const [mechPassword, setMechPassword] = useState('');
   const [mechName, setMechName] = useState('');
@@ -189,6 +189,14 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
   const [mechAuthError, setMechAuthError] = useState<string | null>(null);
   const [mechAuthLoading, setMechAuthLoading] = useState(false);
   const [mechSignupSent, setMechSignupSent] = useState(false);
+  const [mechResendCooldown, setMechResendCooldown] = useState(0);
+  const [mechResendMsg, setMechResendMsg] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (mechResendCooldown <= 0) return;
+    const t = setInterval(() => setMechResendCooldown(c => Math.max(0, c - 1)), 1000);
+    return () => clearInterval(t);
+  }, [mechResendCooldown]);
   
   // Listen for returning Stripe subscription sessions
   useEffect(() => {
@@ -1834,11 +1842,29 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                     We've sent a confirmation link to <span className="text-white font-bold">{mechEmail}</span>. Click it to activate your workshop account, then log in.
                   </p>
                 </div>
+
+                {mechResendMsg && (
+                  <p className="text-xs font-bold text-emerald-400">{mechResendMsg}</p>
+                )}
+
+                <button
+                  disabled={mechResendCooldown > 0}
+                  onClick={async () => {
+                    setMechResendMsg(null);
+                    const err = await resendMechanicLink(mechEmail);
+                    if (err) { setMechResendMsg(err); }
+                    else { setMechResendMsg('Link resent — check your inbox.'); setMechResendCooldown(30); }
+                  }}
+                  className="text-xs font-bold text-torqued-red hover:text-red-400 disabled:text-white/30 disabled:cursor-not-allowed transition-colors"
+                >
+                  {mechResendCooldown > 0 ? `Resend link in ${mechResendCooldown}s` : "Didn't get it? Resend link"}
+                </button>
+
                 <Button
                   fullWidth
                   variant="outline"
                   className="border-white/20 text-white"
-                  onClick={() => { setMechSignupSent(false); setMechAuthMode('login'); setMechPassword(''); }}
+                  onClick={() => { setMechSignupSent(false); setMechAuthMode('login'); setMechPassword(''); setMechResendMsg(null); }}
                 >
                   Back to Login
                 </Button>

@@ -23,6 +23,7 @@ interface AuthContextType {
   // Mechanic auth (email + password)
   loginMechanic: (email: string, password: string) => Promise<void>;
   signUpMechanic: (email: string, password: string, name: string) => Promise<{ error?: string; needsConfirmation?: boolean }>;
+  resendMechanicLink: (email: string) => Promise<string | null>;
   // Shared
   logout: () => Promise<void>;
   registerVehicle: (vehicle: Vehicle) => Promise<void>;
@@ -147,6 +148,17 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     return { needsConfirmation: true };
   };
 
+  const resendMechanicLink = async (email: string): Promise<string | null> => {
+    const res = await fetch('/api/mechanic/resend', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email }),
+    });
+    const data = await res.json();
+    if (!res.ok) return data.error || 'Could not resend link';
+    return null;
+  };
+
   // ── Shared ─────────────────────────────────────────────────
   const logout = async () => {
     await supabase.auth.signOut();
@@ -202,6 +214,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       isAuthReady,
       loginMechanic,
       signUpMechanic,
+      resendMechanicLink,
       logout,
       registerVehicle,
       updateProfile,

@@ -372,6 +372,8 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
   const [otpCode, setOtpCode] = useState('');
   const [otpSentEmail, setOtpSentEmail] = useState('');
   const [otpVerificationError, setOtpVerificationError] = useState('');
+  const [otpResendCooldown, setOtpResendCooldown] = useState(0);
+  const [otpResendMsg, setOtpResendMsg] = useState<string | null>(null);
   const [isBookingLoading, setIsBookingLoading] = useState(false);
   const [stripeCheckoutUrl, setStripeCheckoutUrl] = useState<string | null>(null);
   const [isStripeSessionLoading, setIsStripeSessionLoading] = useState(false);
@@ -678,6 +680,13 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
         });
       });
   }, [user]);
+
+  // OTP resend cooldown ticker
+  useEffect(() => {
+    if (otpResendCooldown <= 0) return;
+    const t = setInterval(() => setOtpResendCooldown(c => Math.max(0, c - 1)), 1000);
+    return () => clearInterval(t);
+  }, [otpResendCooldown]);
 
   // Calculate total price based on selected services
   const totalPrice = useMemo(() => {
@@ -3099,17 +3108,43 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
               </div>
 
               <div className="space-y-3 pt-2">
-                <Button 
-                  fullWidth 
-                  size="lg" 
+                <Button
+                  fullWidth
+                  size="lg"
                   className="bg-torqued-red text-white uppercase tracking-widest font-black text-[10px] h-12"
                   onClick={handleConfirmOTP}
                 >
                   Verify & Unlock History
                 </Button>
-                <Button 
-                  variant="ghost" 
-                  fullWidth 
+
+                <div className="text-center">
+                  {otpResendMsg && <p className="text-[10px] font-bold text-emerald-500 mb-1">{otpResendMsg}</p>}
+                  <button
+                    disabled={otpResendCooldown > 0}
+                    onClick={async () => {
+                      setOtpResendMsg(null);
+                      setOtpVerificationError('');
+                      try {
+                        const r = await fetch('/api/customer/check-plate', {
+                          method: 'POST',
+                          headers: { 'Content-Type': 'application/json' },
+                          body: JSON.stringify({ rego: rego.toUpperCase().trim() }),
+                        });
+                        if (r.ok) { setOtpResendMsg('New code sent — check your email.'); setOtpResendCooldown(30); }
+                        else { setOtpVerificationError('Could not resend. Please try again.'); }
+                      } catch {
+                        setOtpVerificationError('Could not resend. Please try again.');
+                      }
+                    }}
+                    className="text-[10px] font-black uppercase tracking-widest text-torqued-red hover:text-red-400 disabled:text-muted/40 disabled:cursor-not-allowed transition-colors"
+                  >
+                    {otpResendCooldown > 0 ? `Resend code in ${otpResendCooldown}s` : "Didn't get it? Resend code"}
+                  </button>
+                </div>
+
+                <Button
+                  variant="ghost"
+                  fullWidth
                   className="text-[10px] text-muted tracking-widest uppercase font-black hover:text-foreground h-10"
                   onClick={() => {
                     setShowOTPModal(false);

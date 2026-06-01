@@ -371,6 +371,48 @@ app.post('/api/mechanic/register', async (req, res) => {
   }
 });
 
+// POST /api/mechanic/resend — re-sends a sign-in/confirmation link to an existing mechanic
+app.post('/api/mechanic/resend', async (req, res) => {
+  try {
+    const { email } = req.body;
+    if (!email) return res.status(400).json({ error: 'Email is required' });
+
+    const supabase = getSupabaseAdmin();
+    if (!supabase) return res.status(500).json({ error: 'Database not configured' });
+
+    const origin = getOrigin(req);
+    // A magic link works for an existing (unconfirmed) user: clicking it confirms
+    // their email and signs them in, then redirects to the portal.
+    const { data: linkData, error: linkError } = await supabase.auth.admin.generateLink({
+      type: 'magiclink',
+      email,
+      options: { redirectTo: `${origin}/mechanic` },
+    });
+
+    if (linkError || !linkData.properties?.action_link) {
+      return res.status(400).json({ error: linkError?.message || 'Could not generate link. Make sure you signed up first.' });
+    }
+
+    const name = (linkData.user?.user_metadata?.name as string) || 'there';
+    const transporter = getMailTransporter();
+    if (transporter) {
+      await transporter.sendMail({
+        from: process.env.SMTP_FROM || '"Torqued" <torquedapp.nz@gmail.com>',
+        to: email,
+        subject: 'Your Torqued sign-in link',
+        html: generateMechanicConfirmEmailHtml(name, linkData.properties.action_link),
+      });
+    } else {
+      console.log(`[Mechanic resend link] ${email} → ${linkData.properties.action_link}`);
+    }
+
+    res.json({ success: true });
+  } catch (err) {
+    console.error('[mechanic/resend]', err);
+    res.status(500).json({ error: 'Failed to resend link' });
+  }
+});
+
 // POST /api/ai/fault-code — translates a diagnostic fault code using Gemini
 app.post('/api/ai/fault-code', async (req, res) => {
   try {
