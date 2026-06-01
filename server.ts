@@ -152,39 +152,44 @@ Be direct and practical. No disclaimers.`;
   }
 });
 
-// POST /api/otp/send — looks up plate owner, generates and emails OTP
+// POST /api/otp/send — checks plate, sends OTP only if there's a registered owner
 app.post('/api/otp/send', async (req, res) => {
   try {
     const { rego } = req.body;
     if (!rego) return res.status(400).json({ error: 'rego is required' });
     const formattedRego = (rego as string).toUpperCase().trim();
 
-    // Resolve owner email — server-side so it is never exposed to client
-    let ownerEmail: string | null = null;
     const supabase = getSupabaseAdmin();
+    let vehicleExists = false;
+    let ownerEmail: string | null = null;
+
     if (supabase) {
       const { data: vehicle } = await supabase
         .from('vehicles')
-        .select('owner_id')
+        .select('rego, owner_id')
         .eq('rego', formattedRego)
         .single();
-      if (vehicle?.owner_id) {
-        const { data: profile } = await supabase
-          .from('profiles')
-          .select('email')
-          .eq('id', vehicle.owner_id)
-          .single();
-        ownerEmail = profile?.email ?? null;
+
+      if (vehicle) {
+        vehicleExists = true;
+        if (vehicle.owner_id) {
+          const { data: profile } = await supabase
+            .from('profiles')
+            .select('email')
+            .eq('id', vehicle.owner_id)
+            .single();
+          ownerEmail = profile?.email ?? null;
+        }
       }
     }
 
-    // Fallback for demo plate
-    if (!ownerEmail && formattedRego === 'RAH190') {
-      ownerEmail = 'torquedapp.nz@gmail.com';
+    if (!vehicleExists) {
+      return res.status(404).json({ error: 'Plate not found in our registry' });
     }
 
+    // Vehicle exists but no registered owner — skip OTP, load directly
     if (!ownerEmail) {
-      return res.status(404).json({ error: 'Plate not found in registry' });
+      return res.json({ requiresOtp: false });
     }
 
     // Generate 6-digit OTP and store for 10 minutes
@@ -205,11 +210,27 @@ app.post('/api/otp/send', async (req, res) => {
       console.log(`[OTP] ${formattedRego} → ${code} (SMTP not configured, not sent)`);
     }
 
-    res.json({ success: true, maskedEmail: maskEmail(ownerEmail) });
+    res.json({ requiresOtp: true, maskedEmail: maskEmail(ownerEmail!) });
   } catch (err) {
     console.error('[OTP send]', err);
     res.status(500).json({ error: 'Failed to send OTP' });
   }
+});
+
+// GET /api/vehicles/:rego — returns vehicle + specs (called after OTP or when no owner)
+app.get('/api/vehicles/:rego', async (req, res) => {
+  const formattedRego = req.params.rego.toUpperCase().trim();
+  const supabase = getSupabaseAdmin();
+  if (!supabase) return res.status(500).json({ error: 'Database not configured' });
+
+  const { data, error } = await supabase
+    .from('vehicles')
+    .select('*, vehicle_specs(*)')
+    .eq('rego', formattedRego)
+    .single();
+
+  if (error || !data) return res.status(404).json({ error: 'Vehicle not found' });
+  res.json(data);
 });
 
 // POST /api/otp/verify — validates code and clears it from store

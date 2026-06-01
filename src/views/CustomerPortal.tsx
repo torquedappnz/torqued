@@ -702,94 +702,39 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
       return;
     }
 
-    setIsRAH190(formattedRego === 'RAH190');
-    setUserName('Sri');
-
-    const vehicleData: Vehicle = formattedRego === 'RAH190' ? {
-      id: 'RAH190',
-      rego: 'RAH190',
-      make: 'Volkswagen',
-      model: 'Golf GTE',
-      year: 2017,
-      mileage: 105400,
-      variant: 'GTE Plug-In Hybrid',
-      thumbnail: 'https://images.unsplash.com/photo-1541899481282-d53bffe3c35d?auto=format&fit=crop&q=80&w=400'
-    } : {
-      id: formattedRego,
-      rego: formattedRego,
-      make: 'Toyota',
-      model: 'Camry',
-      year: 2018,
-      mileage: 89000,
-      variant: 'Hybrid Petrol Sedan',
-      thumbnail: 'https://images.unsplash.com/photo-1541899481282-d53bffe3c35d?auto=format&fit=crop&q=80&w=400'
-    };
-
-    setVehicle(vehicleData);
-    setMileage(vehicleData.mileage.toString());
-
-    if (formattedRego === 'RAH190') {
-      setManualHistory([
-        { 
-          date: 'October 14th 2025', 
-          service: 'New 12v Battery', 
-          provider: 'Advantage Tyres City Centre', 
-          mileage: '103,000',
-          notes: 'External Record'
-        },
-        { 
-          date: 'Sept 20th 2025', 
-          service: 'Wheel Alignment, Balance and Rotation', 
-          provider: 'Advantage Tyres City Centre', 
-          mileage: '101,000',
-          notes: 'External Record'
-        },
-        { 
-          date: 'July 9th 2025', 
-          service: 'DSG Gearbox Service - Oil Change', 
-          provider: 'Precision Mechanical', 
-          mileage: '98,100',
-          notes: 'External record'
-        },
-        { 
-          date: 'July 7th 2025', 
-          service: 'Oil Change', 
-          provider: 'Anthony Motors', 
-          mileage: '98,000',
-          notes: 'External record'
-        },
-        { 
-          date: 'Jan 21 2025', 
-          service: 'Cambelt, Water Pump, Coolant Flush and Oil Change', 
-          provider: 'Precision Mechanical', 
-          mileage: '103,000',
-          price: '$2289.00',
-          notes: 'Booked through Torqued - Finance Now' 
-        }
-      ]);
-    } else {
-      setManualHistory([
-        { 
-          date: 'March 10th 2026', 
-          service: 'Standard Service & Oil Change', 
-          provider: 'Precision Mechanical', 
-          mileage: '85,400',
-          notes: 'Regular check'
-        }
-      ]);
-    }
-
-    if (user) {
-      try {
-        await registerVehicle(vehicleData);
-      } catch (err) {
-        console.error('Failed to register verified vehicle to Firestore profile:', err);
-      }
-    }
-
+    await loadVehicleByRego(formattedRego);
     setShowOTPModal(false);
     setOtpCode('');
     setOtpVerificationError('');
+  };
+
+  const loadVehicleByRego = async (rego: string) => {
+    try {
+      const res = await fetch(`/api/vehicles/${rego}`);
+      if (!res.ok) throw new Error('Vehicle not found');
+      const data = await res.json();
+      const v: Vehicle = {
+        id: data.rego,
+        rego: data.rego,
+        make: data.make,
+        model: data.model,
+        year: data.year,
+        variant: data.variant ?? undefined,
+        mileage: data.mileage ?? 0,
+        thumbnail: data.thumbnail ?? undefined,
+      };
+      setVehicle(v);
+      setMileage((data.mileage ?? 0).toString());
+      setIsRAH190(rego === 'RAH190');
+      setUserName(userProfile?.name || null);
+      if (user) {
+        try { await registerVehicle(v); } catch {}
+      }
+    } catch {
+      // Fallback if API unavailable
+      setVehicle({ id: rego, rego, make: 'Unknown', model: 'Vehicle', year: 2020, mileage: 0 });
+      setMileage('0');
+    }
   };
 
   // Simulate/Perform Rego Lookup
@@ -801,21 +746,31 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
     try {
       const res = await checkPlateExists(formattedRego);
 
-      if (formattedRego === 'RAH190' || res.exists) {
-        // Send real OTP — server resolves owner email and delivers the code
-        try {
-          const otpRes = await fetch('/api/otp/send', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ rego: formattedRego }),
-          });
-          const otpData = await otpRes.json();
-          setOtpSentEmail(otpData.maskedEmail || 'your registered email');
-        } catch {
-          setOtpSentEmail('your registered email');
-        }
+      // Always try the server — it checks Supabase for the plate
+      const otpRes = await fetch('/api/otp/send', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ rego: formattedRego }),
+      });
+
+      if (otpRes.status === 404) {
+        setPlateMatchError('Plate not found in our registry. Please check the number and try again.');
+        setIsSearchingRego(false);
+        return;
+      }
+
+      const otpData = await otpRes.json();
+
+      if (otpData.requiresOtp) {
+        // Registered owner — show OTP modal
+        setOtpSentEmail(otpData.maskedEmail || 'your registered email');
         setIsSearchingRego(false);
         setShowOTPModal(true);
+        return;
+      } else {
+        // No registered owner — load vehicle directly from DB
+        await loadVehicleByRego(formattedRego);
+        setIsSearchingRego(false);
         return;
       }
 
@@ -1039,8 +994,13 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
         
         const session = await response.json();
         if (session && session.url) {
+          if (!session.isMock) {
+            // Real Stripe — redirect straight to hosted checkout, no modal needed
+            window.location.href = session.url;
+            return;
+          }
           setStripeCheckoutUrl(session.url);
-          setStripeIsMock(!!session.isMock);
+          setStripeIsMock(true);
         } else {
           throw new Error(session?.error || 'Unable to retrieve Stripe Checkout Session');
         }
