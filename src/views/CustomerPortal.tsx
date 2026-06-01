@@ -341,6 +341,8 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
   const [entryMileage, setEntryMileage] = useState('');
   const [entryPrice, setEntryPrice] = useState('');
   const [entryNotes, setEntryNotes] = useState('');
+  const [isParsingReceipt, setIsParsingReceipt] = useState(false);
+  const [receiptError, setReceiptError] = useState<string | null>(null);
   const [isDiagnosticMode, setIsDiagnosticMode] = useState(false);
   const [isDiagnosticSimulatedComplete, setIsDiagnosticSimulatedComplete] = useState(false);
   const [isRepairFromDiagnostic, setIsRepairFromDiagnostic] = useState(false);
@@ -756,6 +758,42 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
   };
 
   // Simulate/Perform Rego Lookup
+  const handleReceiptUpload = async (file: File | null) => {
+    if (!file) return;
+    setReceiptError(null);
+    setIsParsingReceipt(true);
+    try {
+      // Read file as base64 (strip the data: prefix)
+      const base64: string = await new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve((reader.result as string).split(',')[1] || '');
+        reader.onerror = reject;
+        reader.readAsDataURL(file);
+      });
+
+      const res = await fetch('/api/ai/parse-receipt', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ fileData: base64, mimeType: file.type }),
+      });
+      const data = await res.json();
+      if (!res.ok) { setReceiptError(data.error || 'Could not scan receipt.'); return; }
+
+      // Pre-fill the entry form with the extracted details
+      if (data.date) setEntryDate(data.date);
+      if (data.service) setEntryService(data.service);
+      if (data.provider) setEntryProvider(data.provider);
+      if (data.mileage) setEntryMileage(String(data.mileage));
+      if (data.price) setEntryPrice(data.price);
+      setEntryNotes('Scanned from receipt');
+      setShowHistoryEntry(true);
+    } catch {
+      setReceiptError('Could not read that file. Try a clear photo or PDF.');
+    } finally {
+      setIsParsingReceipt(false);
+    }
+  };
+
   const handleRegoLookup = async () => {
     if (!rego) return;
     const formattedRego = rego.toUpperCase().trim();
@@ -1062,16 +1100,36 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                   <div className="space-y-3">
                     <div className="flex justify-between items-center">
                       <h4 className="text-xs font-bold uppercase tracking-widest text-muted/40">Verified History</h4>
-                      <Button 
-                        variant="ghost" 
-                        size="sm" 
-                        className="h-7 text-[10px] text-foreground hover:bg-card"
-                        onClick={() => setShowHistoryEntry(!showHistoryEntry)}
-                      >
-                        <Plus size={12} className="mr-1" /> Add Record
-                      </Button>
+                      <div className="flex items-center gap-2">
+                        <label className={cn(
+                          "h-7 px-2.5 inline-flex items-center text-[10px] font-bold rounded-lg cursor-pointer transition-all",
+                          isParsingReceipt ? "bg-card text-muted cursor-wait" : "bg-torqued-red/10 text-torqued-red hover:bg-torqued-red/20"
+                        )}>
+                          {isParsingReceipt ? (
+                            <><div className="w-3 h-3 border-2 border-torqued-red/30 border-t-torqued-red rounded-full animate-spin mr-1.5" /> Scanning…</>
+                          ) : (
+                            <><Mail size={12} className="mr-1" /> Scan Receipt</>
+                          )}
+                          <input
+                            type="file"
+                            accept="image/*,application/pdf"
+                            className="hidden"
+                            disabled={isParsingReceipt}
+                            onChange={(e) => { handleReceiptUpload(e.target.files?.[0] || null); e.target.value = ''; }}
+                          />
+                        </label>
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          className="h-7 text-[10px] text-foreground hover:bg-card"
+                          onClick={() => setShowHistoryEntry(!showHistoryEntry)}
+                        >
+                          <Plus size={12} className="mr-1" /> Add Record
+                        </Button>
+                      </div>
                     </div>
-                    
+                    {receiptError && <p className="text-[10px] text-torqued-red font-bold">{receiptError}</p>}
+
                     <div className="space-y-2">
                       {manualHistory.map((item, i) => (
                         <div key={i} className="flex justify-between items-center p-3 bg-card border border-border rounded-xl group hover:border-torqued-red/30 transition-all">
@@ -1301,26 +1359,35 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                               ))}
                               
                               <div className="flex gap-2">
-                                <Button 
-                                  variant="outline" 
-                                  fullWidth 
-                                  size="sm" 
+                                <Button
+                                  variant="outline"
+                                  fullWidth
+                                  size="sm"
                                   className="text-[10px] h-8 border-white/20"
                                   onClick={() => setShowHistoryEntry(!showHistoryEntry)}
                                 >
                                   <Plus size={12} className="mr-1" /> Add Manual Entry
                                 </Button>
-                                <Button 
-                                  variant="outline" 
-                                  fullWidth 
-                                  size="sm" 
-                                  className="text-[10px] h-8 border-dashed border-white/20"
-                                  onClick={() => alert('Processing record... (Demo Only)')}
-                                >
-                                  <Plus size={12} className="mr-1" /> Mock Record Upload
-                                </Button>
+                                <label className={cn(
+                                  "flex-1 text-[10px] h-8 inline-flex items-center justify-center rounded-md font-bold cursor-pointer transition-all border",
+                                  isParsingReceipt ? "border-white/10 text-muted cursor-wait" : "border-torqued-red/40 text-torqued-red hover:bg-torqued-red/10"
+                                )}>
+                                  {isParsingReceipt ? (
+                                    <><div className="w-3 h-3 border-2 border-torqued-red/30 border-t-torqued-red rounded-full animate-spin mr-1.5" /> Scanning…</>
+                                  ) : (
+                                    <><Mail size={12} className="mr-1" /> Scan Receipt (AI)</>
+                                  )}
+                                  <input
+                                    type="file"
+                                    accept="image/*,application/pdf"
+                                    className="hidden"
+                                    disabled={isParsingReceipt}
+                                    onChange={(e) => { handleReceiptUpload(e.target.files?.[0] || null); e.target.value = ''; }}
+                                  />
+                                </label>
                               </div>
-                              
+                              {receiptError && <p className="text-[10px] text-torqued-red font-bold">{receiptError}</p>}
+
                               {showHistoryEntry && (
                                 <div className="p-3 bg-white/5 rounded-xl space-y-2 border border-white/10">
                                   <Input 

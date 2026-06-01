@@ -14,8 +14,10 @@ const PORT = 3000;
 // Public URL of the Torqued logo for email templates
 const LOGO_URL = 'https://torquednz.vercel.app/torqued-logo.png';
 
-// Capture raw body for Stripe webhook signature verification
+// Capture raw body for Stripe webhook signature verification.
+// 10mb limit so receipt photo/PDF uploads (base64) aren't rejected.
 app.use(express.json({
+  limit: '10mb',
   verify: (req, _res, buf) => {
     (req as any).rawBody = buf;
   },
@@ -441,6 +443,57 @@ Be direct and practical. No disclaimers.`;
   } catch (err) {
     console.error('[AI fault-code]', err);
     res.status(500).json({ error: 'AI translation failed' });
+  }
+});
+
+// POST /api/ai/parse-receipt — extracts service history from a receipt image/PDF via Gemini
+app.post('/api/ai/parse-receipt', async (req, res) => {
+  try {
+    const { fileData, mimeType } = req.body;
+    if (!fileData || !mimeType) return res.status(400).json({ error: 'fileData and mimeType are required' });
+
+    const apiKey = process.env.GEMINI_API_KEY;
+    if (!apiKey) return res.status(503).json({ error: 'AI receipt scanning is not configured yet.' });
+
+    const { GoogleGenAI } = await import('@google/genai');
+    const ai = new GoogleGenAI({ apiKey });
+
+    const prompt = `You are an automotive service receipt parser for New Zealand workshops.
+Read this service receipt/invoice and extract:
+- service: a concise summary of the work performed (e.g. "Oil & filter change, brake pads front")
+- date: the service date as written (e.g. "14 Oct 2025")
+- mileage: the odometer/mileage in km if shown (digits only, no units)
+- provider: the workshop/mechanic business name
+- price: the total amount including currency symbol if shown
+Return ONLY valid JSON with exactly these keys: service, date, mileage, provider, price.
+Use an empty string for anything you cannot find. Do not guess.`;
+
+    const response = await ai.models.generateContent({
+      model: 'gemini-2.0-flash',
+      contents: [{ parts: [
+        { inlineData: { mimeType, data: fileData } },
+        { text: prompt },
+      ] }],
+      config: { responseMimeType: 'application/json' },
+    });
+
+    let parsed: any = {};
+    try {
+      parsed = JSON.parse((response.text || '{}').trim());
+    } catch {
+      return res.status(422).json({ error: 'Could not read the receipt. Try a clearer photo.' });
+    }
+
+    res.json({
+      service: parsed.service || '',
+      date: parsed.date || '',
+      mileage: parsed.mileage || '',
+      provider: parsed.provider || '',
+      price: parsed.price || '',
+    });
+  } catch (err) {
+    console.error('[AI parse-receipt]', err);
+    res.status(500).json({ error: 'Failed to scan receipt' });
   }
 });
 

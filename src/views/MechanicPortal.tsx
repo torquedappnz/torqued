@@ -1965,26 +1965,31 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                      size="lg" 
                      className="bg-torqued-red hover:bg-red-700 text-white font-black uppercase text-xs tracking-widest h-14 flex items-center justify-center gap-2"
                      onClick={async () => {
+                       if (!user) return;
                        setIsSubscriptionLoading(true);
                        try {
                          const response = await fetch('/api/stripe/create-subscription', {
                            method: 'POST',
                            headers: { 'Content-Type': 'application/json' },
                            body: JSON.stringify({
-                             email: user?.email || 'mechanic@torqued.nz',
-                             mechanicId: user?.uid || 'm1'
+                             email: user.email,
+                             mechanicId: user.id,
                            })
                          });
                          const session = await response.json();
-                         if (session.url) {
+                         if (session.url && !session.isMock) {
+                           // Redirect straight to Stripe's hosted subscription checkout
+                           window.location.href = session.url;
+                         } else if (session.url) {
                            setStripeSubscriptionUrl(session.url);
                            setStripeFormStep('input');
                            setShowStripeSubscriptionModal(true);
                          } else {
-                           alert('Stripe configuration or initialization failed.');
+                           alert(session.error || 'Could not start checkout. Please try again.');
                          }
                        } catch (err) {
                          console.error('Subscription session creation failed:', err);
+                         alert('Could not connect to the payment gateway. Please try again.');
                        } finally {
                          setIsSubscriptionLoading(false);
                        }
