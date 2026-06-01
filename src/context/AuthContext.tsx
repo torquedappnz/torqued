@@ -22,7 +22,7 @@ interface AuthContextType {
   isAuthReady: boolean;
   // Mechanic auth (email + password)
   loginMechanic: (email: string, password: string) => Promise<void>;
-  signUpMechanic: (email: string, password: string, name: string) => Promise<string | null>;
+  signUpMechanic: (email: string, password: string, name: string) => Promise<{ error?: string; needsConfirmation?: boolean }>;
   // Shared
   logout: () => Promise<void>;
   registerVehicle: (vehicle: Vehicle) => Promise<void>;
@@ -134,20 +134,17 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     if (error) throw new Error(error.message);
   };
 
-  const signUpMechanic = async (email: string, password: string, name: string): Promise<string | null> => {
-    // Create a pre-confirmed account server-side (no confirmation email needed)
+  // Returns { error } on failure, or { needsConfirmation: true } on success —
+  // the mechanic must click the emailed confirmation link before they can log in.
+  const signUpMechanic = async (email: string, password: string, name: string): Promise<{ error?: string; needsConfirmation?: boolean }> => {
     const res = await fetch('/api/mechanic/register', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ email, password, name }),
     });
     const data = await res.json();
-    if (!res.ok) return data.error || 'Sign up failed';
-
-    // Log them in immediately
-    const { error } = await supabase.auth.signInWithPassword({ email, password });
-    if (error) return error.message;
-    return null;
+    if (!res.ok) return { error: data.error || 'Sign up failed' };
+    return { needsConfirmation: true };
   };
 
   // ── Shared ─────────────────────────────────────────────────

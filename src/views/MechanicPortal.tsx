@@ -188,6 +188,7 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
   const [mechAuthMode, setMechAuthMode] = useState<'login' | 'signup'>('login');
   const [mechAuthError, setMechAuthError] = useState<string | null>(null);
   const [mechAuthLoading, setMechAuthLoading] = useState(false);
+  const [mechSignupSent, setMechSignupSent] = useState(false);
   
   // Listen for returning Stripe subscription sessions
   useEffect(() => {
@@ -1824,7 +1825,25 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
               </p>
             </div>
 
-            {!user ? (
+            {!user && mechSignupSent ? (
+              <div className="space-y-5 text-center">
+                <div className="w-16 h-16 mx-auto rounded-2xl bg-emerald-500/10 border border-emerald-500/20 flex items-center justify-center text-emerald-400 text-3xl">✉️</div>
+                <div className="space-y-2">
+                  <h3 className="text-xl font-black text-white">Check your email</h3>
+                  <p className="text-sm text-white/60">
+                    We've sent a confirmation link to <span className="text-white font-bold">{mechEmail}</span>. Click it to activate your workshop account, then log in.
+                  </p>
+                </div>
+                <Button
+                  fullWidth
+                  variant="outline"
+                  className="border-white/20 text-white"
+                  onClick={() => { setMechSignupSent(false); setMechAuthMode('login'); setMechPassword(''); }}
+                >
+                  Back to Login
+                </Button>
+              </div>
+            ) : !user ? (
               <div className="space-y-4 text-left">
                 <div className="flex rounded-xl overflow-hidden border border-white/10">
                   <button
@@ -1879,9 +1898,9 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                       if (mechAuthMode === 'login') {
                         await loginMechanic(mechEmail, mechPassword);
                       } else {
-                        const err = await signUpMechanic(mechEmail, mechPassword, mechName);
-                        if (err) setMechAuthError(err);
-                        // On success the user is logged in automatically and the view re-renders
+                        const result = await signUpMechanic(mechEmail, mechPassword, mechName);
+                        if (result.error) setMechAuthError(result.error);
+                        else if (result.needsConfirmation) setMechSignupSent(true);
                       }
                     } catch (e: any) {
                       setMechAuthError(e.message || 'Authentication failed');

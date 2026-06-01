@@ -131,6 +131,45 @@ function generateOtpEmailHtml(rego: string, code: string): string {
 </html>`;
 }
 
+function generateMechanicConfirmEmailHtml(name: string, link: string): string {
+  return `<!DOCTYPE html>
+<html>
+<head><meta charset="utf-8"><title>Confirm your Torqued account</title></head>
+<body style="margin:0;padding:0;background:#0b0201;font-family:-apple-system,Arial,sans-serif;">
+  <table border="0" cellpadding="0" cellspacing="0" width="100%" style="background:#0b0201;padding:32px 8px;">
+    <tr><td align="center">
+      <table border="0" cellpadding="0" cellspacing="0" width="100%" style="max-width:480px;background:#150402;border-radius:20px;border:1px solid rgba(255,24,0,0.15);overflow:hidden;">
+        <tr>
+          <td style="background:#050100;padding:24px 32px;border-bottom:3px solid #FF1800;text-align:center;">
+            <img src="${LOGO_URL}" alt="Torqued" width="200" height="67" style="display:inline-block;width:200px;height:67px;border:0;" />
+          </td>
+        </tr>
+        <tr>
+          <td style="padding:40px 32px;text-align:center;">
+            <span style="display:inline-block;background:rgba(255,24,0,0.12);color:#FF1800;font-size:9.5px;font-weight:900;letter-spacing:2px;text-transform:uppercase;padding:6px 14px;border-radius:6px;">PARTNER HUB</span>
+            <h1 style="margin:20px 0 8px;font-size:20px;font-weight:900;color:#fff;text-transform:uppercase;">Confirm your account</h1>
+            <p style="margin:0 0 28px;font-size:13px;color:rgba(255,255,255,0.55);line-height:1.5;">
+              G'day ${name}, welcome to Torqued. Confirm your email to activate your workshop account and start receiving jobs.
+            </p>
+            <a href="${link}" style="display:inline-block;background:#FF1800;color:#fff;font-size:13px;font-weight:900;text-transform:uppercase;letter-spacing:1.5px;text-decoration:none;padding:15px 36px;border-radius:12px;">Confirm Email &amp; Activate</a>
+            <p style="margin:28px 0 0;font-size:11px;color:rgba(255,255,255,0.35);line-height:1.5;">
+              Or paste this link into your browser:<br/>
+              <a href="${link}" style="color:rgba(255,255,255,0.5);word-break:break-all;">${link}</a>
+            </p>
+          </td>
+        </tr>
+        <tr>
+          <td style="background:#050100;padding:18px 32px;text-align:center;">
+            <p style="margin:0;font-size:10px;color:rgba(255,255,255,0.3);">Didn't sign up? You can safely ignore this email. Questions? torquedapp.nz@gmail.com</p>
+          </td>
+        </tr>
+      </table>
+    </td></tr>
+  </table>
+</body>
+</html>`;
+}
+
 // POST /api/customer/check-plate — checks plate, triggers OTP for returning customers
 app.post('/api/customer/check-plate', async (req, res) => {
   try {
@@ -279,31 +318,53 @@ app.post('/api/mechanic/register', async (req, res) => {
     const supabase = getSupabaseAdmin();
     if (!supabase) return res.status(500).json({ error: 'Database not configured' });
 
-    // Create the auth user already email-confirmed so they can log in immediately
-    const { data: authData, error: authError } = await supabase.auth.admin.createUser({
+    // Create the user + a signup confirmation link (user stays unconfirmed until they click it)
+    const origin = getOrigin(req);
+    const { data: linkData, error: linkError } = await supabase.auth.admin.generateLink({
+      type: 'signup',
       email,
       password,
-      email_confirm: true,
-      user_metadata: { name, role: 'mechanic' },
+      options: {
+        data: { name, role: 'mechanic' },
+        redirectTo: `${origin}/mechanic`,
+      },
     });
 
-    if (authError) {
-      if (authError.message.toLowerCase().includes('already')) {
+    if (linkError) {
+      if (linkError.message.toLowerCase().includes('already') || linkError.message.toLowerCase().includes('registered')) {
         return res.status(409).json({ error: 'An account with this email already exists. Please log in instead.' });
       }
-      return res.status(400).json({ error: authError.message });
+      return res.status(400).json({ error: linkError.message });
     }
 
-    // Create the mechanic profile row
-    await supabase.from('profiles').upsert({
-      id: authData.user.id,
-      email,
-      name,
-      role: 'mechanic',
-      subscription_active: false,
-    }, { onConflict: 'id' });
+    const actionLink = linkData.properties?.action_link;
+    if (!actionLink) return res.status(500).json({ error: 'Could not generate confirmation link' });
 
-    res.json({ success: true });
+    // Create the mechanic profile row (exists but unconfirmed until link is clicked)
+    if (linkData.user?.id) {
+      await supabase.from('profiles').upsert({
+        id: linkData.user.id,
+        email,
+        name,
+        role: 'mechanic',
+        subscription_active: false,
+      }, { onConflict: 'id' });
+    }
+
+    // Send the confirmation link through our own (branded) email
+    const transporter = getMailTransporter();
+    if (transporter) {
+      await transporter.sendMail({
+        from: process.env.SMTP_FROM || '"Torqued" <torquedapp.nz@gmail.com>',
+        to: email,
+        subject: 'Confirm your Torqued workshop account',
+        html: generateMechanicConfirmEmailHtml(name, actionLink),
+      });
+    } else {
+      console.log(`[Mechanic confirm link] ${email} → ${actionLink}`);
+    }
+
+    res.json({ success: true, needsConfirmation: true });
   } catch (err) {
     console.error('[mechanic/register]', err);
     res.status(500).json({ error: 'Registration failed' });
