@@ -9,11 +9,11 @@ if (!supabaseUrl || !supabaseAnonKey) {
 
 export const supabase = createClient(supabaseUrl, supabaseAnonKey, {
   auth: {
-    // Implicit flow: session tokens arrive in the URL hash. Required for
-    // admin-generated confirmation / magic links (PKCE would need a client-side
-    // code verifier that doesn't exist for server-generated links).
-    flowType: 'implicit',
-    detectSessionInUrl: true,
+    // Do NOT auto-parse auth tokens from the URL. Email confirmation / magic
+    // links are verified server-side by Supabase before redirecting here, so the
+    // client never needs to process the URL hash. Letting it try caused the
+    // mechanic-onboarding page to freeze on arrival from a link.
+    detectSessionInUrl: false,
     persistSession: true,
     autoRefreshToken: true,
   },
