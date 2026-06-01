@@ -37,29 +37,27 @@ function getStripe(): Stripe | null {
 }
 
 // Lazy-initialized Email Transporter
-// Cached transporter — reused across warm serverless invocations with a
-// pooled, keep-alive connection so we skip the TLS+auth handshake each time.
-let cachedTransporter: nodemailer.Transporter | null = null;
+// Fresh transporter per request. We deliberately do NOT cache across
+// invocations: serverless functions freeze between requests, which severs any
+// kept-alive SMTP connection and makes the next send fail. `pool` still lets the
+// booking flow reuse one connection for its several sends within a single request.
 function getMailTransporter() {
-  if (cachedTransporter) return cachedTransporter;
-
   const host = process.env.SMTP_HOST;
   const port = process.env.SMTP_PORT ? parseInt(process.env.SMTP_PORT) : 465;
   const user = process.env.SMTP_USER;
   const pass = process.env.SMTP_PASS;
 
   if (host && user && pass) {
-    cachedTransporter = nodemailer.createTransport({
+    return nodemailer.createTransport({
       host,
       port,
       secure: port === 465,
       auth: { user, pass },
       pool: true,
       maxConnections: 3,
-      connectionTimeout: 8000,
-      greetingTimeout: 8000,
+      connectionTimeout: 10000,
+      greetingTimeout: 10000,
     });
-    return cachedTransporter;
   }
   return null;
 }
