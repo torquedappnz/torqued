@@ -16,7 +16,7 @@ import { supabase } from '../lib/supabase';
 
 export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) => {
   const { theme, setTheme } = useTheme();
-  const { user, userProfile, loginWithGoogle, logout, checkPlateExists, registerVehicle, updateProfile } = useAuth();
+  const { user, userProfile, logout, checkPlateExists, registerVehicle, updateProfile } = useAuth();
 
   const generateBookingPDF = (job: Job) => {
     const doc = new jsPDF({
@@ -357,6 +357,15 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
   const [showVerificationRequired, setShowVerificationRequired] = useState(false);
   const [verifiedEmailTarget, setVerifiedEmailTarget] = useState<string | null>(null);
   const [plateMatchError, setPlateMatchError] = useState<string | null>(null);
+
+  // New customer registration
+  const [showNewCustomerForm, setShowNewCustomerForm] = useState(false);
+  const [newCustomerName, setNewCustomerName] = useState('');
+  const [newCustomerEmail, setNewCustomerEmail] = useState('');
+  const [newCustomerPhone, setNewCustomerPhone] = useState('');
+  const [newCustomerError, setNewCustomerError] = useState<string | null>(null);
+  const [newCustomerLoading, setNewCustomerLoading] = useState(false);
+  const [returningCustomerName, setReturningCustomerName] = useState<string | null>(null);
 
   // OTP Verification States
   const [showOTPModal, setShowOTPModal] = useState(false);
@@ -743,58 +752,34 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
     const formattedRego = rego.toUpperCase().trim();
     setIsSearchingRego(true);
     setPlateMatchError(null);
-    try {
-      const res = await checkPlateExists(formattedRego);
+    setShowNewCustomerForm(false);
+    setReturningCustomerName(null);
 
-      // Always try the server — it checks Supabase for the plate
-      const otpRes = await fetch('/api/otp/send', {
+    try {
+      const res = await fetch('/api/customer/check-plate', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ rego: formattedRego }),
       });
 
-      if (otpRes.status === 404) {
+      if (res.status === 404) {
         setPlateMatchError('Plate not found in our registry. Please check the number and try again.');
-        setIsSearchingRego(false);
         return;
       }
 
-      const otpData = await otpRes.json();
+      const data = await res.json();
 
-      if (otpData.requiresOtp) {
-        // Registered owner — show OTP modal
-        setOtpSentEmail(otpData.maskedEmail || 'your registered email');
-        setIsSearchingRego(false);
+      if (data.isNew) {
+        // New customer — show registration form
+        setShowNewCustomerForm(true);
+      } else {
+        // Returning customer — show OTP modal
+        setReturningCustomerName(data.customerName);
+        setOtpSentEmail(data.maskedEmail || 'your registered email');
         setShowOTPModal(true);
-        return;
-      } else {
-        // No registered owner — load vehicle directly from DB
-        await loadVehicleByRego(formattedRego);
-        setIsSearchingRego(false);
-        return;
-      }
-
-      setIsRAH190(false);
-      setUserName(userProfile?.name || null);
-      const foundVehicle = MOCK_VEHICLES[formattedRego];
-      if (foundVehicle) {
-        setVehicle(foundVehicle);
-        setMileage(foundVehicle.mileage.toString());
-      } else {
-        setVehicle({
-          id: formattedRego,
-          make: 'Toyota',
-          model: 'Corolla',
-          year: 2015,
-          mileage: 120000,
-          thumbnail: 'https://images.unsplash.com/photo-1541899481282-d53bffe3c35d?auto=format&fit=crop&q=80&w=400',
-          variant: 'Standard Hatchback'
-        });
-        setMileage('120000');
       }
     } catch (err) {
-      console.error(err);
-      setPlateMatchError('Failed to lookup registration plate details.');
+      setPlateMatchError('Could not connect. Please try again.');
     } finally {
       setIsSearchingRego(false);
     }
@@ -2946,21 +2931,16 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
               </div>
 
               <div className="space-y-3">
-                <Button 
-                  fullWidth 
-                  size="lg" 
+                <Button
+                  fullWidth
+                  size="lg"
                   className="bg-torqued-red text-white uppercase tracking-widest font-black text-[10px] h-12"
-                  onClick={async () => {
-                    try {
-                      await loginWithGoogle('customer');
-                      setShowVerificationRequired(false);
-                      setTimeout(() => handleRegoLookup(), 800);
-                    } catch (err) {
-                      console.error('Google Sign in failed during plate verification:', err);
-                    }
+                  onClick={() => {
+                    setShowVerificationRequired(false);
+                    setTimeout(() => handleRegoLookup(), 100);
                   }}
                 >
-                  Verify with Google Sign In
+                  Try Again
                 </Button>
                 <Button 
                   variant="ghost" 
@@ -2970,6 +2950,94 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                 >
                   Cancel
                 </Button>
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
+      {/* New Customer Registration Modal */}
+      <AnimatePresence>
+        {showNewCustomerForm && (
+          <div className="fixed inset-0 z-[110] flex items-center justify-center p-4 bg-black/70 backdrop-blur-sm">
+            <motion.div
+              initial={{ opacity: 0, scale: 0.95, y: 20 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.95, y: 20 }}
+              className="w-full max-w-md bg-card border border-border rounded-3xl p-8 space-y-6 shadow-2xl"
+            >
+              <div className="space-y-1">
+                <h3 className="text-2xl font-black tracking-tight">Welcome to Torqued</h3>
+                <p className="text-sm text-muted">We found your plate in our system. Enter your details to create your account.</p>
+              </div>
+
+              <div className="space-y-3">
+                <input
+                  type="text"
+                  placeholder="First name"
+                  value={newCustomerName}
+                  onChange={e => setNewCustomerName(e.target.value)}
+                  className="w-full bg-background border border-border rounded-xl px-4 h-12 text-sm text-foreground placeholder:text-muted focus:outline-none focus:border-torqued-red"
+                />
+                <input
+                  type="email"
+                  placeholder="Email address"
+                  value={newCustomerEmail}
+                  onChange={e => setNewCustomerEmail(e.target.value)}
+                  className="w-full bg-background border border-border rounded-xl px-4 h-12 text-sm text-foreground placeholder:text-muted focus:outline-none focus:border-torqued-red"
+                />
+                <input
+                  type="tel"
+                  placeholder="Phone number (e.g. 021 123 4567)"
+                  value={newCustomerPhone}
+                  onChange={e => setNewCustomerPhone(e.target.value)}
+                  className="w-full bg-background border border-border rounded-xl px-4 h-12 text-sm text-foreground placeholder:text-muted focus:outline-none focus:border-torqued-red"
+                />
+              </div>
+
+              {newCustomerError && (
+                <p className="text-xs text-torqued-red font-bold">{newCustomerError}</p>
+              )}
+
+              <div className="flex gap-3">
+                <Button
+                  fullWidth
+                  disabled={newCustomerLoading}
+                  className="bg-torqued-red text-white"
+                  onClick={async () => {
+                    if (!newCustomerName || !newCustomerEmail) {
+                      setNewCustomerError('Name and email are required.');
+                      return;
+                    }
+                    setNewCustomerLoading(true);
+                    setNewCustomerError(null);
+                    try {
+                      const res = await fetch('/api/customer/register', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                          rego: rego.toUpperCase().trim(),
+                          name: newCustomerName,
+                          email: newCustomerEmail,
+                          phone: newCustomerPhone,
+                        }),
+                      });
+                      const data = await res.json();
+                      if (!res.ok) { setNewCustomerError(data.error || 'Registration failed'); return; }
+                      setUserName(newCustomerName);
+                      setOtpSentEmail(data.maskedEmail || newCustomerEmail);
+                      setShowNewCustomerForm(false);
+                      setShowOTPModal(true);
+                    } catch {
+                      setNewCustomerError('Could not connect. Please try again.');
+                    } finally {
+                      setNewCustomerLoading(false);
+                    }
+                  }}
+                >
+                  {newCustomerLoading ? 'Creating account...' : 'Get Started →'}
+                </Button>
+                <Button variant="ghost" onClick={() => setShowNewCustomerForm(false)}>Cancel</Button>
               </div>
             </motion.div>
           </div>
@@ -2998,15 +3066,17 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
               </div>
 
               <div className="space-y-2">
-                <h3 className="text-2xl font-black tracking-tighter leading-tight text-foreground">Verify Your Ownership 🔐</h3>
+                <h3 className="text-2xl font-black tracking-tighter leading-tight text-foreground">
+                  {returningCustomerName ? `Welcome back, ${returningCustomerName} 👋` : 'Check Your Email 🔐'}
+                </h3>
                 <p className="text-xs text-muted leading-relaxed">
-                  We have sent a 6-digit verification code to
+                  We sent a 6-digit verification code to
                 </p>
                 <div className="p-3 bg-muted/40 border border-border rounded-xl">
                   <p className="text-sm font-extrabold text-foreground truncate">{otpSentEmail}</p>
                 </div>
                 <p className="text-[10px] text-muted leading-relaxed">
-                  Please enter the code to unlock the vehicle's historical service records.
+                  Enter the code from your email to continue.
                 </p>
               </div>
 

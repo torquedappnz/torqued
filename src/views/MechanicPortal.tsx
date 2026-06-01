@@ -181,7 +181,13 @@ const RECOMMENDATIONS_RAH190: Recommendation[] = [
 
 export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) => {
   const { theme, setTheme } = useTheme();
-  const { user, userProfile, loginWithGoogle, logout, updateProfile } = useAuth();
+  const { user, userProfile, loginMechanic, signUpMechanic, logout, updateProfile } = useAuth();
+  const [mechEmail, setMechEmail] = useState('');
+  const [mechPassword, setMechPassword] = useState('');
+  const [mechName, setMechName] = useState('');
+  const [mechAuthMode, setMechAuthMode] = useState<'login' | 'signup'>('login');
+  const [mechAuthError, setMechAuthError] = useState<string | null>(null);
+  const [mechAuthLoading, setMechAuthLoading] = useState(false);
   
   // Listen for returning Stripe subscription sessions
   useEffect(() => {
@@ -1790,7 +1796,7 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
               Sign Out
             </Button>
           ) : (
-            <Button size="sm" className="bg-torqued-red" onClick={() => loginWithGoogle('mechanic')}>
+            <Button size="sm" className="bg-torqued-red" onClick={() => setMechAuthMode('login')}>
               Sign In
             </Button>
           )}
@@ -1819,15 +1825,71 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
             </div>
 
             {!user ? (
-              <div className="space-y-4">
-                <p className="text-xs text-white/40">Register or Sign-In with Google authentication to retrieve your workshop profile.</p>
-                <Button 
-                   fullWidth 
-                   size="lg" 
-                   className="bg-torqued-red hover:bg-red-700 text-white font-black uppercase text-xs tracking-widest h-14"
-                   onClick={() => loginWithGoogle('mechanic')}
+              <div className="space-y-4 text-left">
+                <div className="flex rounded-xl overflow-hidden border border-white/10">
+                  <button
+                    onClick={() => { setMechAuthMode('login'); setMechAuthError(null); }}
+                    className={`flex-1 py-2.5 text-xs font-black uppercase tracking-wider transition-all ${mechAuthMode === 'login' ? 'bg-torqued-red text-white' : 'text-white/40 hover:text-white'}`}
+                  >Login</button>
+                  <button
+                    onClick={() => { setMechAuthMode('signup'); setMechAuthError(null); }}
+                    className={`flex-1 py-2.5 text-xs font-black uppercase tracking-wider transition-all ${mechAuthMode === 'signup' ? 'bg-torqued-red text-white' : 'text-white/40 hover:text-white'}`}
+                  >Register</button>
+                </div>
+
+                <div className="space-y-3">
+                  {mechAuthMode === 'signup' && (
+                    <input
+                      type="text"
+                      placeholder="Workshop / Business Name"
+                      value={mechName}
+                      onChange={e => setMechName(e.target.value)}
+                      className="w-full bg-white/5 border border-white/10 rounded-xl px-4 h-12 text-sm text-white placeholder:text-white/30 focus:outline-none focus:border-torqued-red"
+                    />
+                  )}
+                  <input
+                    type="email"
+                    placeholder="Email address"
+                    value={mechEmail}
+                    onChange={e => setMechEmail(e.target.value)}
+                    className="w-full bg-white/5 border border-white/10 rounded-xl px-4 h-12 text-sm text-white placeholder:text-white/30 focus:outline-none focus:border-torqued-red"
+                  />
+                  <input
+                    type="password"
+                    placeholder="Password"
+                    value={mechPassword}
+                    onChange={e => setMechPassword(e.target.value)}
+                    className="w-full bg-white/5 border border-white/10 rounded-xl px-4 h-12 text-sm text-white placeholder:text-white/30 focus:outline-none focus:border-torqued-red"
+                  />
+                </div>
+
+                {mechAuthError && (
+                  <p className="text-xs text-torqued-red font-bold">{mechAuthError}</p>
+                )}
+
+                <Button
+                  fullWidth
+                  size="lg"
+                  disabled={mechAuthLoading}
+                  className="bg-torqued-red hover:bg-red-700 text-white font-black uppercase text-xs tracking-widest h-14"
+                  onClick={async () => {
+                    setMechAuthError(null);
+                    setMechAuthLoading(true);
+                    try {
+                      if (mechAuthMode === 'login') {
+                        await loginMechanic(mechEmail, mechPassword);
+                      } else {
+                        const err = await signUpMechanic(mechEmail, mechPassword, mechName);
+                        if (err) setMechAuthError(err);
+                      }
+                    } catch (e: any) {
+                      setMechAuthError(e.message || 'Authentication failed');
+                    } finally {
+                      setMechAuthLoading(false);
+                    }
+                  }}
                 >
-                  Sign In with Google
+                  {mechAuthLoading ? 'Please wait...' : mechAuthMode === 'login' ? 'Log In' : 'Create Account'}
                 </Button>
               </div>
             ) : (

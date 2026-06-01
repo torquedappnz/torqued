@@ -20,7 +20,10 @@ interface AuthContextType {
   userProfile: UserProfile | null;
   userRole: 'customer' | 'mechanic' | null;
   isAuthReady: boolean;
-  loginWithGoogle: (role: 'customer' | 'mechanic') => Promise<void>;
+  // Mechanic auth (email + password)
+  loginMechanic: (email: string, password: string) => Promise<void>;
+  signUpMechanic: (email: string, password: string, name: string) => Promise<string | null>;
+  // Shared
   logout: () => Promise<void>;
   registerVehicle: (vehicle: Vehicle) => Promise<void>;
   updateProfile: (updates: Partial<UserProfile>) => Promise<void>;
@@ -94,21 +97,19 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       return;
     }
 
-    // First sign-in — create profile
-    const lastSelectedRole = (localStorage.getItem('signup_role') as 'customer' | 'mechanic') || 'customer';
+    // First sign-in — create profile from metadata
+    const role = (supabaseUser.user_metadata?.role as 'customer' | 'mechanic') || 'mechanic';
     const newProfile = {
       id: supabaseUser.id,
       email: supabaseUser.email ?? '',
-      name: supabaseUser.user_metadata?.full_name ?? supabaseUser.user_metadata?.name ?? 'User',
-      role: lastSelectedRole,
-      subscription_active: lastSelectedRole === 'mechanic' ? false : null,
+      name: supabaseUser.user_metadata?.name ?? supabaseUser.user_metadata?.full_name ?? 'User',
+      role,
+      subscription_active: role === 'mechanic' ? false : null,
     };
 
-    const { error } = await supabase.from('profiles').insert(newProfile);
-    if (error) console.error('Failed to create profile:', error.message);
-
+    await supabase.from('profiles').insert(newProfile);
     setUserProfile({ ...fromDbRow({ ...newProfile, phone: null, home_location: null, stripe_subscription_id: null }), vehicles: [] });
-    setUserRole(lastSelectedRole);
+    setUserRole(role);
   };
 
   useEffect(() => {
@@ -127,15 +128,24 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     return () => subscription.unsubscribe();
   }, []);
 
-  const loginWithGoogle = async (role: 'customer' | 'mechanic') => {
-    localStorage.setItem('signup_role', role);
-    const { error } = await supabase.auth.signInWithOAuth({
-      provider: 'google',
-      options: { redirectTo: window.location.origin },
-    });
-    if (error) throw error;
+  // ── Mechanic auth ──────────────────────────────────────────
+  const loginMechanic = async (email: string, password: string) => {
+    const { error } = await supabase.auth.signInWithPassword({ email, password });
+    if (error) throw new Error(error.message);
   };
 
+  const signUpMechanic = async (email: string, password: string, name: string): Promise<string | null> => {
+    const { data, error } = await supabase.auth.signUp({
+      email,
+      password,
+      options: { data: { name, role: 'mechanic' } },
+    });
+    if (error) return error.message;
+    if (!data.user) return 'Sign up failed';
+    return null;
+  };
+
+  // ── Shared ─────────────────────────────────────────────────
   const logout = async () => {
     await supabase.auth.signOut();
   };
@@ -155,7 +165,6 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     }, { onConflict: 'rego' });
 
     if (error) throw new Error(error.message);
-
     setUserProfile(prev => prev ? { ...prev, vehicles: [...(prev.vehicles ?? []), vehicle] } : null);
   };
 
@@ -163,10 +172,8 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     if (!user) return;
     const dbFields = toDbFields(updates);
     if (Object.keys(dbFields).length === 0) return;
-
     const { error } = await supabase.from('profiles').update(dbFields).eq('id', user.id);
     if (error) throw new Error(error.message);
-
     setUserProfile(prev => prev ? { ...prev, ...updates } : null);
   };
 
@@ -180,7 +187,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
     return {
       exists: !!data,
-      ownerEmail: null, // Owner email lookup handled server-side for privacy
+      ownerEmail: null,
       vehicle: data ?? undefined,
     };
   };
@@ -191,7 +198,8 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       userProfile,
       userRole,
       isAuthReady,
-      loginWithGoogle,
+      loginMechanic,
+      signUpMechanic,
       logout,
       registerVehicle,
       updateProfile,

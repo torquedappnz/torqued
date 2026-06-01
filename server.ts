@@ -121,6 +121,140 @@ function generateOtpEmailHtml(rego: string, code: string): string {
 </html>`;
 }
 
+// POST /api/customer/check-plate — checks plate, triggers OTP for returning customers
+app.post('/api/customer/check-plate', async (req, res) => {
+  try {
+    const { rego } = req.body;
+    if (!rego) return res.status(400).json({ error: 'rego is required' });
+    const formattedRego = (rego as string).toUpperCase().trim();
+
+    const supabase = getSupabaseAdmin();
+    if (!supabase) return res.status(500).json({ error: 'Database not configured' });
+
+    const { data: vehicle } = await supabase
+      .from('vehicles')
+      .select('rego, owner_id')
+      .eq('rego', formattedRego)
+      .single();
+
+    if (!vehicle) return res.status(404).json({ error: 'Plate not found in our registry' });
+
+    // New customer — plate exists but no owner
+    if (!vehicle.owner_id) {
+      return res.json({ found: true, isNew: true });
+    }
+
+    // Returning customer — get name and email
+    const { data: profile } = await supabase
+      .from('profiles')
+      .select('email, name')
+      .eq('id', vehicle.owner_id)
+      .single();
+
+    const ownerEmail = profile?.email ?? null;
+    const customerName = profile?.name ?? null;
+
+    if (!ownerEmail) return res.json({ found: true, isNew: true });
+
+    // Send OTP via Gmail
+    const code = crypto.randomInt(100000, 999999).toString();
+    otpStore.set(formattedRego, { code, expiresAt: Date.now() + 10 * 60 * 1000 });
+
+    const transporter = getMailTransporter();
+    if (transporter) {
+      await transporter.sendMail({
+        from: process.env.SMTP_FROM || '"Torqued" <torquedapp.nz@gmail.com>',
+        to: ownerEmail,
+        subject: `${code} — your Torqued verification code`,
+        html: generateOtpEmailHtml(formattedRego, code),
+      });
+    } else {
+      console.log(`[OTP] ${formattedRego} → ${code} (SMTP not configured)`);
+    }
+
+    return res.json({
+      found: true,
+      isNew: false,
+      customerName,
+      maskedEmail: maskEmail(ownerEmail),
+    });
+  } catch (err) {
+    console.error('[check-plate]', err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// POST /api/customer/register — creates a new customer account from plate details
+app.post('/api/customer/register', async (req, res) => {
+  try {
+    const { rego, name, email, phone } = req.body;
+    if (!rego || !name || !email) {
+      return res.status(400).json({ error: 'rego, name, and email are required' });
+    }
+    const formattedRego = (rego as string).toUpperCase().trim();
+
+    const supabase = getSupabaseAdmin();
+    if (!supabase) return res.status(500).json({ error: 'Database not configured' });
+
+    // Create Supabase auth user
+    const { data: authData, error: authError } = await supabase.auth.admin.createUser({
+      email,
+      email_confirm: true,
+      user_metadata: { name, phone, role: 'customer' },
+    });
+
+    if (authError) {
+      // If user already exists, just link the vehicle
+      const { data: existing } = await supabase
+        .from('profiles')
+        .select('id')
+        .eq('email', email)
+        .single();
+
+      if (existing) {
+        await supabase.from('vehicles').update({ owner_id: existing.id }).eq('rego', formattedRego);
+        return res.json({ success: true });
+      }
+      return res.status(400).json({ error: authError.message });
+    }
+
+    const userId = authData.user.id;
+
+    // Create profile
+    await supabase.from('profiles').upsert({
+      id: userId,
+      email,
+      name,
+      phone: phone || null,
+      role: 'customer',
+    }, { onConflict: 'id' });
+
+    // Link vehicle to this customer
+    await supabase.from('vehicles').update({ owner_id: userId }).eq('rego', formattedRego);
+
+    // Send welcome OTP so they can verify and proceed
+    const code = crypto.randomInt(100000, 999999).toString();
+    otpStore.set(formattedRego, { code, expiresAt: Date.now() + 10 * 60 * 1000 });
+
+    const transporter = getMailTransporter();
+    if (transporter) {
+      await transporter.sendMail({
+        from: process.env.SMTP_FROM || '"Torqued" <torquedapp.nz@gmail.com>',
+        to: email,
+        subject: `Welcome to Torqued! Your verification code: ${code}`,
+        html: generateOtpEmailHtml(formattedRego, code),
+      });
+    } else {
+      console.log(`[New Customer OTP] ${formattedRego} → ${code}`);
+    }
+
+    res.json({ success: true, maskedEmail: maskEmail(email) });
+  } catch (err) {
+    console.error('[customer/register]', err);
+    res.status(500).json({ error: 'Registration failed' });
+  }
+});
+
 // POST /api/ai/fault-code — translates a diagnostic fault code using Gemini
 app.post('/api/ai/fault-code', async (req, res) => {
   try {
