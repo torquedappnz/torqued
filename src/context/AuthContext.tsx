@@ -114,19 +114,43 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   };
 
   useEffect(() => {
+    let mounted = true;
+
+    // Resolve initial auth state explicitly so the app never hangs on the
+    // loading screen if onAuthStateChange is delayed or loadProfile throws.
+    const init = async () => {
+      try {
+        const { data: { session } } = await supabase.auth.getSession();
+        if (!mounted) return;
+        const u = session?.user ?? null;
+        setUser(u);
+        if (u) {
+          try { await loadProfile(u); } catch (e) { console.error('loadProfile failed:', e); }
+        }
+      } catch (e) {
+        console.error('Auth init failed:', e);
+      } finally {
+        if (mounted) setIsAuthReady(true);
+      }
+    };
+    init();
+
+    // Hard safety net: never let the loading screen hang past 5s.
+    const failsafe = setTimeout(() => { if (mounted) setIsAuthReady(true); }, 5000);
+
     const { data: { subscription } } = supabase.auth.onAuthStateChange(async (_event, session) => {
       const supabaseUser = session?.user ?? null;
       setUser(supabaseUser);
       if (supabaseUser) {
-        await loadProfile(supabaseUser);
+        try { await loadProfile(supabaseUser); } catch (e) { console.error('loadProfile failed:', e); }
       } else {
         setUserProfile(null);
         setUserRole(null);
       }
-      setIsAuthReady(true);
+      if (mounted) setIsAuthReady(true);
     });
 
-    return () => subscription.unsubscribe();
+    return () => { mounted = false; clearTimeout(failsafe); subscription.unsubscribe(); };
   }, []);
 
   // ── Mechanic auth ──────────────────────────────────────────
