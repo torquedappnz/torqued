@@ -105,7 +105,7 @@ function generateOtpEmailHtml(rego: string, code: string): string {
       <table border="0" cellpadding="0" cellspacing="0" width="100%" style="max-width:480px;background:#150402;border-radius:20px;border:1px solid rgba(255,24,0,0.15);overflow:hidden;">
         <tr>
           <td style="background:#050100;padding:24px 32px;border-bottom:3px solid #FF1800;text-align:center;">
-            <img src="${LOGO_URL}" alt="Torqued" width="200" style="display:inline-block;max-width:200px;height:auto;" />
+            <img src="${LOGO_URL}" alt="Torqued" width="200" height="67" style="display:inline-block;width:200px;height:67px;border:0;" />
           </td>
         </tr>
         <tr>
@@ -657,7 +657,7 @@ function generateBookingEmailHtml(data: any): string {
               <table border="0" cellpadding="0" cellspacing="0" width="100%">
                 <tr>
                   <td align="center">
-                    <img src="${LOGO_URL}" alt="Torqued" width="220" style="display:inline-block;max-width:220px;height:auto;" />
+                    <img src="${LOGO_URL}" alt="Torqued" width="220" height="74" style="display:inline-block;width:220px;height:74px;border:0;" />
                   </td>
                 </tr>
                 <tr>
@@ -866,7 +866,7 @@ function generateMechanicEmailHtml(data: any): string {
               <table border="0" cellpadding="0" cellspacing="0" width="100%">
                 <tr>
                   <td>
-                    <img src="${LOGO_URL}" alt="Torqued" width="180" style="display:inline-block;max-width:180px;height:auto;vertical-align:middle;" />
+                    <img src="${LOGO_URL}" alt="Torqued" width="180" height="60" style="display:inline-block;width:180px;height:60px;border:0;vertical-align:middle;" />
                     <span style="font-family: -apple-system, Arial, sans-serif; font-size: 14px; font-weight: normal; color: rgba(255,255,255,0.6); margin-left: 10px; vertical-align:middle;">PARTNER HUB</span>
                   </td>
                 </tr>
@@ -999,7 +999,7 @@ function generateDropoffReminderEmailHtml(data: any): string {
           <!-- BRAND HEADER -->
           <tr>
             <td style="background-color: #150402; padding: 28px; text-align: center;">
-              <img src="${LOGO_URL}" alt="Torqued" width="200" style="display:inline-block;max-width:200px;height:auto;" />
+              <img src="${LOGO_URL}" alt="Torqued" width="200" height="67" style="display:inline-block;width:200px;height:67px;border:0;" />
             </td>
           </tr>
 
@@ -1094,7 +1094,7 @@ function generateServiceReminderEmailHtml(data: any): string {
           <!-- BRAND HEADER -->
           <tr>
             <td style="padding: 32px 32px 20px 32px; text-align: center;">
-              <img src="${LOGO_URL}" alt="Torqued" width="200" style="display:inline-block;max-width:200px;height:auto;" />
+              <img src="${LOGO_URL}" alt="Torqued" width="200" height="67" style="display:inline-block;width:200px;height:67px;border:0;" />
             </td>
           </tr>
 
@@ -1419,6 +1419,12 @@ app.post('/api/email/send-test-single', async (req, res) => {
         html = generateServiceReminderEmailHtml(finalData);
         subject = `🔧 [Torqued Service Advisory Test] Scheduled DCT Calibration Reminder`;
         break;
+      case 'otp': {
+        const testCode = '123456';
+        html = generateOtpEmailHtml(finalData.plate || 'RAH190', testCode);
+        subject = `${testCode} is your Torqued verification code`;
+        break;
+      }
       default:
         return res.status(400).json({ error: 'Invalid templateType' });
     }
