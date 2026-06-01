@@ -746,6 +746,39 @@ app.post('/api/stripe/create-subscription', async (req, res) => {
   }
 });
 
+// POST /api/stripe/activate-subscription — verifies a paid checkout session and
+// activates the mechanic's subscription server-side (service role, no RLS race).
+app.post('/api/stripe/activate-subscription', async (req, res) => {
+  try {
+    const { sessionId } = req.body;
+    if (!sessionId) return res.status(400).json({ error: 'sessionId is required' });
+
+    const stripe = getStripe();
+    if (!stripe) return res.status(500).json({ error: 'Stripe not configured' });
+
+    const session = await stripe.checkout.sessions.retrieve(sessionId);
+    const paid = session.payment_status === 'paid' || session.status === 'complete';
+    const mechanicId = session.metadata?.mechanicId;
+
+    if (!paid) return res.json({ activated: false, reason: 'not_paid' });
+    if (!mechanicId) return res.json({ activated: false, reason: 'no_mechanic' });
+
+    const supabase = getSupabaseAdmin();
+    if (!supabase) return res.status(500).json({ error: 'Database not configured' });
+
+    const { error } = await supabase.from('profiles').update({
+      subscription_active: true,
+      stripe_subscription_id: (session.subscription as string) || null,
+    }).eq('id', mechanicId);
+
+    if (error) return res.status(500).json({ error: error.message });
+    res.json({ activated: true });
+  } catch (err) {
+    console.error('[activate-subscription]', err);
+    res.status(500).json({ error: 'Activation failed' });
+  }
+});
+
 
 // Generates a beautiful HTML booking confirmation matching Torqued's design language
 function generateBookingEmailHtml(data: any): string {

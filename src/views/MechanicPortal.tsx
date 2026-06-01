@@ -202,12 +202,27 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
     const sessionId = params.get('session_id');
-    const incomingMechanicId = params.get('mechanic_id');
-    if (sessionId && incomingMechanicId && user && user.id === incomingMechanicId) {
-      updateProfile({ subscriptionActive: true }).then(() => {
+    if (!sessionId || !user) return;
+
+    (async () => {
+      try {
+        // Verify + activate server-side (service role) so it can't race with profile loading
+        const res = await fetch('/api/stripe/activate-subscription', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ sessionId }),
+        });
+        const data = await res.json();
+        if (data.activated) {
+          // Reflect immediately in local state so the dashboard unlocks now
+          updateProfile({ subscriptionActive: true }).catch(() => {});
+        }
+      } catch (err) {
+        console.error('Subscription activation failed:', err);
+      } finally {
         window.history.replaceState({}, document.title, window.location.pathname);
-      }).catch(err => console.error('Subscription update failed:', err));
-    }
+      }
+    })();
   }, [user]);
 
   // Load mechanic data from Supabase on mount
