@@ -715,6 +715,7 @@ app.post('/api/stripe/create-subscription', async (req, res) => {
     const session = await stripe.checkout.sessions.create({
       payment_method_types: ['card'],
       mode: 'subscription',
+      allow_promotion_codes: true, // promo code field on the subscription checkout
       line_items: [
         {
           price_data: {
