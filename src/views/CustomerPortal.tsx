@@ -3096,7 +3096,6 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                 {otpVerificationError && (
                   <p className="text-xs font-bold text-torqued-red mt-1">{otpVerificationError}</p>
                 )}
-                <p className="text-[10px] italic text-emerald-500 text-center font-bold font-mono tracking-wider mt-1">Hint: Enter 123456 to bypass simulation</p>
               </div>
 
               <div className="space-y-3 pt-2">
