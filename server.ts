@@ -1313,6 +1313,7 @@ app.post('/api/stripe/create-payment', async (req, res) => {
     const session = await stripe.checkout.sessions.create({
       payment_method_types: ['card', 'afterpay_clearpay', 'klarna'],
       mode: 'payment',
+      allow_promotion_codes: true, // shows the "Add promotion code" field on Stripe's hosted checkout
       phone_number_collection: {
         enabled: true,
       },
