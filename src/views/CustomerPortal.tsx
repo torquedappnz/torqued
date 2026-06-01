@@ -18,7 +18,20 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
   const { theme, setTheme } = useTheme();
   const { user, userProfile, logout, checkPlateExists, registerVehicle, updateProfile } = useAuth();
 
-  const generateBookingPDF = (job: Job) => {
+  const loadImageDataUrl = (src: string): Promise<string | null> =>
+    new Promise((resolve) => {
+      fetch(src)
+        .then(r => r.blob())
+        .then(blob => {
+          const reader = new FileReader();
+          reader.onloadend = () => resolve(reader.result as string);
+          reader.onerror = () => resolve(null);
+          reader.readAsDataURL(blob);
+        })
+        .catch(() => resolve(null));
+    });
+
+  const generateBookingPDF = async (job: Job) => {
     const doc = new jsPDF({
       orientation: 'portrait',
       unit: 'mm',
@@ -28,29 +41,33 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
     const mech = MOCK_MECHANICS.find(m => m.id === job.mechanicId);
 
     // 1. Dark Header Ribbon - Torqued Charcoal Carbon Background
-    doc.setFillColor(21, 4, 2); 
+    doc.setFillColor(21, 4, 2);
     doc.rect(0, 0, 210, 42, 'F');
-    
+
     // Racing Red Trim Line under header
     doc.setFillColor(255, 24, 0);
     doc.rect(0, 42, 210, 2, 'F');
-    
-    // Header Branding Text
-    doc.setTextColor(255, 255, 255);
-    doc.setFont('Helvetica', 'bold');
-    doc.setFontSize(26);
-    doc.text('TORQ', 15, 22);
-    
-    // Red "UED" in Torqued logo
-    doc.setTextColor(255, 24, 0);
-    doc.text('UED', 44, 22);
-    
+
+    // Torqued logo (falls back to text if the image can't be loaded)
+    const logoDataUrl = await loadImageDataUrl('/torqued-logo.png');
+    if (logoDataUrl) {
+      // logo is ~2.985:1; render 55mm wide
+      doc.addImage(logoDataUrl, 'PNG', 15, 11, 55, 18.4);
+    } else {
+      doc.setTextColor(255, 255, 255);
+      doc.setFont('Helvetica', 'bold');
+      doc.setFontSize(26);
+      doc.text('TORQ', 15, 22);
+      doc.setTextColor(255, 24, 0);
+      doc.text('UED', 44, 22);
+    }
+
     // Sub Header details
     doc.setFont('Helvetica', 'normal');
     doc.setFontSize(8.5);
     doc.setTextColor(180, 180, 180);
-    doc.text('DUNEDIN HIGH-PERFORMANCE WORKSHOP MARKETPLACE', 15, 31);
-    
+    doc.text('NZ REPAIR MARKETPLACE', 15, 35);
+
     // Receipt Ref & Date on white-right part of header
     doc.setFontSize(9);
     doc.setFont('Helvetica', 'bold');
@@ -59,7 +76,7 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
     doc.setFont('Helvetica', 'normal');
     doc.setTextColor(180, 180, 180);
     doc.text(`ISSUED: ${new Date().toLocaleDateString('en-NZ', { day: 'numeric', month: 'short', year: 'numeric' })}`, 130, 27);
-    doc.text('OTAGO FIELD OPERATIONS', 130, 33);
+    doc.text('TORQUED NZ', 130, 33);
 
     // 2. Document Title
     doc.setTextColor(21, 4, 2);
@@ -231,19 +248,28 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
     doc.setTextColor(21, 4, 2);
     doc.text(`$${job.totalPrice}.00 NZD`, 165, currentY + 16);
     
+    // On Torqued the customer prepays — either the full amount or a deposit.
+    const amountPaid = job.depositPaid ?? job.totalPrice;
+    const balanceDue = Math.max(0, job.totalPrice - amountPaid);
+
     doc.setFont('Helvetica', 'normal');
     doc.setTextColor(71, 85, 105);
-    doc.text('Deposit Paid via Gateway:', 120, currentY + 24);
+    doc.text('Prepaid via Torqued:', 120, currentY + 24);
     doc.setFont('Helvetica', 'bold');
     doc.setTextColor(21, 4, 2);
-    doc.text(job.depositPaid ? `$${job.depositPaid}.00 NZD` : '$0.00 NZD', 165, currentY + 24);
+    doc.text(`$${amountPaid.toFixed(2)} NZD`, 165, currentY + 24);
 
     doc.setFont('Helvetica', 'bold');
     doc.setFontSize(10.5);
-    doc.setTextColor(255, 24, 0);
-    doc.text('Workshop Balance due:', 120, currentY + 40);
-    const finalDue = job.totalPrice - (job.depositPaid || 0);
-    doc.text(`$${finalDue.toFixed(2)} NZD`, 165, currentY + 40);
+    if (balanceDue <= 0) {
+      doc.setTextColor(16, 150, 70); // green
+      doc.text('Balance Due:', 120, currentY + 40);
+      doc.text('PAID IN FULL', 165, currentY + 40);
+    } else {
+      doc.setTextColor(255, 24, 0);
+      doc.text('Balance at Workshop:', 120, currentY + 40);
+      doc.text(`$${balanceDue.toFixed(2)} NZD`, 165, currentY + 40);
+    }
 
     // Left block of financial: secure clearance badge
     doc.setFillColor(255, 24, 0, 0.04);
@@ -263,29 +289,17 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
     doc.text('secure dropbox if arriving after-hours. The default', 20, 27 + currentY);
     doc.text('dropoff envelope vault passcode is set to 9944.', 20, 31 + currentY);
     
-    // 7. Signature / Sign-Off Box (REVERSED alignment per Otago Operations instructions)
+    // 7. Sign-Off
     const signY = currentY + 62;
     doc.setDrawColor(226, 232, 240);
     doc.line(15, signY, 195, signY);
 
-    // Wet signature look placed on the LEFT side (REVERSED)
-    doc.setFont('Courier', 'bolditalic');
-    doc.setFontSize(14);
-    doc.setTextColor(255, 24, 0);
-    doc.text('Dean Robinson', 20, signY + 10.5);
-    
-    // Stamp boundary on the LEFT
-    doc.setDrawColor(255, 24, 0);
-    doc.setLineWidth(0.3);
-    doc.rect(15, signY + 3.5, 48, 11, 'D');
-
-    // Dean Robinson / Meta details placed on the RIGHT side (REVERSED)
     doc.setFontSize(8);
     doc.setTextColor(148, 163, 184);
     doc.setFont('Helvetica', 'bold');
-    doc.text('AUTHORIZED DISPATCH SIGNATURE', 135, signY + 8);
+    doc.text('AUTHORISED DIGITAL RECEIPT', 15, signY + 8);
     doc.setFont('Helvetica', 'normal');
-    doc.text('Dean Robinson (Otago Field Manager)', 135, signY + 13);
+    doc.text('Generated by Torqued • torquedapp.nz@gmail.com • 022 389 5249', 15, signY + 13);
 
     // 8. Legal and Footer fineprint
     doc.setFont('Helvetica', 'italic');
