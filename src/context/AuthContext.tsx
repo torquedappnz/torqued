@@ -99,7 +99,8 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       return;
     }
 
-    // First sign-in — create profile from metadata
+    // No row returned. Create one only if it truly doesn't exist (ignoreDuplicates
+    // so we never clobber an existing subscription_active), then re-read the truth.
     const role = (supabaseUser.user_metadata?.role as 'customer' | 'mechanic') || 'mechanic';
     const newProfile = {
       id: supabaseUser.id,
@@ -109,9 +110,13 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       subscription_active: role === 'mechanic' ? false : null,
     };
 
-    await supabase.from('profiles').insert(newProfile);
-    setUserProfile({ ...fromDbRow({ ...newProfile, phone: null, home_location: null, stripe_subscription_id: null }), vehicles: [] });
-    setUserRole(role);
+    await supabase.from('profiles').upsert(newProfile, { onConflict: 'id', ignoreDuplicates: true });
+
+    // Re-read so we reflect any existing subscription_active rather than the default
+    const { data: fresh } = await supabase.from('profiles').select('*').eq('id', supabaseUser.id).single();
+    const finalRow = fresh || { ...newProfile, phone: null, home_location: null, stripe_subscription_id: null };
+    setUserProfile({ ...fromDbRow(finalRow), vehicles: [] });
+    setUserRole(finalRow.role);
   };
 
   useEffect(() => {

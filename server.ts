@@ -473,6 +473,21 @@ app.post('/api/mechanic/email-trial', async (req, res) => {
   }
 });
 
+// GET /api/mechanic/status — reliable subscription status read (service role, no RLS race)
+app.get('/api/mechanic/status', async (req, res) => {
+  try {
+    const id = req.query.id as string;
+    if (!id) return res.status(400).json({ error: 'id required' });
+    const supabase = getSupabaseAdmin();
+    if (!supabase) return res.json({ subscriptionActive: false });
+    const { data } = await supabase.from('profiles').select('subscription_active').eq('id', id).single();
+    res.json({ subscriptionActive: !!data?.subscription_active });
+  } catch (err) {
+    console.error('[mechanic/status]', err);
+    res.json({ subscriptionActive: false });
+  }
+});
+
 // POST /api/mechanic/activate — force-activate a mechanic's subscription (service role,
 // bypasses RLS so it always persists). Used by the activation/return flows.
 app.post('/api/mechanic/activate', async (req, res) => {

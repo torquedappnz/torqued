@@ -229,6 +229,15 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
     })();
   }, [user]);
 
+  // Reliable subscription status sync on load (service role — survives refresh)
+  useEffect(() => {
+    if (!user) return;
+    fetch(`/api/mechanic/status?id=${user.id}`)
+      .then(r => r.json())
+      .then(d => { if (d.subscriptionActive) setJustActivated(true); })
+      .catch(() => {});
+  }, [user]);
+
   // Load mechanic data from Supabase on mount
   useEffect(() => {
     if (!user) return;
