@@ -195,6 +195,23 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
   // Local override: once activated this session, unlock the dashboard regardless of
   // userProfile load timing (which could be null and silently block the unlock).
   const [justActivated, setJustActivated] = useState(false);
+  // Onboarding wizard
+  const [onboardingComplete, setOnboardingComplete] = useState<boolean | null>(null);
+  const [obStep, setObStep] = useState(1);
+  const [obSaving, setObSaving] = useState(false);
+  const [ob, setOb] = useState({
+    name: '', nzbn: '', address: '', phone: '', owner_name: '',
+    bank_account_name: '', bank_account_number: '', labour_rate: 145, technicians: 1, parts_lead_days: 1,
+  });
+
+  useEffect(() => {
+    if (!user) return;
+    fetch(`/api/mechanic/onboarding-status?id=${user.id}`)
+      .then(r => r.json())
+      .then(d => { setOnboardingComplete(!!d.complete); if (!d.complete) setOb(o => ({ ...o, name: user.user_metadata?.name || o.name })); })
+      .catch(() => setOnboardingComplete(true));
+  }, [user]);
+
   // Quote builder
   const [quoteJob, setQuoteJob] = useState<any | null>(null);
   const [qParts, setQParts] = useState<{ name: string; qty: number; unitPrice: number }[]>([]);
@@ -1861,6 +1878,71 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
       default: return renderDashboard();
     }
   };
+
+  // Onboarding wizard — shown after login, before subscription, until completed
+  if (user && onboardingComplete === false) {
+    const obInput = "w-full bg-white/5 border border-white/10 rounded-xl px-4 h-12 text-sm text-white placeholder:text-white/30 focus:outline-none focus:border-torqued-red";
+    const obLabel = "text-[10px] font-black uppercase tracking-widest text-white/50 block mb-1";
+    return (
+      <div className="min-h-screen bg-torqued-dark text-white flex items-center justify-center p-4">
+        <div className="w-full max-w-lg bg-card border border-white/10 rounded-3xl p-8 space-y-6">
+          <div className="flex items-center justify-between">
+            <Logo variant="light" />
+            <span className="text-[10px] font-black uppercase tracking-widest text-white/40">Step {obStep} of 3</span>
+          </div>
+          <div className="h-1.5 bg-white/10 rounded-full overflow-hidden"><div className="h-full bg-torqued-red transition-all" style={{ width: `${(obStep/3)*100}%` }} /></div>
+
+          {obStep === 1 && (
+            <div className="space-y-4">
+              <div><h2 className="text-2xl font-black tracking-tight">Workshop details</h2><p className="text-sm text-white/50">Tell us about your business.</p></div>
+              <div><label className={obLabel}>Workshop name</label><input className={obInput} value={ob.name} onChange={e=>setOb({...ob,name:e.target.value})} /></div>
+              <div className="grid grid-cols-2 gap-3">
+                <div><label className={obLabel}>NZBN</label><input className={obInput} value={ob.nzbn} onChange={e=>setOb({...ob,nzbn:e.target.value})} /></div>
+                <div><label className={obLabel}>Phone</label><input className={obInput} value={ob.phone} onChange={e=>setOb({...ob,phone:e.target.value})} /></div>
+              </div>
+              <div><label className={obLabel}>Address</label><input className={obInput} value={ob.address} onChange={e=>setOb({...ob,address:e.target.value})} /></div>
+              <div><label className={obLabel}>Owner name</label><input className={obInput} value={ob.owner_name} onChange={e=>setOb({...ob,owner_name:e.target.value})} /></div>
+              <Button fullWidth className="bg-torqued-red text-white" disabled={!ob.name} onClick={()=>setObStep(2)}>Continue</Button>
+            </div>
+          )}
+
+          {obStep === 2 && (
+            <div className="space-y-4">
+              <div><h2 className="text-2xl font-black tracking-tight">Payout details</h2><p className="text-sm text-white/50">Where we send your earnings.</p></div>
+              <div><label className={obLabel}>Name on account</label><input className={obInput} value={ob.bank_account_name} onChange={e=>setOb({...ob,bank_account_name:e.target.value})} /></div>
+              <div><label className={obLabel}>Bank account number</label><input className={obInput} placeholder="00-0000-0000000-00" value={ob.bank_account_number} onChange={e=>setOb({...ob,bank_account_number:e.target.value})} /></div>
+              <div className="flex gap-3"><Button variant="outline" className="border-white/20 text-white" onClick={()=>setObStep(1)}>Back</Button><Button fullWidth className="bg-torqued-red text-white" onClick={()=>setObStep(3)}>Continue</Button></div>
+            </div>
+          )}
+
+          {obStep === 3 && (
+            <div className="space-y-4">
+              <div><h2 className="text-2xl font-black tracking-tight">Rates & capacity</h2><p className="text-sm text-white/50">Used to price jobs and set availability.</p></div>
+              <div className="grid grid-cols-3 gap-3">
+                <div><label className={obLabel}>Labour $/hr</label><input type="number" className={obInput} value={ob.labour_rate||''} onChange={e=>setOb({...ob,labour_rate:parseFloat(e.target.value)||0})} /></div>
+                <div><label className={obLabel}>Technicians</label><input type="number" className={obInput} value={ob.technicians||''} onChange={e=>setOb({...ob,technicians:parseInt(e.target.value)||1})} /></div>
+                <div><label className={obLabel}>Parts lead (days)</label><input type="number" className={obInput} value={ob.parts_lead_days||''} onChange={e=>setOb({...ob,parts_lead_days:parseInt(e.target.value)||1})} /></div>
+              </div>
+              {obSaving && <p className="text-xs text-white/40">Saving…</p>}
+              <div className="flex gap-3">
+                <Button variant="outline" className="border-white/20 text-white" onClick={()=>setObStep(2)}>Back</Button>
+                <Button fullWidth className="bg-torqued-red text-white" disabled={obSaving} onClick={async()=>{
+                  setObSaving(true);
+                  try {
+                    await fetch('/api/mechanic/save-onboarding', {
+                      method:'POST', headers:{'Content-Type':'application/json'},
+                      body: JSON.stringify({ mechanicId: user.id, fields: ob, complete: true }),
+                    });
+                    setOnboardingComplete(true);
+                  } catch {} finally { setObSaving(false); }
+                }}>Finish — Continue to Subscription</Button>
+              </div>
+            </div>
+          )}
+        </div>
+      </div>
+    );
+  }
 
   if (!user || (!userProfile?.subscriptionActive && !justActivated)) {
     return (

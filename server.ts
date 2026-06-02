@@ -715,6 +715,42 @@ app.post('/api/admin/set-subscription', async (req, res) => {
   res.json({ success: true });
 });
 
+// POST /api/mechanic/save-onboarding — persist onboarding details (service role)
+app.post('/api/mechanic/save-onboarding', async (req, res) => {
+  try {
+    const { mechanicId, fields, complete } = req.body;
+    if (!mechanicId || !fields) return res.status(400).json({ error: 'mechanicId and fields required' });
+    const supabase = getSupabaseAdmin();
+    if (!supabase) return res.status(500).json({ error: 'Database not configured' });
+
+    const allowed = ['name','nzbn','address','phone','owner_name','bank_account_name','bank_account_number','labour_rate','shop_fee','technicians','parts_lead_days','service_areas'];
+    const update: Record<string, any> = {};
+    for (const k of allowed) if (fields[k] !== undefined) update[k] = fields[k];
+    if (complete) update.onboarding_complete = true;
+
+    const { error } = await supabase.from('profiles').update(update).eq('id', mechanicId);
+    if (error) return res.status(500).json({ error: error.message });
+    res.json({ success: true });
+  } catch (err) {
+    console.error('[save-onboarding]', err);
+    res.status(500).json({ error: 'Could not save' });
+  }
+});
+
+// GET /api/mechanic/onboarding-status — has the mechanic completed onboarding?
+app.get('/api/mechanic/onboarding-status', async (req, res) => {
+  try {
+    const id = req.query.id as string;
+    if (!id) return res.status(400).json({ error: 'id required' });
+    const supabase = getSupabaseAdmin();
+    if (!supabase) return res.json({ complete: true });
+    const { data } = await supabase.from('profiles').select('onboarding_complete').eq('id', id).single();
+    res.json({ complete: !!data?.onboarding_complete });
+  } catch {
+    res.json({ complete: true });
+  }
+});
+
 // GET /api/mechanic/status — reliable subscription status read (service role, no RLS race)
 app.get('/api/mechanic/status', async (req, res) => {
   try {
