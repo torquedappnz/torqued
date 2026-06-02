@@ -192,6 +192,9 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
   const [subPromo, setSubPromo] = useState('');
   const [subPromoError, setSubPromoError] = useState<string | null>(null);
   const [subPromoLoading, setSubPromoLoading] = useState(false);
+  // Local override: once activated this session, unlock the dashboard regardless of
+  // userProfile load timing (which could be null and silently block the unlock).
+  const [justActivated, setJustActivated] = useState(false);
   const [mechResendCooldown, setMechResendCooldown] = useState(0);
   const [mechResendMsg, setMechResendMsg] = useState<string | null>(null);
 
@@ -217,7 +220,7 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ mechanicId: user.id }),
         });
-        markSubscriptionActive(); // local flip; DB set server-side via service role
+        setJustActivated(true); markSubscriptionActive(); // unlock now
       } catch (err) {
         console.error('Subscription activation failed:', err);
       } finally {
@@ -1810,7 +1813,7 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
     }
   };
 
-  if (!user || !userProfile?.subscriptionActive) {
+  if (!user || (!userProfile?.subscriptionActive && !justActivated)) {
     return (
       <div className="min-h-screen bg-torqued-dark text-white flex flex-col">
         {/* Navigation */}
@@ -1997,7 +2000,7 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                               body: JSON.stringify({ mechanicId: user.id, code: subPromo }),
                             });
                             const d = await r.json();
-                            if (d.activated) { markSubscriptionActive(); }
+                            if (d.activated) { setJustActivated(true); markSubscriptionActive(); }
                             else setSubPromoError(d.error || 'Invalid promo code.');
                           } catch {
                             setSubPromoError('Could not apply code. Please try again.');
@@ -2174,7 +2177,7 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                                         method: 'POST', headers: { 'Content-Type': 'application/json' },
                                         body: JSON.stringify({ mechanicId: user.id }),
                                       });
-                                      markSubscriptionActive();
+                                      setJustActivated(true); markSubscriptionActive();
                                     } catch (err) {
                                       console.error('Subscription update failed:', err);
                                     }
@@ -2213,7 +2216,7 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                                         method: 'POST', headers: { 'Content-Type': 'application/json' },
                                         body: JSON.stringify({ mechanicId: user.id }),
                                       });
-                                      markSubscriptionActive();
+                                      setJustActivated(true); markSubscriptionActive();
                                     } catch (err) {
                                       console.error('Subscription update failed:', err);
                                     }

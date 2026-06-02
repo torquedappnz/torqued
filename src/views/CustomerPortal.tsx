@@ -421,6 +421,8 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
   const [otpVerificationError, setOtpVerificationError] = useState('');
   const [otpResendCooldown, setOtpResendCooldown] = useState(0);
   const [otpResendMsg, setOtpResendMsg] = useState<string | null>(null);
+  // Shown only when email delivery is down, so testing isn't blocked
+  const [otpFallbackCode, setOtpFallbackCode] = useState<string | null>(null);
   const [isBookingLoading, setIsBookingLoading] = useState(false);
   const [stripeCheckoutUrl, setStripeCheckoutUrl] = useState<string | null>(null);
   const [isStripeSessionLoading, setIsStripeSessionLoading] = useState(false);
@@ -906,6 +908,7 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
         // Returning customer — show OTP modal
         setReturningCustomerName(data.customerName);
         setOtpSentEmail(data.maskedEmail || 'your registered email');
+        setOtpFallbackCode(data.fallbackCode || null);
         setShowOTPModal(true);
       }
     } catch (err) {
@@ -3219,6 +3222,14 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                   Enter the code from your email to continue.
                 </p>
               </div>
+
+              {otpFallbackCode && (
+                <div className="p-3 bg-amber-500/10 border border-amber-500/30 rounded-xl text-center space-y-1">
+                  <p className="text-[10px] font-black uppercase tracking-widest text-amber-500">Email delivery is temporarily down</p>
+                  <p className="text-[11px] text-muted">Use this code to continue testing:</p>
+                  <p className="font-mono text-2xl font-black tracking-[0.3em] text-foreground">{otpFallbackCode}</p>
+                </div>
+              )}
 
               <div className="space-y-2 text-left">
                 <label className="text-[10px] font-black uppercase text-muted tracking-widest block mb-1">6-Digit Verification Code</label>

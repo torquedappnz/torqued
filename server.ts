@@ -228,23 +228,31 @@ app.post('/api/customer/check-plate', async (req, res) => {
     const code = crypto.randomInt(100000, 999999).toString();
     otpStore.set(formattedRego, { code, expiresAt: Date.now() + 10 * 60 * 1000 });
 
+    // If email delivery fails (e.g. provider outage), surface the code so testing
+    // isn't blocked. Self-limiting: only returned when the email could NOT be sent.
+    let emailDelivered = false;
     const transporter = getMailTransporter();
     if (transporter) {
-      await transporter.sendMail({
-        from: process.env.SMTP_FROM || '"Torqued" <torquedapp.nz@gmail.com>',
-        to: ownerEmail,
-        subject: `${code} — your Torqued verification code`,
-        html: generateOtpEmailHtml(formattedRego, code),
-      });
-    } else {
-      console.log(`[OTP] ${formattedRego} → ${code} (SMTP not configured)`);
+      try {
+        await transporter.sendMail({
+          from: process.env.SMTP_FROM || '"Torqued" <torquedapp.nz@gmail.com>',
+          to: ownerEmail,
+          subject: `${code} — your Torqued verification code`,
+          html: generateOtpEmailHtml(formattedRego, code),
+        });
+        emailDelivered = true;
+      } catch (e) {
+        console.warn('[OTP] email send failed, returning fallback code:', (e as Error)?.message);
+      }
     }
+    if (!emailDelivered) console.log(`[OTP] ${formattedRego} → ${code} (fallback)`);
 
     return res.json({
       found: true,
       isNew: false,
       customerName,
       maskedEmail: maskEmail(ownerEmail),
+      ...(emailDelivered ? {} : { fallbackCode: code }),
     });
   } catch (err) {
     console.error('[check-plate]', err);
