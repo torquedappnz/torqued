@@ -630,6 +630,91 @@ app.get('/api/reviews', async (req, res) => {
   }
 });
 
+// ── Admin back-office (gated by ADMIN_PASSWORD) ─────────────
+function adminOk(req: express.Request): boolean {
+  const key = (req.query.key as string) || req.body?.key;
+  return !!key && key === (process.env.ADMIN_PASSWORD || 'torqued-admin-2026');
+}
+
+// GET /api/admin/overview — revenue + platform metrics
+app.get('/api/admin/overview', async (req, res) => {
+  if (!adminOk(req)) return res.status(401).json({ error: 'Unauthorized' });
+  try {
+    const supabase = getSupabaseAdmin();
+    if (!supabase) return res.status(500).json({ error: 'Database not configured' });
+
+    const { data: mechs } = await supabase.from('profiles').select('id, subscription_active').eq('role', 'mechanic');
+    const { data: bookings } = await supabase.from('bookings').select('total_price, status, payment_status, refunded_amount, created_at');
+    const { data: customers } = await supabase.from('profiles').select('id').eq('role', 'customer');
+
+    const activeSubs = (mechs ?? []).filter((m: any) => m.subscription_active).length;
+    const all = bookings ?? [];
+    const completed = all.filter((b: any) => b.status === 'completed' || b.payment_status === 'confirmed');
+    const grossBookingValue = completed.reduce((s: number, b: any) => s + (Number(b.total_price) || 0), 0);
+    const commission = grossBookingValue * 0.04;
+    const subscriptionRevenue = activeSubs * 99;
+    const refunds = all.reduce((s: number, b: any) => s + (Number(b.refunded_amount) || 0), 0);
+    const net = commission + subscriptionRevenue - refunds;
+
+    // last 7 days booking trend
+    const now = Date.now();
+    const week = all.filter((b: any) => b.created_at && (now - new Date(b.created_at).getTime()) < 7 * 864e5).length;
+
+    res.json({
+      mechanics: (mechs ?? []).length,
+      activeSubscriptions: activeSubs,
+      customers: (customers ?? []).length,
+      totalBookings: all.length,
+      completedBookings: completed.length,
+      bookingsLast7Days: week,
+      grossBookingValue: round2(grossBookingValue),
+      commission: round2(commission),
+      subscriptionRevenue: round2(subscriptionRevenue),
+      refunds: round2(refunds),
+      netRevenue: round2(net),
+    });
+  } catch (err) {
+    console.error('[admin/overview]', err);
+    res.status(500).json({ error: 'Failed to load overview' });
+  }
+});
+
+function round2(n: number) { return Math.round(n * 100) / 100; }
+
+// GET /api/admin/mechanics — mechanic list with status
+app.get('/api/admin/mechanics', async (req, res) => {
+  if (!adminOk(req)) return res.status(401).json({ error: 'Unauthorized' });
+  const supabase = getSupabaseAdmin();
+  if (!supabase) return res.status(500).json({ error: 'Database not configured' });
+  const { data } = await supabase.from('profiles')
+    .select('id, name, email, subscription_active, rating, review_count, created_at')
+    .eq('role', 'mechanic').order('created_at', { ascending: false });
+  res.json({ mechanics: data ?? [] });
+});
+
+// GET /api/admin/bookings — recent bookings
+app.get('/api/admin/bookings', async (req, res) => {
+  if (!adminOk(req)) return res.status(401).json({ error: 'Unauthorized' });
+  const supabase = getSupabaseAdmin();
+  if (!supabase) return res.status(500).json({ error: 'Database not configured' });
+  const { data } = await supabase.from('bookings')
+    .select('id, vehicle_rego, mechanic_id, total_price, status, payment_status, refunded_amount, created_at')
+    .order('created_at', { ascending: false }).limit(50);
+  res.json({ bookings: data ?? [] });
+});
+
+// POST /api/admin/set-subscription — suspend/reactivate a mechanic
+app.post('/api/admin/set-subscription', async (req, res) => {
+  if (!adminOk(req)) return res.status(401).json({ error: 'Unauthorized' });
+  const { mechanicId, active } = req.body;
+  if (!mechanicId) return res.status(400).json({ error: 'mechanicId required' });
+  const supabase = getSupabaseAdmin();
+  if (!supabase) return res.status(500).json({ error: 'Database not configured' });
+  const { error } = await supabase.from('profiles').update({ subscription_active: !!active }).eq('id', mechanicId);
+  if (error) return res.status(500).json({ error: error.message });
+  res.json({ success: true });
+});
+
 // GET /api/mechanic/status — reliable subscription status read (service role, no RLS race)
 app.get('/api/mechanic/status', async (req, res) => {
   try {
