@@ -802,7 +802,7 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
       if (data.provider) setEntryProvider(data.provider);
       if (data.mileage) setEntryMileage(String(data.mileage));
       if (data.price) setEntryPrice(data.price);
-      setEntryNotes('Scanned from receipt');
+      setEntryNotes(data.notes ? `${data.notes} (scanned)` : 'Scanned from receipt');
       setShowHistoryEntry(true);
     } catch {
       setReceiptError('Could not read that file. Try a clear photo or PDF.');

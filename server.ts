@@ -415,48 +415,61 @@ app.post('/api/mechanic/resend', async (req, res) => {
   }
 });
 
-// POST /api/ai/fault-code — translates a diagnostic fault code using Gemini
+// Helper: call OpenAI chat completions. `content` is the user message content
+// (string, or an array of parts for vision). Returns the assistant text.
+async function callOpenAI(content: any, jsonMode = false): Promise<string> {
+  const apiKey = process.env.OPENAI_API_KEY;
+  if (!apiKey) throw new Error('OPENAI_API_KEY not configured');
+
+  const body: any = {
+    model: 'gpt-4o-mini',
+    messages: [{ role: 'user', content }],
+    max_tokens: 600,
+  };
+  if (jsonMode) body.response_format = { type: 'json_object' };
+
+  const r = await fetch('https://api.openai.com/v1/chat/completions', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` },
+    body: JSON.stringify(body),
+  });
+  const data = await r.json();
+  if (!r.ok) throw new Error(data?.error?.message || 'OpenAI request failed');
+  return data.choices?.[0]?.message?.content ?? '';
+}
+
+// POST /api/ai/fault-code — translates a diagnostic fault code via OpenAI
 app.post('/api/ai/fault-code', async (req, res) => {
   try {
     const { code, make, model, year, mileage } = req.body;
     if (!code) return res.status(400).json({ error: 'code is required' });
-
-    const apiKey = process.env.GEMINI_API_KEY;
-    if (!apiKey) {
+    if (!process.env.OPENAI_API_KEY) {
       return res.json({ translation: `Interpreting ${code.toUpperCase()}... AI not configured.` });
     }
 
-    const { GoogleGenAI } = await import('@google/genai');
-    const ai = new GoogleGenAI({ apiKey });
-
     const prompt = `You are a concise automotive diagnostic assistant for New Zealand mechanics.
-Translate fault code ${code.toUpperCase()} for a ${year || ''} ${make || ''} ${model || ''} at ${mileage || 'unknown'} km.
+Translate fault code ${String(code).toUpperCase()} for a ${year || ''} ${make || ''} ${model || ''} at ${mileage || 'unknown'} km.
 In 1-2 sentences max: what it means, the most likely cause for this vehicle, and what action to take.
 Be direct and practical. No disclaimers.`;
 
-    const response = await ai.models.generateContent({
-      model: 'gemini-2.0-flash',
-      contents: prompt,
-    });
-
-    res.json({ translation: response.text?.trim() || 'Unable to interpret code.' });
+    const text = await callOpenAI(prompt);
+    res.json({ translation: text.trim() || 'Unable to interpret code.' });
   } catch (err) {
     console.error('[AI fault-code]', err);
     res.status(500).json({ error: 'AI translation failed' });
   }
 });
 
-// POST /api/ai/parse-receipt — extracts service history from a receipt image/PDF via Gemini
+// POST /api/ai/parse-receipt — extracts service history from a receipt image via OpenAI vision
 app.post('/api/ai/parse-receipt', async (req, res) => {
   try {
     const { fileData, mimeType } = req.body;
     if (!fileData || !mimeType) return res.status(400).json({ error: 'fileData and mimeType are required' });
+    if (!process.env.OPENAI_API_KEY) return res.status(503).json({ error: 'AI receipt scanning is not configured yet.' });
 
-    const apiKey = process.env.GEMINI_API_KEY;
-    if (!apiKey) return res.status(503).json({ error: 'AI receipt scanning is not configured yet.' });
-
-    const { GoogleGenAI } = await import('@google/genai');
-    const ai = new GoogleGenAI({ apiKey });
+    if (String(mimeType).includes('pdf')) {
+      return res.status(422).json({ error: 'Please upload a photo of the receipt (JPG/PNG). PDF support is coming soon.' });
+    }
 
     const prompt = `You are an automotive service receipt parser for New Zealand workshops.
 Read this service receipt/invoice and extract:
@@ -465,24 +478,18 @@ Read this service receipt/invoice and extract:
 - mileage: the odometer/mileage in km if shown (digits only, no units)
 - provider: the workshop/mechanic business name
 - price: the total amount including currency symbol if shown
-Return ONLY valid JSON with exactly these keys: service, date, mileage, provider, price.
+- notes: any other relevant detail (warranty, parts brands, next-service advice)
+Return ONLY a JSON object with keys: service, date, mileage, provider, price, notes.
 Use an empty string for anything you cannot find. Do not guess.`;
 
-    const response = await ai.models.generateContent({
-      model: 'gemini-2.0-flash',
-      contents: [{ parts: [
-        { inlineData: { mimeType, data: fileData } },
-        { text: prompt },
-      ] }],
-      config: { responseMimeType: 'application/json' },
-    });
+    const text = await callOpenAI([
+      { type: 'text', text: prompt },
+      { type: 'image_url', image_url: { url: `data:${mimeType};base64,${fileData}` } },
+    ], true);
 
     let parsed: any = {};
-    try {
-      parsed = JSON.parse((response.text || '{}').trim());
-    } catch {
-      return res.status(422).json({ error: 'Could not read the receipt. Try a clearer photo.' });
-    }
+    try { parsed = JSON.parse(text.trim()); }
+    catch { return res.status(422).json({ error: 'Could not read the receipt. Try a clearer photo.' }); }
 
     res.json({
       service: parsed.service || '',
@@ -490,6 +497,7 @@ Use an empty string for anything you cannot find. Do not guess.`;
       mileage: parsed.mileage || '',
       provider: parsed.provider || '',
       price: parsed.price || '',
+      notes: parsed.notes || '',
     });
   } catch (err) {
     console.error('[AI parse-receipt]', err);
