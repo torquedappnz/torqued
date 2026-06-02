@@ -431,6 +431,40 @@ app.post('/api/mechanic/redeem-promo', async (req, res) => {
   }
 });
 
+// POST /api/mechanic/email-trial — emails the trial code to a mechanic (sent from prod SMTP)
+app.post('/api/mechanic/email-trial', async (req, res) => {
+  try {
+    const { email } = req.body;
+    if (!email) return res.status(400).json({ error: 'email required' });
+    const transporter = getMailTransporter();
+    if (!transporter) return res.status(503).json({ error: 'Email not configured' });
+
+    const html = `<div style="font-family:-apple-system,Arial,sans-serif;max-width:480px;margin:auto;background:#150402;border-radius:16px;overflow:hidden;border:1px solid rgba(255,24,0,.2)">
+<div style="background:#050100;padding:24px;text-align:center;border-bottom:3px solid #FF1800"><img src="${LOGO_URL}" width="180" style="height:auto"/></div>
+<div style="padding:32px;color:#fff">
+<h2 style="margin:0 0 4px;text-transform:uppercase">Your 30-Day Free Trial</h2>
+<p style="color:rgba(255,255,255,.6);font-size:14px">Skip the $99/month subscription — no credit card required.</p>
+<div style="background:rgba(255,24,0,.08);border:1px solid rgba(255,24,0,.3);border-radius:12px;padding:18px;margin:20px 0;text-align:center">
+<p style="margin:0 0 6px;font-size:11px;text-transform:uppercase;letter-spacing:2px;color:rgba(255,255,255,.5)">Trial Code</p>
+<p style="margin:0;font-family:monospace;font-size:28px;font-weight:900;letter-spacing:4px;color:#FF1800">sritorqued</p>
+</div>
+<p style="font-size:13px;color:rgba(255,255,255,.7)">Log in at <a href="https://torquednz.vercel.app/mechanic" style="color:#FF1800">torquednz.vercel.app/mechanic</a>, enter <strong>sritorqued</strong> in the promo field on the activation screen, and click Apply — your Garage Hub unlocks instantly.</p>
+<a href="https://torquednz.vercel.app/mechanic" style="display:inline-block;background:#FF1800;color:#fff;font-weight:900;text-transform:uppercase;font-size:13px;letter-spacing:1px;text-decoration:none;padding:14px 32px;border-radius:10px;margin-top:8px">Open Mechanic Portal</a>
+</div></div>`;
+
+    await transporter.sendMail({
+      from: process.env.SMTP_FROM || '"Torqued" <torquedapp.nz@gmail.com>',
+      to: email,
+      subject: 'Your Torqued 30-day trial code: sritorqued',
+      html,
+    });
+    res.json({ sent: true });
+  } catch (err) {
+    console.error('[mechanic/email-trial]', err);
+    res.status(500).json({ error: 'Failed to send' });
+  }
+});
+
 // POST /api/mechanic/activate — force-activate a mechanic's subscription (service role,
 // bypasses RLS so it always persists). Used by the activation/return flows.
 app.post('/api/mechanic/activate', async (req, res) => {
