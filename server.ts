@@ -172,6 +172,23 @@ function generateMechanicConfirmEmailHtml(name: string, link: string): string {
 </html>`;
 }
 
+// GET /api/mechanics — real mechanics (active subscription) for the customer to choose from
+app.get('/api/mechanics', async (_req, res) => {
+  try {
+    const supabase = getSupabaseAdmin();
+    if (!supabase) return res.json({ mechanics: [] });
+    const { data } = await supabase
+      .from('profiles')
+      .select('id, name')
+      .eq('role', 'mechanic')
+      .eq('subscription_active', true);
+    res.json({ mechanics: data ?? [] });
+  } catch (err) {
+    console.error('[mechanics]', err);
+    res.json({ mechanics: [] });
+  }
+});
+
 // POST /api/customer/check-plate — checks plate, triggers OTP for returning customers
 app.post('/api/customer/check-plate', async (req, res) => {
   try {

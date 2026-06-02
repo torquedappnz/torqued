@@ -389,6 +389,30 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
   // The customer's garage — all vehicles on their account
   const [garageVehicles, setGarageVehicles] = useState<Vehicle[]>([]);
   const [customerOwnerId, setCustomerOwnerId] = useState<string | null>(null);
+  // Real mechanics from the DB (so bookings route to a real mechanic account)
+  const [realMechanics, setRealMechanics] = useState<Mechanic[]>([]);
+
+  useEffect(() => {
+    fetch('/api/mechanics')
+      .then(r => r.json())
+      .then(d => {
+        const mapped: Mechanic[] = (d.mechanics || []).map((m: any) => ({
+          id: m.id,                       // real account UUID — bookings route here
+          name: m.name || 'Workshop',
+          logo: `https://ui-avatars.com/api/?name=${encodeURIComponent(m.name || 'W')}&background=FF1800&color=fff&bold=true`,
+          suburb: 'Dunedin',
+          distance: 1.2,
+          rating: 5.0,
+          reviews: 0,
+          specialisations: ['General Service', 'Diagnostics'],
+          nextAvailable: 'Tomorrow, 8am',
+          isFeatured: true,
+          estimatedPrice: 0,
+        }));
+        setRealMechanics(mapped);
+      })
+      .catch(() => {});
+  }, []);
 
   // OTP Verification States
   const [showOTPModal, setShowOTPModal] = useState(false);
@@ -1837,7 +1861,7 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
             </div>
 
             <div className="space-y-4">
-              {MOCK_MECHANICS
+              {[...realMechanics, ...MOCK_MECHANICS]
                 .filter(m => {
                   if (radius === 'Any') return true;
                   const radiusValue = parseInt(radius);
