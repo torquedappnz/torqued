@@ -89,6 +89,47 @@ function getOrigin(req: express.Request): string {
 // In-memory store: key = uppercase rego, value = { code, expiresAt }
 const otpStore = new Map<string, { code: string; expiresAt: number }>();
 
+// Magic-link tokens for customer verification: token -> { rego, expiresAt }
+const magicStore = new Map<string, { rego: string; expiresAt: number }>();
+
+function generateMagicEmailHtml(rego: string, link: string): string {
+  return `<!DOCTYPE html><html><head><meta charset="utf-8"></head>
+<body style="margin:0;padding:0;background:#0b0201;font-family:-apple-system,Arial,sans-serif">
+<table width="100%" cellpadding="0" cellspacing="0" style="background:#0b0201;padding:32px 8px"><tr><td align="center">
+<table width="100%" cellpadding="0" cellspacing="0" style="max-width:480px;background:#150402;border-radius:20px;overflow:hidden;border:1px solid rgba(255,24,0,.15)">
+<tr><td style="background:#050100;padding:24px 32px;border-bottom:3px solid #FF1800;text-align:center"><img src="${LOGO_URL}" width="200" height="67" style="display:inline-block;width:200px;height:67px;border:0"/></td></tr>
+<tr><td style="padding:40px 32px;text-align:center">
+<span style="display:inline-block;background:rgba(255,24,0,.12);color:#FF1800;font-size:9.5px;font-weight:900;letter-spacing:2px;text-transform:uppercase;padding:6px 14px;border-radius:6px">VEHICLE VERIFICATION</span>
+<h1 style="margin:20px 0 8px;font-size:20px;font-weight:900;color:#fff;text-transform:uppercase">Confirm it's you</h1>
+<p style="margin:0 0 28px;font-size:13px;color:rgba(255,255,255,.55);line-height:1.5">Tap below to securely access the history for <strong style="color:#fff">${rego}</strong>.</p>
+<a href="${link}" style="display:inline-block;background:#FF1800;color:#fff;font-size:13px;font-weight:900;text-transform:uppercase;letter-spacing:1.5px;text-decoration:none;padding:15px 36px;border-radius:12px">Verify &amp; Continue</a>
+<p style="margin:28px 0 0;font-size:11px;color:rgba(255,255,255,.35);line-height:1.5">Link expires in 15 minutes. Or paste:<br/><a href="${link}" style="color:rgba(255,255,255,.5);word-break:break-all">${link}</a></p>
+</td></tr>
+<tr><td style="background:#050100;padding:18px 32px;text-align:center"><p style="margin:0;font-size:10px;color:rgba(255,255,255,.3)">Didn't request this? You can ignore this email.</p></td></tr>
+</table></td></tr></table></body></html>`;
+}
+
+// Create a magic token, email the link, and return delivery info (+ fallback link if email fails)
+async function sendMagicLink(rego: string, email: string, origin: string) {
+  const token = crypto.randomBytes(24).toString('hex');
+  magicStore.set(token, { rego, expiresAt: Date.now() + 15 * 60 * 1000 });
+  const link = `${origin}/customer?vt=${token}`;
+  let delivered = false;
+  const transporter = getMailTransporter();
+  if (transporter) {
+    try {
+      await transporter.sendMail({
+        from: process.env.SMTP_FROM || '"Torqued" <torquedapp.nz@gmail.com>',
+        to: email,
+        subject: `Verify your vehicle on Torqued`,
+        html: generateMagicEmailHtml(rego, link),
+      });
+      delivered = true;
+    } catch (e) { console.warn('[magic] send failed:', (e as Error)?.message); }
+  }
+  return { delivered, fallbackLink: delivered ? undefined : link };
+}
+
 function maskEmail(email: string): string {
   const [local, domain] = email.split('@');
   if (!domain) return email;
@@ -224,39 +265,49 @@ app.post('/api/customer/check-plate', async (req, res) => {
 
     if (!ownerEmail) return res.json({ found: true, isNew: true });
 
-    // Send OTP via Gmail
-    const code = crypto.randomInt(100000, 999999).toString();
-    otpStore.set(formattedRego, { code, expiresAt: Date.now() + 10 * 60 * 1000 });
-
-    // If email delivery fails (e.g. provider outage), surface the code so testing
-    // isn't blocked. Self-limiting: only returned when the email could NOT be sent.
-    let emailDelivered = false;
-    const transporter = getMailTransporter();
-    if (transporter) {
-      try {
-        await transporter.sendMail({
-          from: process.env.SMTP_FROM || '"Torqued" <torquedapp.nz@gmail.com>',
-          to: ownerEmail,
-          subject: `${code} — your Torqued verification code`,
-          html: generateOtpEmailHtml(formattedRego, code),
-        });
-        emailDelivered = true;
-      } catch (e) {
-        console.warn('[OTP] email send failed, returning fallback code:', (e as Error)?.message);
-      }
-    }
-    if (!emailDelivered) console.log(`[OTP] ${formattedRego} → ${code} (fallback)`);
+    // Returning customer — email a magic verification link
+    const { delivered, fallbackLink } = await sendMagicLink(formattedRego, ownerEmail, getOrigin(req));
 
     return res.json({
       found: true,
       isNew: false,
       customerName,
       maskedEmail: maskEmail(ownerEmail),
-      ...(emailDelivered ? {} : { fallbackCode: code }),
+      magicSent: true,
+      ...(delivered ? {} : { fallbackLink }),
     });
   } catch (err) {
     console.error('[check-plate]', err);
     res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// GET /api/customer/verify-link?token= — validate a magic link, return the customer's garage
+app.get('/api/customer/verify-link', async (req, res) => {
+  try {
+    const token = req.query.token as string;
+    const entry = token ? magicStore.get(token) : null;
+    if (!entry) return res.status(400).json({ error: 'This link is invalid or already used.' });
+    if (Date.now() > entry.expiresAt) { magicStore.delete(token); return res.status(400).json({ error: 'This link has expired. Please request a new one.' }); }
+    magicStore.delete(token); // one-time use
+
+    const supabase = getSupabaseAdmin();
+    if (!supabase) return res.status(500).json({ error: 'Database not configured' });
+
+    const { data: vehicle } = await supabase.from('vehicles').select('owner_id').eq('rego', entry.rego).single();
+    let email: string | null = null, ownerId: string | null = null, vehicles: any[] = [];
+    if (vehicle?.owner_id) {
+      ownerId = vehicle.owner_id;
+      const { data: profile } = await supabase.from('profiles').select('email').eq('id', ownerId).single();
+      email = profile?.email ?? null;
+      const { data: rows } = await supabase.from('vehicles')
+        .select('rego, make, model, year, variant, mileage, thumbnail').eq('owner_id', ownerId);
+      vehicles = rows ?? [];
+    }
+    res.json({ success: true, rego: entry.rego, email, ownerId, vehicles });
+  } catch (err) {
+    console.error('[verify-link]', err);
+    res.status(500).json({ error: 'Verification failed' });
   }
 });
 
@@ -289,7 +340,8 @@ app.post('/api/customer/register', async (req, res) => {
 
       if (existing) {
         await supabase.from('vehicles').update({ owner_id: existing.id }).eq('rego', formattedRego);
-        return res.json({ success: true });
+        const r = await sendMagicLink(formattedRego, email, getOrigin(req));
+        return res.json({ success: true, maskedEmail: maskEmail(email), magicSent: true, ...(r.delivered ? {} : { fallbackLink: r.fallbackLink }) });
       }
       return res.status(400).json({ error: authError.message });
     }
@@ -308,23 +360,9 @@ app.post('/api/customer/register', async (req, res) => {
     // Link vehicle to this customer
     await supabase.from('vehicles').update({ owner_id: userId }).eq('rego', formattedRego);
 
-    // Send welcome OTP so they can verify and proceed
-    const code = crypto.randomInt(100000, 999999).toString();
-    otpStore.set(formattedRego, { code, expiresAt: Date.now() + 10 * 60 * 1000 });
-
-    const transporter = getMailTransporter();
-    if (transporter) {
-      await transporter.sendMail({
-        from: process.env.SMTP_FROM || '"Torqued" <torquedapp.nz@gmail.com>',
-        to: email,
-        subject: `Welcome to Torqued! Your verification code: ${code}`,
-        html: generateOtpEmailHtml(formattedRego, code),
-      });
-    } else {
-      console.log(`[New Customer OTP] ${formattedRego} → ${code}`);
-    }
-
-    res.json({ success: true, maskedEmail: maskEmail(email) });
+    // Email a magic verification link
+    const magic = await sendMagicLink(formattedRego, email, getOrigin(req));
+    res.json({ success: true, maskedEmail: maskEmail(email), magicSent: true, ...(magic.delivered ? {} : { fallbackLink: magic.fallbackLink }) });
   } catch (err) {
     console.error('[customer/register]', err);
     res.status(500).json({ error: 'Registration failed' });

@@ -421,8 +421,33 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
   const [otpVerificationError, setOtpVerificationError] = useState('');
   const [otpResendCooldown, setOtpResendCooldown] = useState(0);
   const [otpResendMsg, setOtpResendMsg] = useState<string | null>(null);
-  // Shown only when email delivery is down, so testing isn't blocked
-  const [otpFallbackCode, setOtpFallbackCode] = useState<string | null>(null);
+  // Magic-link verification state
+  const [magicSentTo, setMagicSentTo] = useState<string | null>(null);
+  const [magicFallbackLink, setMagicFallbackLink] = useState<string | null>(null);
+  const [magicVerifying, setMagicVerifying] = useState(false);
+
+  // Verify a magic link on load (?vt=token)
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const vt = params.get('vt');
+    if (!vt) return;
+    setMagicVerifying(true);
+    window.history.replaceState({}, document.title, window.location.pathname);
+    fetch(`/api/customer/verify-link?token=${encodeURIComponent(vt)}`)
+      .then(r => r.json())
+      .then(async (d) => {
+        if (!d.success) { setPlateMatchError(d.error || 'Link invalid or expired.'); return; }
+        if (d.email) setCustomerEmail(d.email);
+        if (d.ownerId) setCustomerOwnerId(d.ownerId);
+        if (Array.isArray(d.vehicles) && d.vehicles.length) {
+          setGarageVehicles(d.vehicles.map((r: any) => ({ id: r.rego, rego: r.rego, make: r.make, model: r.model, year: r.year, variant: r.variant ?? undefined, mileage: r.mileage ?? 0, thumbnail: r.thumbnail ?? undefined })));
+        }
+        setRego(d.rego);
+        await loadVehicleByRego(d.rego);
+      })
+      .catch(() => setPlateMatchError('Verification failed. Please try again.'))
+      .finally(() => setMagicVerifying(false));
+  }, []);
   // Review flow (opened from the review link in the completion email)
   const [reviewCtx, setReviewCtx] = useState<{ bookingId: string; mechanicId: string } | null>(null);
   const [reviewRating, setReviewRating] = useState(5);
@@ -920,11 +945,10 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
         // Otherwise it's a genuinely new customer — show registration form
         setShowNewCustomerForm(true);
       } else {
-        // Returning customer — show OTP modal
+        // Returning customer — magic link emailed
         setReturningCustomerName(data.customerName);
-        setOtpSentEmail(data.maskedEmail || 'your registered email');
-        setOtpFallbackCode(data.fallbackCode || null);
-        setShowOTPModal(true);
+        setMagicSentTo(data.maskedEmail || 'your registered email');
+        setMagicFallbackLink(data.fallbackLink || null);
       }
     } catch (err) {
       setPlateMatchError('Could not connect. Please try again.');
@@ -3236,9 +3260,9 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                       if (!res.ok) { setNewCustomerError(data.error || 'Registration failed'); return; }
                       setUserName(newCustomerName);
                       setCustomerEmail(newCustomerEmail);
-                      setOtpSentEmail(data.maskedEmail || newCustomerEmail);
                       setShowNewCustomerForm(false);
-                      setShowOTPModal(true);
+                      setMagicSentTo(data.maskedEmail || newCustomerEmail);
+                      setMagicFallbackLink(data.fallbackLink || null);
                     } catch {
                       setNewCustomerError('Could not connect. Please try again.');
                     } finally {
@@ -3255,7 +3279,48 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
         )}
       </AnimatePresence>
 
-      {/* Verification Code OTP Modal */}
+      {/* Magic-link verifying overlay */}
+      <AnimatePresence>
+        {magicVerifying && (
+          <div className="fixed inset-0 z-[130] flex items-center justify-center bg-torqued-dark">
+            <div className="text-center space-y-4">
+              <div className="w-12 h-12 border-4 border-torqued-red border-t-transparent rounded-full animate-spin mx-auto" />
+              <p className="text-white/60 font-bold text-sm uppercase tracking-widest">Verifying your link…</p>
+            </div>
+          </div>
+        )}
+      </AnimatePresence>
+
+      {/* Magic-link sent modal */}
+      <AnimatePresence>
+        {magicSentTo && (
+          <div className="fixed inset-0 z-[120] flex items-center justify-center p-4 bg-black/70 backdrop-blur-sm">
+            <motion.div
+              initial={{ opacity: 0, scale: 0.95, y: 20 }} animate={{ opacity: 1, scale: 1, y: 0 }} exit={{ opacity: 0, scale: 0.95, y: 20 }}
+              className="w-full max-w-md bg-card border border-border rounded-3xl p-8 space-y-5 text-center shadow-2xl"
+            >
+              <div className="w-16 h-16 mx-auto rounded-2xl bg-torqued-red/10 border border-torqued-red/20 flex items-center justify-center text-torqued-red text-3xl">✉️</div>
+              <div className="space-y-2">
+                <h3 className="text-2xl font-black tracking-tight">
+                  {returningCustomerName ? `Welcome back, ${returningCustomerName}` : 'Check your email'}
+                </h3>
+                <p className="text-sm text-muted">
+                  We've emailed a secure verification link to <span className="font-bold text-foreground">{magicSentTo}</span>. Tap it to access your vehicle — it expires in 15 minutes.
+                </p>
+              </div>
+              {magicFallbackLink && (
+                <div className="p-3 bg-amber-500/10 border border-amber-500/30 rounded-xl text-left space-y-2">
+                  <p className="text-[10px] font-black uppercase tracking-widest text-amber-500">Email delivery is down — use this link to continue testing:</p>
+                  <a href={magicFallbackLink} className="text-xs text-torqued-red font-bold break-all underline">{magicFallbackLink}</a>
+                </div>
+              )}
+              <Button variant="ghost" fullWidth onClick={() => { setMagicSentTo(null); setMagicFallbackLink(null); }}>Close</Button>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
+      {/* Verification Code OTP Modal (legacy — no longer triggered) */}
       <AnimatePresence>
         {showOTPModal && (
           <div className="fixed inset-0 z-[110] flex items-center justify-center p-4">
@@ -3290,14 +3355,6 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                   Enter the code from your email to continue.
                 </p>
               </div>
-
-              {otpFallbackCode && (
-                <div className="p-3 bg-amber-500/10 border border-amber-500/30 rounded-xl text-center space-y-1">
-                  <p className="text-[10px] font-black uppercase tracking-widest text-amber-500">Email delivery is temporarily down</p>
-                  <p className="text-[11px] text-muted">Use this code to continue testing:</p>
-                  <p className="font-mono text-2xl font-black tracking-[0.3em] text-foreground">{otpFallbackCode}</p>
-                </div>
-              )}
 
               <div className="space-y-2 text-left">
                 <label className="text-[10px] font-black uppercase text-muted tracking-widest block mb-1">6-Digit Verification Code</label>
