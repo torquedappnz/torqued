@@ -473,6 +473,91 @@ app.post('/api/mechanic/email-trial', async (req, res) => {
   }
 });
 
+// ── Reviews ─────────────────────────────────────────────────
+// POST /api/reviews/request — mechanic marks a job complete; email the customer a review link
+app.post('/api/reviews/request', async (req, res) => {
+  try {
+    const { bookingId } = req.body;
+    if (!bookingId) return res.status(400).json({ error: 'bookingId required' });
+    const supabase = getSupabaseAdmin();
+    if (!supabase) return res.status(500).json({ error: 'Database not configured' });
+
+    const { data: booking } = await supabase
+      .from('bookings').select('*').eq('id', bookingId).single();
+    if (!booking) return res.status(404).json({ error: 'Booking not found' });
+
+    await supabase.from('bookings').update({
+      status: 'completed', completed_at: new Date().toISOString(), review_requested: true,
+    }).eq('id', bookingId);
+
+    const origin = getOrigin(req);
+    const reviewUrl = `${origin}/customer?review_booking=${bookingId}&m=${booking.mechanic_id}`;
+    const to = booking.email;
+    const transporter = getMailTransporter();
+    if (to && transporter) {
+      const html = `<div style="font-family:-apple-system,Arial,sans-serif;max-width:480px;margin:auto;background:#fff;border-radius:16px;overflow:hidden;border:1px solid #eee">
+<div style="background:#150402;padding:24px;text-align:center"><img src="${LOGO_URL}" width="180" style="height:auto"/></div>
+<div style="padding:32px;color:#150402">
+<h2 style="margin:0 0 8px">How was your service?</h2>
+<p style="color:#555;font-size:14px">Your booking <strong>#${bookingId}</strong> is complete. Leave a quick verified review to help other drivers.</p>
+<a href="${reviewUrl}" style="display:inline-block;background:#FF1800;color:#fff;font-weight:900;text-transform:uppercase;font-size:13px;letter-spacing:1px;text-decoration:none;padding:14px 32px;border-radius:10px;margin-top:12px">Leave a Review</a>
+</div></div>`;
+      await transporter.sendMail({ from: process.env.SMTP_FROM || '"Torqued" <torquedapp.nz@gmail.com>', to, subject: 'How was your Torqued service?', html }).catch(()=>{});
+    }
+    res.json({ success: true });
+  } catch (err) {
+    console.error('[reviews/request]', err);
+    res.status(500).json({ error: 'Could not request review' });
+  }
+});
+
+// POST /api/reviews/submit — customer submits a verified review
+app.post('/api/reviews/submit', async (req, res) => {
+  try {
+    const { bookingId, mechanicId, rating, comment, email, name } = req.body;
+    if (!mechanicId || !rating) return res.status(400).json({ error: 'mechanicId and rating required' });
+    const supabase = getSupabaseAdmin();
+    if (!supabase) return res.status(500).json({ error: 'Database not configured' });
+
+    await supabase.from('reviews').insert({
+      booking_id: bookingId || null, mechanic_id: mechanicId,
+      customer_email: email || null, customer_name: name || null,
+      rating: Math.max(1, Math.min(5, parseInt(rating))), comment: comment || null,
+    });
+
+    // Recompute the mechanic's aggregate rating
+    const { data: all } = await supabase.from('reviews').select('rating').eq('mechanic_id', mechanicId);
+    const ratings = (all ?? []).map((r: any) => r.rating);
+    const avg = ratings.length ? ratings.reduce((a: number, b: number) => a + b, 0) / ratings.length : 0;
+    await supabase.from('profiles').update({
+      rating: Math.round(avg * 100) / 100, review_count: ratings.length,
+    }).eq('id', mechanicId);
+
+    res.json({ success: true });
+  } catch (err) {
+    console.error('[reviews/submit]', err);
+    res.status(500).json({ error: 'Could not submit review' });
+  }
+});
+
+// GET /api/reviews?mechanicId= — public reviews for a mechanic
+app.get('/api/reviews', async (req, res) => {
+  try {
+    const mechanicId = req.query.mechanicId as string;
+    const supabase = getSupabaseAdmin();
+    if (!supabase || !mechanicId) return res.json({ reviews: [], average: 0, count: 0 });
+    const { data } = await supabase.from('reviews')
+      .select('rating, comment, customer_name, created_at')
+      .eq('mechanic_id', mechanicId).order('created_at', { ascending: false });
+    const ratings = (data ?? []).map((r: any) => r.rating);
+    const average = ratings.length ? ratings.reduce((a: number, b: number) => a + b, 0) / ratings.length : 0;
+    res.json({ reviews: data ?? [], average: Math.round(average * 100) / 100, count: ratings.length });
+  } catch (err) {
+    console.error('[reviews]', err);
+    res.json({ reviews: [], average: 0, count: 0 });
+  }
+});
+
 // GET /api/mechanic/status — reliable subscription status read (service role, no RLS race)
 app.get('/api/mechanic/status', async (req, res) => {
   try {

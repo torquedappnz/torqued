@@ -423,6 +423,21 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
   const [otpResendMsg, setOtpResendMsg] = useState<string | null>(null);
   // Shown only when email delivery is down, so testing isn't blocked
   const [otpFallbackCode, setOtpFallbackCode] = useState<string | null>(null);
+  // Review flow (opened from the review link in the completion email)
+  const [reviewCtx, setReviewCtx] = useState<{ bookingId: string; mechanicId: string } | null>(null);
+  const [reviewRating, setReviewRating] = useState(5);
+  const [reviewComment, setReviewComment] = useState('');
+  const [reviewDone, setReviewDone] = useState(false);
+
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const rb = params.get('review_booking');
+    const m = params.get('m');
+    if (rb && m) {
+      setReviewCtx({ bookingId: rb, mechanicId: m });
+      window.history.replaceState({}, document.title, window.location.pathname);
+    }
+  }, []);
   const [isBookingLoading, setIsBookingLoading] = useState(false);
   const [stripeCheckoutUrl, setStripeCheckoutUrl] = useState<string | null>(null);
   const [isStripeSessionLoading, setIsStripeSessionLoading] = useState(false);
@@ -3093,6 +3108,59 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                   Cancel
                 </Button>
               </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
+      {/* Verified Review Modal */}
+      <AnimatePresence>
+        {reviewCtx && (
+          <div className="fixed inset-0 z-[120] flex items-center justify-center p-4 bg-black/70 backdrop-blur-sm">
+            <motion.div
+              initial={{ opacity: 0, scale: 0.95, y: 20 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.95, y: 20 }}
+              className="w-full max-w-md bg-card border border-border rounded-3xl p-8 space-y-5 shadow-2xl text-center"
+            >
+              {reviewDone ? (
+                <>
+                  <div className="w-16 h-16 mx-auto rounded-2xl bg-emerald-500/10 border border-emerald-500/20 flex items-center justify-center text-emerald-400"><CheckCircle2 size={32} /></div>
+                  <h3 className="text-2xl font-black tracking-tight">Thanks for your review!</h3>
+                  <p className="text-sm text-muted">Your verified review helps other NZ drivers choose with confidence.</p>
+                  <Button fullWidth className="bg-torqued-red text-white" onClick={() => { setReviewCtx(null); setReviewDone(false); }}>Done</Button>
+                </>
+              ) : (
+                <>
+                  <h3 className="text-2xl font-black tracking-tight">Rate your service</h3>
+                  <p className="text-sm text-muted">How was your experience? Your review is verified against a real booking.</p>
+                  <div className="flex justify-center gap-2 py-2">
+                    {[1,2,3,4,5].map(n => (
+                      <button key={n} onClick={() => setReviewRating(n)} className="transition-transform active:scale-90">
+                        <Star size={36} className={n <= reviewRating ? 'text-yellow-400 fill-current' : 'text-muted/30'} />
+                      </button>
+                    ))}
+                  </div>
+                  <textarea
+                    value={reviewComment}
+                    onChange={e => setReviewComment(e.target.value)}
+                    placeholder="Tell us about the work, communication, value… (optional)"
+                    className="w-full bg-background border border-border rounded-xl px-4 py-3 text-sm text-foreground placeholder:text-muted focus:outline-none focus:border-torqued-red min-h-[90px]"
+                  />
+                  <div className="flex gap-3">
+                    <Button fullWidth className="bg-torqued-red text-white" onClick={async () => {
+                      try {
+                        await fetch('/api/reviews/submit', {
+                          method: 'POST', headers: { 'Content-Type': 'application/json' },
+                          body: JSON.stringify({ bookingId: reviewCtx.bookingId, mechanicId: reviewCtx.mechanicId, rating: reviewRating, comment: reviewComment, email: customerEmail, name: userName }),
+                        });
+                        setReviewDone(true);
+                      } catch {}
+                    }}>Submit Review</Button>
+                    <Button variant="ghost" onClick={() => setReviewCtx(null)}>Skip</Button>
+                  </div>
+                </>
+              )}
             </motion.div>
           </div>
         )}

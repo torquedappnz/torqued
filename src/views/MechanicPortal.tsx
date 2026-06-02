@@ -967,7 +967,18 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
               ) : (
                 <>
                   <Button className="flex-1 bg-emerald-600 hover:bg-emerald-700 text-white font-bold" onClick={() => handleAcceptJob(job.id)}>Accept Job</Button>
-                  <Button variant="outline" className="flex-1 border-border text-foreground hover:bg-card">Request More Info</Button>
+                  <Button variant="outline" className="flex-1 border-border text-foreground hover:bg-card" onClick={async () => {
+                    try {
+                      const r = await fetch('/api/reviews/request', {
+                        method: 'POST', headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ bookingId: job.id }),
+                      });
+                      if (r.ok) {
+                        setIncomingJobs(incomingJobs.filter(j => j.id !== job.id));
+                        alert('Job marked complete. A review request has been emailed to the customer.');
+                      }
+                    } catch { alert('Could not mark complete. Try again.'); }
+                  }}>Mark Complete</Button>
                   <Button variant="outline" className="text-muted border-border hover:bg-card" onClick={() => {
                     setIncomingJobs(incomingJobs.filter(j => j.id !== job.id));
                     supabase.from('bookings').update({ status: 'pending' }).eq('id', job.id)
