@@ -578,8 +578,8 @@ app.get('/api/vehicles/:rego', async (req, res) => {
   res.json(data);
 });
 
-// POST /api/otp/verify — validates code and clears it from store
-app.post('/api/otp/verify', (req, res) => {
+// POST /api/otp/verify — validates code, clears it, and returns the owner's email
+app.post('/api/otp/verify', async (req, res) => {
   const { rego, code } = req.body;
   if (!rego || !code) return res.status(400).json({ success: false, error: 'rego and code are required' });
 
@@ -598,7 +598,19 @@ app.post('/api/otp/verify', (req, res) => {
   }
 
   otpStore.delete(formattedRego); // One-time use
-  res.json({ success: true });
+
+  // Return the verified owner's email so the client can use it for booking/checkout
+  let email: string | null = null;
+  const supabase = getSupabaseAdmin();
+  if (supabase) {
+    const { data: vehicle } = await supabase.from('vehicles').select('owner_id').eq('rego', formattedRego).single();
+    if (vehicle?.owner_id) {
+      const { data: profile } = await supabase.from('profiles').select('email').eq('id', vehicle.owner_id).single();
+      email = profile?.email ?? null;
+    }
+  }
+
+  res.json({ success: true, email });
 });
 
 // ── Stripe Webhook — must be registered before any routes that need parsed JSON bodies
@@ -1129,17 +1141,6 @@ function generateMechanicEmailHtml(data: any): string {
             </td>
           </tr>
 
-          <!-- OVERNIGHT DROP STATIONS -->
-          <tr>
-            <td style="padding: 20px 32px 10px 32px;">
-              <div style="background-color: rgba(255, 24, 0, 0.04); border: 1px dashed rgba(255, 24, 0, 0.3); border-radius: 16px; padding: 18px; text-align: left;">
-                <p style="margin: 0 0 4px 0; font-family: -apple-system, Arial, sans-serif; font-size: 11px; font-weight: bold; color: #FF1800; text-transform: uppercase;">🔒 SECURITY VAULT INSTRUCTION</p>
-                <p style="margin: 0; font-family: -apple-system, Arial, sans-serif; font-size: 12px; color: rgba(255,255,255,0.8); line-height: 1.4;">
-                  Please ensure your overnight dropbox code is calibrated. The client has been provided secure dropbox credentials. The code <strong>9944</strong> is reserved for dropoff envelopes on this job.
-                </p>
-              </div>
-            </td>
-          </tr>
 
           <!-- CONTACT FOOTER -->
           <tr>
@@ -1232,8 +1233,7 @@ function generateDropoffReminderEmailHtml(data: any): string {
 
               <h3 style="margin: 0 0 8px 0; font-size: 11px; font-weight: bold; color: #150402; letter-spacing: 1px; text-transform: uppercase;">📌 Drop-Off Checklist</h3>
               <ul style="margin: 0; padding-left: 20px; line-height: 1.6; color: rgba(21,4,2,0.7); font-weight: 500;">
-                <li style="margin-bottom: 6px;">Arrive on time or use the overnight secure <strong>key drop-box</strong>.</li>
-                <li style="margin-bottom: 6px;">If dropping after-hours, drop keys in the secure vault using code: <strong>9944</strong>.</li>
+                <li style="margin-bottom: 6px;">Arrive at your booked drop-off time.</li>
                 <li style="margin-bottom: 6px;">Leave special wheel lock nuts or service logbooks in your vehicle console.</li>
               </ul>
             </td>
@@ -1476,7 +1476,7 @@ app.post('/api/email/confirm-booking', async (req, res) => {
     const mechanicHtml = generateMechanicEmailHtml(data);
     const dropoffHtml = generateDropoffReminderEmailHtml(data);
     const serviceReminderHtml = generateServiceReminderEmailHtml(data);
-    const smsText = `TORQUED: Booking Ref #${data.bookingId} is confirmed at ${data.mechanicName}! Drop off your vehicle (${data.vehicle} - ${data.plate}) on ${data.date} at ${data.time} at ${data.mechanicAddress}. Overnight lock-box passcode is 9944.`;
+    const smsText = `TORQUED: Booking Ref #${data.bookingId} is confirmed at ${data.mechanicName}! Drop off your vehicle (${data.vehicle} - ${data.plate}) on ${data.date} at ${data.time} at ${data.mechanicAddress}.`;
 
     // Initialise mail SMTP transporter if present in environment settings
     const transporter = getMailTransporter();
@@ -1618,7 +1618,7 @@ app.post('/api/email/send-test-single', async (req, res) => {
         return res.status(400).json({ error: 'Invalid templateType' });
     }
 
-    const SMS = `TORQUED TEST: Booking Ref #${finalData.bookingId} is confirmed for vehicle (${finalData.vehicle} - ${finalData.plate}). Drop off time: ${finalData.time}! Passcode: 9944.`;
+    const SMS = `TORQUED TEST: Booking Ref #${finalData.bookingId} is confirmed for vehicle (${finalData.vehicle} - ${finalData.plate}). Drop off time: ${finalData.time}!`;
 
     const transporter = getMailTransporter();
     let sentRealEmail = false;

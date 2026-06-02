@@ -280,14 +280,14 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
     doc.setFont('Helvetica', 'bold');
     doc.setFontSize(9);
     doc.setTextColor(255, 24, 0);
-    doc.text('🔒 SECURED CLEARANCE', 20, 16 + currentY);
-    
+    doc.text('SECURED CLEARANCE', 20, 16 + currentY);
+
     doc.setFont('Helvetica', 'normal');
     doc.setFontSize(8);
     doc.setTextColor(115, 115, 115);
-    doc.text('This job registration is verified. Drop keys in the workshop', 20, 23 + currentY);
-    doc.text('secure dropbox if arriving after-hours. The default', 20, 27 + currentY);
-    doc.text('dropoff envelope vault passcode is set to 9944.', 20, 31 + currentY);
+    doc.text('This booking is verified and prepaid through Torqued.', 20, 23 + currentY);
+    doc.text('Arrive at your scheduled drop-off time and present this', 20, 27 + currentY);
+    doc.text('receipt to your workshop on arrival.', 20, 31 + currentY);
     
     // 7. Sign-Off
     const signY = currentY + 62;
@@ -382,6 +382,8 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
   const [newCustomerError, setNewCustomerError] = useState<string | null>(null);
   const [newCustomerLoading, setNewCustomerLoading] = useState(false);
   const [returningCustomerName, setReturningCustomerName] = useState<string | null>(null);
+  // The customer's real email (from onboarding/verification) — used for Stripe checkout
+  const [customerEmail, setCustomerEmail] = useState<string>('');
 
   // OTP Verification States
   const [showOTPModal, setShowOTPModal] = useState(false);
@@ -492,7 +494,7 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
           services: servicesArray.length > 0 ? servicesArray : ['Full Dual-Clutch Transmission (DCT) Service & Calibration'],
           price: latestBooking?.totalPrice || 349.00,
           paymentOption: paymentOption,
-          depositPaid: latestBooking?.depositPaid || (paymentOption === 'deposit' ? 150.00 : 349.00),
+          depositPaid: latestBooking?.depositPaid || 0,
   
   
         }
@@ -731,6 +733,7 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
         setOtpVerificationError(verifyData.error || 'Invalid or expired code. Please try again.');
         return;
       }
+      if (verifyData.email) setCustomerEmail(verifyData.email);
     } catch {
       setOtpVerificationError('Verification failed. Please try again.');
       return;
@@ -951,16 +954,16 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
       serviceIds: selectedServices,
       mechanicId: selectedMechanic.id,
       status: (isFinanceNow || mbiStatus === 'not-claimed') ? 'pending' : 'booked',
-      paymentStatus: isClaimApproved ? 'confirmed' : (isFinanceNow || mbiStatus === 'not-claimed' ? 'awaiting_approval' : (paymentOption === 'deposit' ? 'partially_paid' : 'confirmed')),
+      paymentStatus: isClaimApproved ? 'confirmed' : (isFinanceNow || mbiStatus === 'not-claimed' ? 'awaiting_approval' : 'confirmed'),
       paymentMethod: mbiStatus === 'not-claimed' ? 'Provident Insurance' : paymentMethod,
       date: selectedDate,
       totalPrice: finalCalculatedPrice,
-      depositPaid: paymentOption === 'deposit' ? 150 : undefined,
+      depositPaid: undefined,
     };
 
     if (isImmediatePayment) {
-      const baseTodayAmount = paymentOption === 'deposit' ? 150 : calculatedPrice;
-      const todayAmountToPay = baseTodayAmount;
+      // Torqued is prepaid in full — the customer pays the whole amount up front.
+      const todayAmountToPay = calculatedPrice;
 
       // GUARD: If $219.00 OFF code brings due amount to $0, confirm directly without going to Stripe checkout
       if (todayAmountToPay === 0) {
@@ -1020,7 +1023,7 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
           body: JSON.stringify({
             amount: todayAmountToPay,
             bookingId: newJob.id,
-            customerEmail: userProfile?.email || user?.email || 'customer@torqued.nz',
+            customerEmail: customerEmail || userProfile?.email || user?.email || 'customer@torqued.nz',
             description: `Torqued Repair Booking Ref ${newJob.id}`,
             bookingData: newJob,
             userId: user?.id ?? null,
@@ -1284,7 +1287,7 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                       handleRegoLookup();
                     }
                   }}
-                  className="text-lg sm:text-2xl font-display font-bold placeholder:font-normal bg-white/5 border-white/10 text-white focus:bg-white/10 focus:ring-1 focus:ring-torqued-red"
+                  className="text-lg sm:text-2xl font-display font-bold placeholder:font-normal bg-card border-border text-foreground placeholder:text-muted focus:ring-1 focus:ring-torqued-red"
                 />
               </div>
               <Button onClick={handleRegoLookup} disabled={isSearchingRego || !rego} className="bg-torqued-red">
@@ -2101,11 +2104,11 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                     <div className="space-y-6">
                        <div className="flex gap-4">
                           <div className="w-6 h-6 bg-background border border-border rounded-lg flex items-center justify-center text-[10px] font-black shrink-0">1</div>
-                          <p className="text-sm text-foreground/80">Locate the lock-box in front of transmission reception.</p>
+                          <p className="text-sm text-foreground/80">Arrive at the workshop at your booked drop-off time.</p>
                        </div>
                        <div className="flex gap-4">
                           <div className="w-6 h-6 bg-background border border-border rounded-lg flex items-center justify-center text-[10px] font-black shrink-0">2</div>
-                          <p className="text-sm text-foreground/80">SMS us your lock-box code once dropped off.</p>
+                          <p className="text-sm text-foreground/80">Hand your keys to reception and confirm your booking reference.</p>
                        </div>
                        <div className="flex gap-4">
                           <div className="w-6 h-6 bg-background border border-border rounded-lg flex items-center justify-center text-[10px] font-black shrink-0">3</div>
@@ -2274,41 +2277,6 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
               <div className="p-6 bg-card border border-border/70 rounded-3xl space-y-3.5 shadow-md">
               </div>
 
-              {selectedMechanic?.name === 'R&D European' && (
-                <div className="space-y-4">
-                  <label className="text-xs font-black uppercase tracking-widest text-muted">Payment Option</label>
-                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                    <button 
-                      onClick={() => setPaymentOption('full')}
-                      className={cn(
-                        "p-6 border rounded-2xl text-left transition-all relative overflow-hidden group",
-                        paymentOption === 'full' ? "border-torqued-red bg-torqued-red/5 ring-2 ring-torqued-red" : "border-border bg-card hover:border-torqued-red/30"
-                      )}
-                    >
-                      {paymentOption === 'full' && <div className="absolute top-0 right-0 p-2 text-torqued-red"><CheckCircle2 size={16} /></div>}
-                      <p className="text-[10px] font-black uppercase text-muted tracking-widest group-hover:text-torqued-red transition-colors">{isClaimApproved ? 'Insurance Excess' : 'Full Amount'}</p>
-                      
-                      <div className="text-2xl font-black tracking-tighter col-span-1">
-                        ${isClaimApproved ? 450 : selectedMechanic.estimatedPrice}
-                      </div>
-                    </button>
-                    {!isClaimApproved && (
-                      <button 
-                        onClick={() => setPaymentOption('deposit')}
-                        className={cn(
-                          "p-6 border rounded-2xl text-left transition-all relative overflow-hidden group",
-                          paymentOption === 'deposit' ? "border-torqued-red bg-torqued-red/5 ring-2 ring-torqued-red" : "border-border bg-card hover:border-torqued-red/30"
-                        )}
-                      >
-                        {paymentOption === 'deposit' && <div className="absolute top-0 right-0 p-2 text-torqued-red"><CheckCircle2 size={16} /></div>}
-                        <p className="text-[10px] font-black uppercase text-muted tracking-widest group-hover:text-torqued-red transition-colors">Pay Deposit Today</p>
-                        
-                        <div className="text-2xl font-black tracking-tighter">$150</div>
-                      </button>
-                    )}
-                  </div>
-                </div>
-              )}
 
               <div className="space-y-6">
                 <div className="space-y-3">
@@ -2405,7 +2373,7 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
           iconElement = <CheckCircle2 size={56} className="text-white" />;
         } else if (isPartiallyPaid) {
           stepTitle = "Deposit Processed!";
-          stepSubtitle = "Your $150.00 deposit was successfully paid. Your slot is locked in and remaining is due at workshop.";
+          stepSubtitle = "Your payment was successful. Your slot is locked in.";
           iconBgColor = "bg-emerald-500 shadow-emerald-500/40";
           iconElement = <CheckCircle2 size={56} className="text-white" />;
         } else if (isAwaitingApproval) {
@@ -2499,7 +2467,7 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                 <div className="w-8 h-8 rounded-full bg-background border border-border flex items-center justify-center shrink-0 font-bold text-xs">3</div>
                 <div>
                   <p className="text-sm font-bold">Drop-off Directions</p>
-                  <p className="text-xs text-muted">Open your garage in the app for lock-box instructions on arrival.</p>
+                  <p className="text-xs text-muted">Open your garage in the app for drop-off details on arrival.</p>
                 </div>
               </div>
             </div>
@@ -3115,6 +3083,7 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                       const data = await res.json();
                       if (!res.ok) { setNewCustomerError(data.error || 'Registration failed'); return; }
                       setUserName(newCustomerName);
+                      setCustomerEmail(newCustomerEmail);
                       setOtpSentEmail(data.maskedEmail || newCustomerEmail);
                       setShowNewCustomerForm(false);
                       setShowOTPModal(true);
@@ -3302,7 +3271,7 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                     <div className="flex justify-between items-center text-xs pt-1.5 border-t border-border">
                       <span className="text-muted font-bold text-foreground">Amount Charged:</span>
                       <span className="font-black text-sm text-emerald-500 font-mono">
-                        ${paymentOption === 'deposit' ? '150.00' : (selectedMechanic?.estimatedPrice || totalPrice)} 
+                        ${selectedMechanic?.estimatedPrice || totalPrice}
                         <span className="text-[9px] text-muted ml-1 font-normal font-sans">NZD</span>
                       </span>
                     </div>
@@ -3624,7 +3593,7 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                           </div>
                         </div>
                         <div className="bg-zinc-900/80 border border-zinc-800/50 rounded-2xl p-3.5 text-xs text-zinc-200 leading-relaxed font-semibold self-end shadow-md max-w-[90%] relative">
-                          {emittedSmsText || `TORQUED DUNEDIN: Booking Ref #${latestBooking?.id || 'TQ-TEST-998A'} is confirmed for vehicle (${vehicle ? `${vehicle.year} ${vehicle.make} ${vehicle.model}` : 'Volkswagen Golf GTE'} - ${vehicle?.rego || 'RAH190'}). Drop off date is ${latestBooking?.date || selectedDate} @ ${selectedTime}. Passcode is 9944.`}
+                          {emittedSmsText || `TORQUED: Booking Ref #${latestBooking?.id || 'TQ-TEST-998A'} is confirmed for vehicle (${vehicle ? `${vehicle.year} ${vehicle.make} ${vehicle.model}` : 'Volkswagen Golf GTE'} - ${vehicle?.rego || 'RAH190'}). Drop off date is ${latestBooking?.date || selectedDate} @ ${selectedTime}.`}
                         </div>
                         <div className="text-[8px] text-zinc-600 text-center font-mono mt-4">Authorized Otago Dispatch Hub</div>
                       </div>
