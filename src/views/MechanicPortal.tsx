@@ -189,6 +189,9 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
   const [mechAuthError, setMechAuthError] = useState<string | null>(null);
   const [mechAuthLoading, setMechAuthLoading] = useState(false);
   const [mechSignupSent, setMechSignupSent] = useState(false);
+  const [subPromo, setSubPromo] = useState('');
+  const [subPromoError, setSubPromoError] = useState<string | null>(null);
+  const [subPromoLoading, setSubPromoLoading] = useState(false);
   const [mechResendCooldown, setMechResendCooldown] = useState(0);
   const [mechResendMsg, setMechResendMsg] = useState<string | null>(null);
 
@@ -1972,10 +1975,48 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                     <span className="font-black italic text-torqued-red text-lg">$99.00 <span className="text-[9px] block font-normal text-white/40 not-italic text-right">/ month</span></span>
                   </div>
 
-                  <Button 
-                     fullWidth 
+                  {/* Promo / trial code — bypasses payment, no card required */}
+                  <div className="space-y-2">
+                    <div className="flex gap-2">
+                      <input
+                        value={subPromo}
+                        onChange={e => { setSubPromo(e.target.value); setSubPromoError(null); }}
+                        placeholder="Promo code (e.g. trial)"
+                        className="flex-1 bg-white/5 border border-white/10 rounded-xl px-4 h-12 text-sm text-white placeholder:text-white/30 focus:outline-none focus:border-torqued-red uppercase"
+                      />
+                      <Button
+                        disabled={subPromoLoading || !subPromo.trim() || !user}
+                        className="bg-white/10 hover:bg-white/20 text-white font-black uppercase text-[10px] tracking-widest px-5 h-12"
+                        onClick={async () => {
+                          if (!user) return;
+                          setSubPromoLoading(true);
+                          setSubPromoError(null);
+                          try {
+                            const r = await fetch('/api/mechanic/redeem-promo', {
+                              method: 'POST', headers: { 'Content-Type': 'application/json' },
+                              body: JSON.stringify({ mechanicId: user.id, code: subPromo }),
+                            });
+                            const d = await r.json();
+                            if (d.activated) { markSubscriptionActive(); }
+                            else setSubPromoError(d.error || 'Invalid promo code.');
+                          } catch {
+                            setSubPromoError('Could not apply code. Please try again.');
+                          } finally {
+                            setSubPromoLoading(false);
+                          }
+                        }}
+                      >
+                        {subPromoLoading ? '...' : 'Apply'}
+                      </Button>
+                    </div>
+                    {subPromoError && <p className="text-[11px] text-torqued-red font-bold">{subPromoError}</p>}
+                    <p className="text-[10px] text-white/30 text-center">Have a trial code? Apply it to skip payment.</p>
+                  </div>
+
+                  <Button
+                     fullWidth
                      disabled={isSubscriptionLoading}
-                     size="lg" 
+                     size="lg"
                      className="bg-torqued-red hover:bg-red-700 text-white font-black uppercase text-xs tracking-widest h-14 flex items-center justify-center gap-2"
                      onClick={async () => {
                        if (!user) return;

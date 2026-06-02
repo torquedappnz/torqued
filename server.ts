@@ -402,6 +402,35 @@ app.post('/api/mechanic/ensure-confirmed', async (req, res) => {
   }
 });
 
+// Mechanic subscription promo codes (no card required). Extend this map as needed.
+const MECHANIC_PROMOS: Record<string, { trialDays: number; label: string }> = {
+  SRITORQUED: { trialDays: 30, label: '30-day free trial' },
+};
+
+// POST /api/mechanic/redeem-promo — activate via a promo code, no payment
+app.post('/api/mechanic/redeem-promo', async (req, res) => {
+  try {
+    const { mechanicId, code } = req.body;
+    if (!mechanicId || !code) return res.status(400).json({ error: 'mechanicId and code are required' });
+
+    const promo = MECHANIC_PROMOS[String(code).toUpperCase().trim()];
+    if (!promo) return res.status(404).json({ error: 'Invalid promo code.' });
+
+    const supabase = getSupabaseAdmin();
+    if (!supabase) return res.status(500).json({ error: 'Database not configured' });
+
+    const { error } = await supabase.from('profiles')
+      .update({ subscription_active: true })
+      .eq('id', mechanicId);
+    if (error) return res.status(500).json({ error: error.message });
+
+    res.json({ activated: true, trialDays: promo.trialDays, label: promo.label });
+  } catch (err) {
+    console.error('[mechanic/redeem-promo]', err);
+    res.status(500).json({ error: 'Could not redeem code' });
+  }
+});
+
 // POST /api/mechanic/activate — force-activate a mechanic's subscription (service role,
 // bypasses RLS so it always persists). Used by the activation/return flows.
 app.post('/api/mechanic/activate', async (req, res) => {
