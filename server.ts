@@ -319,33 +319,26 @@ app.post('/api/mechanic/register', async (req, res) => {
 
     const supabase = getSupabaseAdmin();
     if (!supabase) return res.status(500).json({ error: 'Database not configured' });
-
-    // Create the user + a signup confirmation link (user stays unconfirmed until they click it)
     const origin = getOrigin(req);
-    const { data: linkData, error: linkError } = await supabase.auth.admin.generateLink({
-      type: 'signup',
+
+    // Create the account PRE-CONFIRMED so the mechanic can log in immediately.
+    const { data: authData, error: authError } = await supabase.auth.admin.createUser({
       email,
       password,
-      options: {
-        data: { name, role: 'mechanic' },
-        redirectTo: `${origin}/mechanic`,
-      },
+      email_confirm: true,
+      user_metadata: { name, role: 'mechanic' },
     });
 
-    if (linkError) {
-      if (linkError.message.toLowerCase().includes('already') || linkError.message.toLowerCase().includes('registered')) {
+    if (authError) {
+      if (/already|registered|exists/i.test(authError.message)) {
         return res.status(409).json({ error: 'An account with this email already exists. Please log in instead.' });
       }
-      return res.status(400).json({ error: linkError.message });
+      return res.status(400).json({ error: authError.message });
     }
 
-    const actionLink = linkData.properties?.action_link;
-    if (!actionLink) return res.status(500).json({ error: 'Could not generate confirmation link' });
-
-    // Create the mechanic profile row (exists but unconfirmed until link is clicked)
-    if (linkData.user?.id) {
+    if (authData.user?.id) {
       await supabase.from('profiles').upsert({
-        id: linkData.user.id,
+        id: authData.user.id,
         email,
         name,
         role: 'mechanic',
@@ -353,23 +346,42 @@ app.post('/api/mechanic/register', async (req, res) => {
       }, { onConflict: 'id' });
     }
 
-    // Send the confirmation link through our own (branded) email
+    // Branded welcome email with a link straight to the portal (informational, not a gate)
     const transporter = getMailTransporter();
     if (transporter) {
       await transporter.sendMail({
         from: process.env.SMTP_FROM || '"Torqued" <torquedapp.nz@gmail.com>',
         to: email,
-        subject: 'Confirm your Torqued workshop account',
-        html: generateMechanicConfirmEmailHtml(name, actionLink),
-      });
-    } else {
-      console.log(`[Mechanic confirm link] ${email} → ${actionLink}`);
+        subject: 'Welcome to Torqued — your workshop account is ready',
+        html: generateMechanicConfirmEmailHtml(name, `${origin}/mechanic`),
+      }).catch(e => console.warn('Welcome email failed (non-blocking):', e?.message));
     }
 
-    res.json({ success: true, needsConfirmation: true });
+    res.json({ success: true });
   } catch (err) {
     console.error('[mechanic/register]', err);
     res.status(500).json({ error: 'Registration failed' });
+  }
+});
+
+// POST /api/mechanic/ensure-confirmed — force-confirms an existing account's email
+// (heals accounts left unconfirmed by the earlier link flow so login works).
+app.post('/api/mechanic/ensure-confirmed', async (req, res) => {
+  try {
+    const { email } = req.body;
+    if (!email) return res.status(400).json({ error: 'email required' });
+    const supabase = getSupabaseAdmin();
+    if (!supabase) return res.status(500).json({ error: 'Database not configured' });
+
+    // Find the profile by email to get the user id, then confirm via admin
+    const { data: profile } = await supabase.from('profiles').select('id').eq('email', email).single();
+    if (!profile?.id) return res.json({ confirmed: false });
+
+    await supabase.auth.admin.updateUserById(profile.id, { email_confirm: true });
+    res.json({ confirmed: true });
+  } catch (err) {
+    console.error('[mechanic/ensure-confirmed]', err);
+    res.status(500).json({ error: 'Could not confirm account' });
   }
 });
 

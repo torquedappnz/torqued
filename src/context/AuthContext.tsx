@@ -155,12 +155,21 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
   // ── Mechanic auth ──────────────────────────────────────────
   const loginMechanic = async (email: string, password: string) => {
-    const { error } = await supabase.auth.signInWithPassword({ email, password });
+    let { error } = await supabase.auth.signInWithPassword({ email, password });
+    // Auto-heal accounts that were left unconfirmed by the earlier link flow
+    if (error && /not confirmed/i.test(error.message)) {
+      await fetch('/api/mechanic/ensure-confirmed', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email }),
+      });
+      ({ error } = await supabase.auth.signInWithPassword({ email, password }));
+    }
     if (error) throw new Error(error.message);
   };
 
-  // Returns { error } on failure, or { needsConfirmation: true } on success —
-  // the mechanic must click the emailed confirmation link before they can log in.
+  // Account is created pre-confirmed server-side, so we log the mechanic in
+  // immediately. They still receive a branded welcome email.
   const signUpMechanic = async (email: string, password: string, name: string): Promise<{ error?: string; needsConfirmation?: boolean }> => {
     const res = await fetch('/api/mechanic/register', {
       method: 'POST',
@@ -169,7 +178,9 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     });
     const data = await res.json();
     if (!res.ok) return { error: data.error || 'Sign up failed' };
-    return { needsConfirmation: true };
+    const { error } = await supabase.auth.signInWithPassword({ email, password });
+    if (error) return { error: error.message };
+    return {};
   };
 
   const resendMechanicLink = async (email: string): Promise<string | null> => {
