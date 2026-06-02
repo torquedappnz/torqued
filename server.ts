@@ -583,6 +583,50 @@ app.post('/api/stripe/refund', async (req, res) => {
   }
 });
 
+// ── Service packages (per mechanic) ─────────────────────────
+app.get('/api/mechanic/packages', async (req, res) => {
+  try {
+    const mechanicId = req.query.mechanicId as string;
+    const supabase = getSupabaseAdmin();
+    if (!supabase || !mechanicId) return res.json({ packages: [] });
+    const { data } = await supabase.from('service_packages')
+      .select('id, name, description, price, duration_min').eq('mechanic_id', mechanicId).order('price');
+    res.json({ packages: data ?? [] });
+  } catch { res.json({ packages: [] }); }
+});
+
+app.post('/api/mechanic/packages', async (req, res) => {
+  try {
+    const { mechanicId, name, description, price, durationMin } = req.body;
+    if (!mechanicId || !name || price == null) return res.status(400).json({ error: 'mechanicId, name, price required' });
+    const supabase = getSupabaseAdmin();
+    if (!supabase) return res.status(500).json({ error: 'Database not configured' });
+    const { data, error } = await supabase.from('service_packages').insert({
+      mechanic_id: mechanicId, name, description: description || null,
+      price: Number(price), duration_min: durationMin ? Number(durationMin) : 60,
+    }).select().single();
+    if (error) return res.status(500).json({ error: error.message });
+    res.json({ success: true, package: data });
+  } catch (err) {
+    console.error('[packages create]', err);
+    res.status(500).json({ error: 'Could not create package' });
+  }
+});
+
+app.post('/api/mechanic/packages/delete', async (req, res) => {
+  try {
+    const { id, mechanicId } = req.body;
+    if (!id || !mechanicId) return res.status(400).json({ error: 'id and mechanicId required' });
+    const supabase = getSupabaseAdmin();
+    if (!supabase) return res.status(500).json({ error: 'Database not configured' });
+    await supabase.from('service_packages').delete().eq('id', id).eq('mechanic_id', mechanicId);
+    res.json({ success: true });
+  } catch (err) {
+    console.error('[packages delete]', err);
+    res.status(500).json({ error: 'Could not delete package' });
+  }
+});
+
 // ── Reviews ─────────────────────────────────────────────────
 // POST /api/reviews/request — mechanic marks a job complete; email the customer a review link
 app.post('/api/reviews/request', async (req, res) => {

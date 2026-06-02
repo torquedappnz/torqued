@@ -212,6 +212,14 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
       .catch(() => setOnboardingComplete(true));
   }, [user]);
 
+  // Service packages
+  const [packages, setPackages] = useState<any[]>([]);
+  const [newPkg, setNewPkg] = useState({ name: '', price: '', durationMin: '60', description: '' });
+  useEffect(() => {
+    if (!user) return;
+    fetch(`/api/mechanic/packages?mechanicId=${user.id}`).then(r => r.json()).then(d => setPackages(d.packages || [])).catch(() => {});
+  }, [user]);
+
   // Quote builder
   const [quoteJob, setQuoteJob] = useState<any | null>(null);
   const [qParts, setQParts] = useState<{ name: string; qty: number; unitPrice: number }[]>([]);
@@ -1216,6 +1224,43 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
         </div>
 
         <Button fullWidth size="lg" className="h-16 text-lg" onClick={handleSaveProfile}>Save Profile Updates</Button>
+
+        {/* Service Packages */}
+        <Card className="p-6 space-y-4 md:col-span-2">
+          <div className="flex items-center gap-2 border-b border-black/5 pb-4">
+            <Package size={20} className="text-torqued-red" />
+            <h3 className="text-xl">Service Packages</h3>
+            <span className="text-[10px] text-muted ml-auto">Optional fixed-price bundles customers can book</span>
+          </div>
+          <div className="space-y-2">
+            {packages.map(p => (
+              <div key={p.id} className="flex items-center justify-between bg-background/50 border border-border rounded-xl p-3">
+                <div>
+                  <p className="font-bold text-sm text-foreground">{p.name} <span className="text-muted font-normal">· {p.duration_min}min</span></p>
+                  {p.description && <p className="text-xs text-muted">{p.description}</p>}
+                </div>
+                <div className="flex items-center gap-3">
+                  <span className="font-black text-torqued-red">${Number(p.price).toFixed(0)}</span>
+                  <button onClick={async () => {
+                    await fetch('/api/mechanic/packages/delete', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id: p.id, mechanicId: user!.id }) });
+                    setPackages(packages.filter(x => x.id !== p.id));
+                  }} className="text-muted hover:text-torqued-red"><Trash2 size={15} /></button>
+                </div>
+              </div>
+            ))}
+            {packages.length === 0 && <p className="text-sm text-muted">No packages yet. Add one below.</p>}
+          </div>
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+            <Input placeholder="Name (e.g. Basic Service)" value={newPkg.name} onChange={e => setNewPkg({ ...newPkg, name: e.target.value })} className="sm:col-span-2 bg-background text-foreground" />
+            <Input placeholder="Price $" type="number" value={newPkg.price} onChange={e => setNewPkg({ ...newPkg, price: e.target.value })} className="bg-background text-foreground" />
+            <Input placeholder="Mins" type="number" value={newPkg.durationMin} onChange={e => setNewPkg({ ...newPkg, durationMin: e.target.value })} className="bg-background text-foreground" />
+          </div>
+          <Button className="bg-torqued-red text-white" disabled={!newPkg.name || !newPkg.price} onClick={async () => {
+            const r = await fetch('/api/mechanic/packages', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ mechanicId: user!.id, name: newPkg.name, price: parseFloat(newPkg.price), durationMin: parseInt(newPkg.durationMin) || 60, description: newPkg.description }) });
+            const d = await r.json();
+            if (d.package) { setPackages([...packages, d.package]); setNewPkg({ name: '', price: '', durationMin: '60', description: '' }); }
+          }}><Plus size={14} className="mr-1" /> Add Package</Button>
+        </Card>
       </div>
     </div>
   );
