@@ -473,6 +473,78 @@ app.post('/api/mechanic/email-trial', async (req, res) => {
   }
 });
 
+// POST /api/mechanic/update-quote — mechanic edits a booking's quote (price + note)
+app.post('/api/mechanic/update-quote', async (req, res) => {
+  try {
+    const { bookingId, quotedPrice, note } = req.body;
+    if (!bookingId) return res.status(400).json({ error: 'bookingId required' });
+    const supabase = getSupabaseAdmin();
+    if (!supabase) return res.status(500).json({ error: 'Database not configured' });
+
+    await supabase.from('bookings').update({
+      quoted_price: quotedPrice != null ? Number(quotedPrice) : null,
+      quote_note: note || null,
+    }).eq('id', bookingId);
+
+    // Email the customer their updated quote
+    const { data: b } = await supabase.from('bookings').select('email, vehicle_rego').eq('id', bookingId).single();
+    const transporter = getMailTransporter();
+    if (b?.email && transporter && quotedPrice != null) {
+      const html = `<div style="font-family:-apple-system,Arial,sans-serif;max-width:480px;margin:auto;background:#fff;border-radius:16px;overflow:hidden;border:1px solid #eee">
+<div style="background:#150402;padding:24px;text-align:center"><img src="${LOGO_URL}" width="180" style="height:auto"/></div>
+<div style="padding:32px;color:#150402">
+<h2 style="margin:0 0 8px">Your updated quote</h2>
+<p style="color:#555;font-size:14px">Your workshop has prepared a quote for booking <strong>#${bookingId}</strong>${b.vehicle_rego ? ` (${b.vehicle_rego})` : ''}.</p>
+<p style="font-size:30px;font-weight:900;color:#FF1800;margin:16px 0">$${Number(quotedPrice).toFixed(2)}</p>
+${note ? `<p style="color:#555;font-size:13px">${note}</p>` : ''}
+<a href="https://torquednz.vercel.app/customer" style="display:inline-block;background:#FF1800;color:#fff;font-weight:900;text-transform:uppercase;font-size:13px;letter-spacing:1px;text-decoration:none;padding:14px 32px;border-radius:10px;margin-top:12px">View & Book</a>
+</div></div>`;
+      await transporter.sendMail({ from: process.env.SMTP_FROM || '"Torqued" <torquedapp.nz@gmail.com>', to: b.email, subject: `Your Torqued quote: $${Number(quotedPrice).toFixed(2)}`, html }).catch(()=>{});
+    }
+    res.json({ success: true });
+  } catch (err) {
+    console.error('[update-quote]', err);
+    res.status(500).json({ error: 'Could not update quote' });
+  }
+});
+
+// POST /api/stripe/refund — full or partial refund tied to a booking
+app.post('/api/stripe/refund', async (req, res) => {
+  try {
+    const { bookingId, amount } = req.body; // amount optional (full if omitted)
+    if (!bookingId) return res.status(400).json({ error: 'bookingId required' });
+    const stripe = getStripe();
+    const supabase = getSupabaseAdmin();
+    if (!stripe || !supabase) return res.status(500).json({ error: 'Not configured' });
+
+    const { data: booking } = await supabase.from('bookings').select('*').eq('id', bookingId).single();
+    if (!booking?.stripe_session_id) return res.status(400).json({ error: 'No payment found for this booking to refund.' });
+
+    const session = await stripe.checkout.sessions.retrieve(booking.stripe_session_id);
+    const paymentIntent = session.payment_intent as string;
+    if (!paymentIntent) return res.status(400).json({ error: 'No payment intent on this booking.' });
+
+    const refund = await stripe.refunds.create({
+      payment_intent: paymentIntent,
+      ...(amount ? { amount: Math.round(Number(amount) * 100) } : {}),
+    });
+
+    const refundedDollars = (refund.amount || 0) / 100;
+    await supabase.from('bookings').update({
+      refunded_amount: (Number(booking.refunded_amount) || 0) + refundedDollars,
+      payment_status: amount ? 'partially_refunded' : 'refunded',
+    }).eq('id', bookingId);
+    await supabase.from('platform_events').insert({
+      type: 'refund', amount: refundedDollars, mechanic_id: booking.mechanic_id, booking_id: bookingId, note: 'Stripe refund',
+    });
+
+    res.json({ success: true, refunded: refundedDollars });
+  } catch (err) {
+    console.error('[refund]', err);
+    res.status(500).json({ error: err instanceof Error ? err.message : 'Refund failed' });
+  }
+});
+
 // ── Reviews ─────────────────────────────────────────────────
 // POST /api/reviews/request — mechanic marks a job complete; email the customer a review link
 app.post('/api/reviews/request', async (req, res) => {
@@ -1712,6 +1784,12 @@ app.post('/api/stripe/create-payment', async (req, res) => {
         type: 'repair_payment'
       }
     } as any);
+
+    // Store the session id on the booking so refunds work even without webhooks
+    if (bookingData && userId) {
+      const sb = getSupabaseAdmin();
+      if (sb) await sb.from('bookings').update({ stripe_session_id: session.id }).eq('id', bookingId);
+    }
 
     res.json({ id: session.id, url: session.url });
   } catch (err) {

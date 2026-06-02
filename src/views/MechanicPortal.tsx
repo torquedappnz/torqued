@@ -979,6 +979,26 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                       }
                     } catch { alert('Could not mark complete. Try again.'); }
                   }}>Mark Complete</Button>
+                  <Button variant="outline" className="text-foreground border-border hover:bg-card" onClick={async () => {
+                    const price = prompt('Enter quote amount (NZD):');
+                    if (price == null) return;
+                    const note = prompt('Add a note for the customer (optional):') || '';
+                    const r = await fetch('/api/mechanic/update-quote', {
+                      method: 'POST', headers: { 'Content-Type': 'application/json' },
+                      body: JSON.stringify({ bookingId: job.id, quotedPrice: parseFloat(price), note }),
+                    });
+                    alert(r.ok ? 'Quote sent to the customer.' : 'Could not send quote.');
+                  }}>Edit Quote</Button>
+                  <Button variant="outline" className="text-amber-500 border-border hover:bg-card" onClick={async () => {
+                    const amt = prompt('Refund amount (NZD). Leave blank for FULL refund:');
+                    if (amt == null) return;
+                    const r = await fetch('/api/stripe/refund', {
+                      method: 'POST', headers: { 'Content-Type': 'application/json' },
+                      body: JSON.stringify({ bookingId: job.id, amount: amt.trim() ? parseFloat(amt) : undefined }),
+                    });
+                    const d = await r.json();
+                    alert(d.success ? `Refunded $${d.refunded}.` : (d.error || 'Refund failed.'));
+                  }}>Refund</Button>
                   <Button variant="outline" className="text-muted border-border hover:bg-card" onClick={() => {
                     setIncomingJobs(incomingJobs.filter(j => j.id !== job.id));
                     supabase.from('bookings').update({ status: 'pending' }).eq('id', job.id)
