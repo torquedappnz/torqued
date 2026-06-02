@@ -24,6 +24,7 @@ interface AuthContextType {
   loginMechanic: (email: string, password: string) => Promise<void>;
   signUpMechanic: (email: string, password: string, name: string) => Promise<{ error?: string; needsConfirmation?: boolean }>;
   resendMechanicLink: (email: string) => Promise<string | null>;
+  markSubscriptionActive: () => void;
   // Shared
   logout: () => Promise<void>;
   registerVehicle: (vehicle: Vehicle) => Promise<void>;
@@ -183,6 +184,12 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     return {};
   };
 
+  // Flip the local subscription flag immediately (server already persisted it via
+  // service role). Kept out of the DB path so it can't be reverted by a reload.
+  const markSubscriptionActive = () => {
+    setUserProfile(prev => prev ? { ...prev, subscriptionActive: true } : prev);
+  };
+
   const resendMechanicLink = async (email: string): Promise<string | null> => {
     const res = await fetch('/api/mechanic/resend', {
       method: 'POST',
@@ -250,6 +257,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       loginMechanic,
       signUpMechanic,
       resendMechanicLink,
+      markSubscriptionActive,
       logout,
       registerVehicle,
       updateProfile,

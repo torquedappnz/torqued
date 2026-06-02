@@ -181,7 +181,7 @@ const RECOMMENDATIONS_RAH190: Recommendation[] = [
 
 export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) => {
   const { theme, setTheme } = useTheme();
-  const { user, userProfile, loginMechanic, signUpMechanic, resendMechanicLink, logout, updateProfile } = useAuth();
+  const { user, userProfile, loginMechanic, signUpMechanic, resendMechanicLink, markSubscriptionActive, logout, updateProfile } = useAuth();
   const [mechEmail, setMechEmail] = useState('');
   const [mechPassword, setMechPassword] = useState('');
   const [mechName, setMechName] = useState('');
@@ -214,8 +214,7 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
         });
         const data = await res.json();
         if (data.activated) {
-          // Reflect immediately in local state so the dashboard unlocks now
-          updateProfile({ subscriptionActive: true }).catch(() => {});
+          markSubscriptionActive(); // local flip; DB already set server-side
         }
       } catch (err) {
         console.error('Subscription activation failed:', err);
@@ -2131,7 +2130,11 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                                 setTimeout(async () => {
                                   if (user) {
                                     try {
-                                      await updateProfile({ subscriptionActive: true });
+                                      await fetch('/api/mechanic/activate', {
+                                        method: 'POST', headers: { 'Content-Type': 'application/json' },
+                                        body: JSON.stringify({ mechanicId: user.id }),
+                                      });
+                                      markSubscriptionActive();
                                     } catch (err) {
                                       console.error('Subscription update failed:', err);
                                     }
@@ -2166,7 +2169,11 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                                 setTimeout(async () => {
                                   if (user) {
                                     try {
-                                      await updateProfile({ subscriptionActive: true });
+                                      await fetch('/api/mechanic/activate', {
+                                        method: 'POST', headers: { 'Content-Type': 'application/json' },
+                                        body: JSON.stringify({ mechanicId: user.id }),
+                                      });
+                                      markSubscriptionActive();
                                     } catch (err) {
                                       console.error('Subscription update failed:', err);
                                     }

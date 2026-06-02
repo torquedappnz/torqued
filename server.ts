@@ -385,6 +385,26 @@ app.post('/api/mechanic/ensure-confirmed', async (req, res) => {
   }
 });
 
+// POST /api/mechanic/activate — force-activate a mechanic's subscription (service role,
+// bypasses RLS so it always persists). Used by the activation/return flows.
+app.post('/api/mechanic/activate', async (req, res) => {
+  try {
+    const { mechanicId } = req.body;
+    if (!mechanicId) return res.status(400).json({ error: 'mechanicId required' });
+    const supabase = getSupabaseAdmin();
+    if (!supabase) return res.status(500).json({ error: 'Database not configured' });
+
+    const { error } = await supabase.from('profiles')
+      .update({ subscription_active: true })
+      .eq('id', mechanicId);
+    if (error) return res.status(500).json({ error: error.message });
+    res.json({ activated: true });
+  } catch (err) {
+    console.error('[mechanic/activate]', err);
+    res.status(500).json({ error: 'Activation failed' });
+  }
+});
+
 // POST /api/mechanic/resend — re-sends a sign-in/confirmation link to an existing mechanic
 app.post('/api/mechanic/resend', async (req, res) => {
   try {
