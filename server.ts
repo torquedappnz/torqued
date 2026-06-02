@@ -389,14 +389,21 @@ app.post('/api/mechanic/ensure-confirmed', async (req, res) => {
 // bypasses RLS so it always persists). Used by the activation/return flows.
 app.post('/api/mechanic/activate', async (req, res) => {
   try {
-    const { mechanicId } = req.body;
-    if (!mechanicId) return res.status(400).json({ error: 'mechanicId required' });
+    const { mechanicId, email } = req.body;
+    if (!mechanicId && !email) return res.status(400).json({ error: 'mechanicId or email required' });
     const supabase = getSupabaseAdmin();
     if (!supabase) return res.status(500).json({ error: 'Database not configured' });
 
+    let id = mechanicId;
+    if (!id && email) {
+      const { data: p } = await supabase.from('profiles').select('id').eq('email', email).single();
+      id = p?.id;
+    }
+    if (!id) return res.status(404).json({ error: 'Mechanic not found' });
+
     const { error } = await supabase.from('profiles')
       .update({ subscription_active: true })
-      .eq('id', mechanicId);
+      .eq('id', id);
     if (error) return res.status(500).json({ error: error.message });
     res.json({ activated: true });
   } catch (err) {

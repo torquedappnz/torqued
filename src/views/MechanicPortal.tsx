@@ -206,16 +206,15 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
 
     (async () => {
       try {
-        // Verify + activate server-side (service role) so it can't race with profile loading
-        const res = await fetch('/api/stripe/activate-subscription', {
+        // A session_id is only present on a successful checkout return (cancel goes
+        // to ?canceled=true). The mechanic is logged in, so activate them directly —
+        // this also handles $0 promo subscriptions where payment_status != 'paid'.
+        await fetch('/api/mechanic/activate', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ sessionId }),
+          body: JSON.stringify({ mechanicId: user.id }),
         });
-        const data = await res.json();
-        if (data.activated) {
-          markSubscriptionActive(); // local flip; DB already set server-side
-        }
+        markSubscriptionActive(); // local flip; DB set server-side via service role
       } catch (err) {
         console.error('Subscription activation failed:', err);
       } finally {
