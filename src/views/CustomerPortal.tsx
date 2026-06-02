@@ -384,6 +384,11 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
   const [returningCustomerName, setReturningCustomerName] = useState<string | null>(null);
   // The customer's real email (from onboarding/verification) — used for Stripe checkout
   const [customerEmail, setCustomerEmail] = useState<string>('');
+  // Per-vehicle service pricing loaded from the DB for the active vehicle
+  const [vehiclePrices, setVehiclePrices] = useState<Record<string, number>>({});
+  // The customer's garage — all vehicles on their account
+  const [garageVehicles, setGarageVehicles] = useState<Vehicle[]>([]);
+  const [customerOwnerId, setCustomerOwnerId] = useState<string | null>(null);
 
   // OTP Verification States
   const [showOTPModal, setShowOTPModal] = useState(false);
@@ -706,13 +711,18 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
     return () => clearInterval(t);
   }, [otpResendCooldown]);
 
-  // Calculate total price based on selected services
+  // Price for a service on the ACTIVE vehicle: use the vehicle's real DB pricing
+  // (vehicle_specs.service_prices) when available, else fall back to the generic base.
+  const priceFor = (id: string) => {
+    const v = vehiclePrices[id];
+    if (typeof v === 'number' && v > 0) return v;
+    return SERVICES.find(s => s.id === id)?.basePrice || 0;
+  };
+
+  // Calculate total price based on selected services (per-vehicle pricing)
   const totalPrice = useMemo(() => {
-    return selectedServices.reduce((sum, id) => {
-      const service = SERVICES.find(s => s.id === id);
-      return sum + (service?.basePrice || 0);
-    }, 0);
-  }, [selectedServices]);
+    return selectedServices.reduce((sum, id) => sum + priceFor(id), 0);
+  }, [selectedServices, vehiclePrices]);
 
   const handleConfirmOTP = async () => {
     if (otpCode.trim().length !== 6) {
@@ -734,6 +744,14 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
         return;
       }
       if (verifyData.email) setCustomerEmail(verifyData.email);
+      if (verifyData.ownerId) setCustomerOwnerId(verifyData.ownerId);
+      if (Array.isArray(verifyData.vehicles) && verifyData.vehicles.length) {
+        setGarageVehicles(verifyData.vehicles.map((r: any) => ({
+          id: r.rego, rego: r.rego, make: r.make, model: r.model,
+          year: r.year, variant: r.variant ?? undefined, mileage: r.mileage ?? 0,
+          thumbnail: r.thumbnail ?? undefined,
+        })));
+      }
     } catch {
       setOtpVerificationError('Verification failed. Please try again.');
       return;
@@ -764,6 +782,11 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
       setMileage((data.mileage ?? 0).toString());
       setIsRAH190(rego === 'RAH190');
       setUserName(userProfile?.name || null);
+      // Per-vehicle service pricing from the DB (vehicle_specs.service_prices)
+      const specs = Array.isArray(data.vehicle_specs) ? data.vehicle_specs[0] : data.vehicle_specs;
+      setVehiclePrices(specs?.service_prices || {});
+      // Ensure this car is in the garage list
+      setGarageVehicles(prev => prev.some(g => g.rego === v.rego) ? prev : [...prev, v]);
       if (user) {
         try { await registerVehicle(v); } catch {}
       }
@@ -772,6 +795,12 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
       setVehicle({ id: rego, rego, make: 'Unknown', model: 'Vehicle', year: 2020, mileage: 0 });
       setMileage('0');
     }
+  };
+
+  // Switch the active vehicle in the garage (loads its specs/pricing + history)
+  const selectGarageVehicle = async (rego: string) => {
+    await loadVehicleByRego(rego);
+    setView('quote');
   };
 
   // Simulate/Perform Rego Lookup
@@ -834,7 +863,20 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
       const data = await res.json();
 
       if (data.isNew) {
-        // New customer — show registration form
+        // Plate has no owner. If THIS customer is already verified this session,
+        // add the car to their existing garage instead of treating them as new.
+        if (customerOwnerId) {
+          const addRes = await fetch('/api/customer/add-vehicle', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ ownerId: customerOwnerId, rego: formattedRego }),
+          });
+          if (addRes.ok) {
+            await loadVehicleByRego(formattedRego);
+            return;
+          }
+        }
+        // Otherwise it's a genuinely new customer — show registration form
         setShowNewCustomerForm(true);
       } else {
         // Returning customer — show OTP modal
@@ -2155,7 +2197,7 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                       <div key={id} className="space-y-3 bg-background/50 p-4 rounded-2xl border border-border">
                         <div className="flex justify-between items-center text-foreground">
                           <span className="text-sm font-black uppercase tracking-tight">{service.name}</span>
-                          <span className="text-sm font-black">${service.basePrice}</span>
+                          <span className="text-sm font-black">${priceFor(id)}</span>
                         </div>
                         {service.parts && (
                           <div className="pl-0 space-y-1.5 border-t border-border/50 pt-3">
@@ -2694,25 +2736,40 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
             )}
 
             <div className="space-y-3">
-              <Card className="p-4 flex items-center gap-4 liquid-glass border-white/10">
-                <img src={vehicle?.thumbnail || MOCK_VEHICLE.thumbnail} alt="Car" className="w-20 h-20 rounded-xl object-cover ring-1 ring-white/10" />
-                <div className="flex-1">
-                  <div className="torqued-badge text-[10px] mb-1">{vehicle?.rego || MOCK_VEHICLE.rego}</div>
-                  <h4 className="text-lg leading-none font-bold">{vehicle?.year || MOCK_VEHICLE.year} {vehicle?.make || MOCK_VEHICLE.make} {vehicle?.model || MOCK_VEHICLE.model}</h4>
-                  <p className="text-xs text-white/40 mt-1">{vehicle?.variant || MOCK_VEHICLE.variant}</p>
-                  <div className="flex items-center gap-2 mt-1">
-                    <span className="text-xs font-bold text-torqued-red bg-torqued-red/10 px-2 py-0.5 rounded flex items-center gap-1 border border-torqued-red/20 shadow-sm">
-                      <AlertTriangle size={10} /> Service due in ~1,200 km
-                    </span>
-                  </div>
-                </div>
-                <ChevronRight className="text-white/20" />
-              </Card>
+              {(garageVehicles.length > 0 ? garageVehicles : (vehicle ? [vehicle] : [])).map(gv => {
+                const isActive = vehicle?.rego === gv.rego;
+                return (
+                  <Card
+                    key={gv.rego}
+                    onClick={() => selectGarageVehicle(gv.rego)}
+                    className={cn(
+                      "p-4 flex items-center gap-4 cursor-pointer transition-all active:scale-[0.99]",
+                      isActive ? "border-torqued-red ring-1 ring-torqued-red bg-torqued-red/5" : "liquid-glass border-white/10 hover:border-torqued-red/30"
+                    )}
+                  >
+                    {gv.thumbnail
+                      ? <img src={gv.thumbnail} alt="Car" className="w-20 h-20 rounded-xl object-cover ring-1 ring-white/10" />
+                      : <div className="w-20 h-20 rounded-xl bg-card flex items-center justify-center ring-1 ring-white/10"><Car size={28} className="text-muted" /></div>}
+                    <div className="flex-1">
+                      <div className="torqued-badge text-[10px] mb-1">{gv.rego}</div>
+                      <h4 className="text-lg leading-none font-bold">{gv.year} {gv.make} {gv.model}</h4>
+                      <p className="text-xs text-muted mt-1">{gv.variant}</p>
+                      {isActive && <span className="text-[10px] font-black uppercase text-torqued-red tracking-widest mt-1 inline-block">Selected</span>}
+                    </div>
+                    <ChevronRight className="text-white/20" />
+                  </Card>
+                );
+              })}
 
-              <button 
+              {garageVehicles.length === 0 && !vehicle && (
+                <p className="text-sm text-muted text-center py-4">No vehicles yet. Add one below to start tracking its history.</p>
+              )}
+
+              <button
                 onClick={() => {
                   setVehicle(null);
                   setRego('');
+                  setVehiclePrices({});
                   setStep(1);
                   setView('quote');
                 }}

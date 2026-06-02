@@ -607,18 +607,69 @@ app.post('/api/otp/verify', async (req, res) => {
 
   otpStore.delete(formattedRego); // One-time use
 
-  // Return the verified owner's email so the client can use it for booking/checkout
+  // Return the verified owner's email, id, and ALL their vehicles (the garage)
   let email: string | null = null;
+  let ownerId: string | null = null;
+  let vehicles: any[] = [];
   const supabase = getSupabaseAdmin();
   if (supabase) {
     const { data: vehicle } = await supabase.from('vehicles').select('owner_id').eq('rego', formattedRego).single();
     if (vehicle?.owner_id) {
-      const { data: profile } = await supabase.from('profiles').select('email').eq('id', vehicle.owner_id).single();
+      ownerId = vehicle.owner_id;
+      const { data: profile } = await supabase.from('profiles').select('email').eq('id', ownerId).single();
       email = profile?.email ?? null;
+      const { data: rows } = await supabase
+        .from('vehicles')
+        .select('rego, make, model, year, variant, mileage, thumbnail')
+        .eq('owner_id', ownerId);
+      vehicles = rows ?? [];
     }
   }
 
-  res.json({ success: true, email });
+  res.json({ success: true, email, ownerId, vehicles });
+});
+
+// POST /api/customer/add-vehicle — claim/add a plate to an existing customer's garage
+app.post('/api/customer/add-vehicle', async (req, res) => {
+  try {
+    const { ownerId, rego, make, model, year, variant, mileage } = req.body;
+    if (!ownerId || !rego) return res.status(400).json({ error: 'ownerId and rego are required' });
+    const formattedRego = (rego as string).toUpperCase().trim();
+
+    const supabase = getSupabaseAdmin();
+    if (!supabase) return res.status(500).json({ error: 'Database not configured' });
+
+    const { data: existing } = await supabase
+      .from('vehicles').select('rego, owner_id').eq('rego', formattedRego).single();
+
+    if (existing) {
+      if (existing.owner_id && existing.owner_id !== ownerId) {
+        return res.status(409).json({ error: 'This plate is already registered to another account.' });
+      }
+      await supabase.from('vehicles').update({ owner_id: ownerId }).eq('rego', formattedRego);
+    } else {
+      // Not in registry yet — create a minimal record owned by this customer
+      await supabase.from('vehicles').insert({
+        rego: formattedRego,
+        owner_id: ownerId,
+        make: make || 'Unknown',
+        model: model || 'Vehicle',
+        year: year || new Date().getFullYear(),
+        variant: variant || null,
+        mileage: mileage || 0,
+      });
+    }
+
+    const { data: vehicle } = await supabase
+      .from('vehicles')
+      .select('rego, make, model, year, variant, mileage, thumbnail')
+      .eq('rego', formattedRego).single();
+
+    res.json({ success: true, vehicle });
+  } catch (err) {
+    console.error('[customer/add-vehicle]', err);
+    res.status(500).json({ error: 'Could not add vehicle' });
+  }
 });
 
 // ── Stripe Webhook — must be registered before any routes that need parsed JSON bodies
