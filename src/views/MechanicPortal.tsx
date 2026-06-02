@@ -195,6 +195,24 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
   // Local override: once activated this session, unlock the dashboard regardless of
   // userProfile load timing (which could be null and silently block the unlock).
   const [justActivated, setJustActivated] = useState(false);
+  // Quote builder
+  const [quoteJob, setQuoteJob] = useState<any | null>(null);
+  const [qParts, setQParts] = useState<{ name: string; qty: number; unitPrice: number }[]>([]);
+  const [qLabourHours, setQLabourHours] = useState(1);
+  const [qLabourRate, setQLabourRate] = useState(145);
+  const [qDiscount, setQDiscount] = useState(0);
+  const [qSending, setQSending] = useState(false);
+
+  const openQuoteEditor = (job: any) => {
+    setQuoteJob(job);
+    setQParts([{ name: '', qty: 1, unitPrice: 0 }]);
+    setQLabourHours(1);
+    setQLabourRate(profileData.labourRate || 145);
+    setQDiscount(0);
+  };
+  const qPartsTotal = qParts.reduce((s, p) => s + (p.qty || 0) * (p.unitPrice || 0), 0);
+  const qLabourTotal = (qLabourHours || 0) * (qLabourRate || 0);
+  const qTotal = Math.max(0, qPartsTotal + qLabourTotal - (qDiscount || 0));
   const [mechResendCooldown, setMechResendCooldown] = useState(0);
   const [mechResendMsg, setMechResendMsg] = useState<string | null>(null);
 
@@ -979,16 +997,7 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                       }
                     } catch { alert('Could not mark complete. Try again.'); }
                   }}>Mark Complete</Button>
-                  <Button variant="outline" className="text-foreground border-border hover:bg-card" onClick={async () => {
-                    const price = prompt('Enter quote amount (NZD):');
-                    if (price == null) return;
-                    const note = prompt('Add a note for the customer (optional):') || '';
-                    const r = await fetch('/api/mechanic/update-quote', {
-                      method: 'POST', headers: { 'Content-Type': 'application/json' },
-                      body: JSON.stringify({ bookingId: job.id, quotedPrice: parseFloat(price), note }),
-                    });
-                    alert(r.ok ? 'Quote sent to the customer.' : 'Could not send quote.');
-                  }}>Edit Quote</Button>
+                  <Button variant="outline" className="text-foreground border-border hover:bg-card" onClick={() => openQuoteEditor(job)}>Build Quote</Button>
                   <Button variant="outline" className="text-amber-500 border-border hover:bg-card" onClick={async () => {
                     const amt = prompt('Refund amount (NZD). Leave blank for FULL refund:');
                     if (amt == null) return;
@@ -2499,6 +2508,83 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
       </main>
       {selectedJobId && renderHealthReport()}
       {showProcurement && renderProcurementModal()}
+
+      {/* Quote Builder */}
+      <AnimatePresence>
+        {quoteJob && (
+          <div className="fixed inset-0 z-[120] flex items-center justify-center p-4 bg-black/70 backdrop-blur-sm overflow-y-auto">
+            <motion.div
+              initial={{ opacity: 0, scale: 0.96, y: 20 }} animate={{ opacity: 1, scale: 1, y: 0 }} exit={{ opacity: 0, scale: 0.96, y: 20 }}
+              className="w-full max-w-lg my-8 bg-card border border-border rounded-3xl p-6 sm:p-8 space-y-5 shadow-2xl"
+            >
+              <div className="flex justify-between items-start">
+                <div>
+                  <h3 className="text-xl font-black tracking-tight">Build Quote</h3>
+                  <p className="text-xs text-muted">{quoteJob.model} {quoteJob.reg ? `(${quoteJob.reg})` : ''}</p>
+                </div>
+                <button onClick={() => setQuoteJob(null)} className="text-muted hover:text-foreground"><X size={20} /></button>
+              </div>
+
+              {/* Parts */}
+              <div className="space-y-2">
+                <div className="flex justify-between items-center">
+                  <label className="text-[10px] font-black uppercase tracking-widest text-muted">Parts</label>
+                  <button onClick={() => setQParts([...qParts, { name: '', qty: 1, unitPrice: 0 }])} className="text-[10px] font-bold text-torqued-red flex items-center gap-1"><Plus size={12}/> Add part</button>
+                </div>
+                {qParts.map((p, i) => (
+                  <div key={i} className="flex gap-2 items-center">
+                    <input value={p.name} onChange={e => { const n=[...qParts]; n[i]={...p,name:e.target.value}; setQParts(n); }} placeholder="Part name" className="flex-1 bg-background border border-border rounded-lg px-3 h-9 text-xs text-foreground" />
+                    <input type="number" value={p.qty||''} onChange={e => { const n=[...qParts]; n[i]={...p,qty:parseInt(e.target.value)||0}; setQParts(n); }} placeholder="Qty" className="w-14 bg-background border border-border rounded-lg px-2 h-9 text-xs text-foreground" />
+                    <input type="number" value={p.unitPrice||''} onChange={e => { const n=[...qParts]; n[i]={...p,unitPrice:parseFloat(e.target.value)||0}; setQParts(n); }} placeholder="$ ea" className="w-20 bg-background border border-border rounded-lg px-2 h-9 text-xs text-foreground" />
+                    <button onClick={() => setQParts(qParts.filter((_,j)=>j!==i))} className="text-muted hover:text-torqued-red"><Trash2 size={14} /></button>
+                  </div>
+                ))}
+              </div>
+
+              {/* Labour */}
+              <div className="grid grid-cols-2 gap-3">
+                <div className="space-y-1">
+                  <label className="text-[10px] font-black uppercase tracking-widest text-muted">Labour hours</label>
+                  <input type="number" step="0.25" value={qLabourHours||''} onChange={e=>setQLabourHours(parseFloat(e.target.value)||0)} className="w-full bg-background border border-border rounded-lg px-3 h-10 text-sm text-foreground" />
+                </div>
+                <div className="space-y-1">
+                  <label className="text-[10px] font-black uppercase tracking-widest text-muted">Rate ($/hr)</label>
+                  <input type="number" value={qLabourRate||''} onChange={e=>setQLabourRate(parseFloat(e.target.value)||0)} className="w-full bg-background border border-border rounded-lg px-3 h-10 text-sm text-foreground" />
+                </div>
+              </div>
+
+              {/* Discount */}
+              <div className="space-y-1">
+                <label className="text-[10px] font-black uppercase tracking-widest text-muted">Discount ($)</label>
+                <input type="number" value={qDiscount||''} onChange={e=>setQDiscount(parseFloat(e.target.value)||0)} className="w-full bg-background border border-border rounded-lg px-3 h-10 text-sm text-foreground" />
+              </div>
+
+              {/* Totals */}
+              <div className="bg-background/60 border border-border rounded-2xl p-4 space-y-1.5 text-sm">
+                <div className="flex justify-between text-muted"><span>Parts</span><span>${qPartsTotal.toFixed(2)}</span></div>
+                <div className="flex justify-between text-muted"><span>Labour ({qLabourHours}h × ${qLabourRate})</span><span>${qLabourTotal.toFixed(2)}</span></div>
+                {qDiscount>0 && <div className="flex justify-between text-emerald-500"><span>Discount</span><span>-${qDiscount.toFixed(2)}</span></div>}
+                <div className="flex justify-between font-black text-foreground text-lg pt-1.5 border-t border-border"><span>Total (GST incl.)</span><span className="text-torqued-red">${qTotal.toFixed(2)}</span></div>
+              </div>
+
+              <Button fullWidth disabled={qSending} className="bg-torqued-red text-white" onClick={async () => {
+                setQSending(true);
+                const lines = qParts.filter(p=>p.name).map(p=>`${p.name} x${p.qty} — $${(p.qty*p.unitPrice).toFixed(2)}`);
+                const note = [...lines, `Labour: ${qLabourHours}h × $${qLabourRate} = $${qLabourTotal.toFixed(2)}`, qDiscount>0?`Discount: -$${qDiscount.toFixed(2)}`:''].filter(Boolean).join('\n');
+                try {
+                  const r = await fetch('/api/mechanic/update-quote', {
+                    method: 'POST', headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ bookingId: quoteJob.id, quotedPrice: qTotal, note }),
+                  });
+                  if (r.ok) { alert('Quote sent to the customer.'); setQuoteJob(null); }
+                  else alert('Could not send quote.');
+                } catch { alert('Could not send quote.'); }
+                finally { setQSending(false); }
+              }}>{qSending ? 'Sending…' : `Send Quote — $${qTotal.toFixed(2)}`}</Button>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
     </div>
   );
 };
