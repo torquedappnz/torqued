@@ -420,11 +420,41 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
           estimatedPrice: 0,
           technicians: m.technicians || 1,
           partsLeadDays: m.parts_lead_days ?? 1,
+          latitude: m.latitude ?? undefined,
+          longitude: m.longitude ?? undefined,
         }));
         setRealMechanics(mapped);
       })
       .catch(() => {});
   }, []);
+
+  // Consumer location for distance-based mechanic search (Google/device location services)
+  const [customerCoords, setCustomerCoords] = useState<{ lat: number; lng: number } | null>(null);
+  const [locationAsked, setLocationAsked] = useState(false);
+  const requestLocation = () => {
+    setLocationAsked(true);
+    if (!navigator.geolocation) return;
+    navigator.geolocation.getCurrentPosition(
+      pos => setCustomerCoords({ lat: pos.coords.latitude, lng: pos.coords.longitude }),
+      () => { /* denied — fall back to showing all mechanics */ },
+      { enableHighAccuracy: false, timeout: 8000, maximumAge: 600000 },
+    );
+  };
+  const haversineKm = (a: { lat: number; lng: number }, b: { lat: number; lng: number }) => {
+    const R = 6371, toRad = (d: number) => d * Math.PI / 180;
+    const dLat = toRad(b.lat - a.lat), dLng = toRad(b.lng - a.lng);
+    const s = Math.sin(dLat / 2) ** 2 + Math.cos(toRad(a.lat)) * Math.cos(toRad(b.lat)) * Math.sin(dLng / 2) ** 2;
+    return Math.round(R * 2 * Math.atan2(Math.sqrt(s), Math.sqrt(1 - s)) * 10) / 10;
+  };
+  // Mechanics with a real distance from the consumer (when location known)
+  const mechanicsByDistance = useMemo(() => {
+    if (!customerCoords) return realMechanics;
+    return realMechanics
+      .map(m => (m.latitude != null && m.longitude != null)
+        ? { ...m, distance: haversineKm(customerCoords, { lat: m.latitude, lng: m.longitude }) }
+        : m)
+      .sort((a, b) => a.distance - b.distance);
+  }, [realMechanics, customerCoords]);
 
   // OTP Verification States
   const [showOTPModal, setShowOTPModal] = useState(false);
@@ -2082,12 +2112,32 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
             </div>
 
             <div className="space-y-4">
-              {[...realMechanics, ...MOCK_MECHANICS]
-                .filter(m => {
-                  if (radius === 'Any') return true;
-                  const radiusValue = parseInt(radius);
-                  return m.distance <= radiusValue;
-                })
+              {!customerCoords && (
+                <Card className="p-4 bg-card border-border flex items-center justify-between gap-3">
+                  <div>
+                    <p className="text-sm font-bold flex items-center gap-1.5"><MapPin size={14} className="text-torqued-red" /> Find workshops near you</p>
+                    <p className="text-xs text-muted mt-0.5">{locationAsked ? 'Location unavailable — showing all workshops.' : 'Allow location to see the closest mechanics within 75 km.'}</p>
+                  </div>
+                  {!locationAsked && <Button size="sm" className="bg-torqued-red text-white shrink-0" onClick={requestLocation}>Use my location</Button>}
+                </Card>
+              )}
+              {(() => {
+                // When we know the consumer's location, only show workshops within 75 km
+                const within = customerCoords
+                  ? mechanicsByDistance.filter(m => m.latitude != null && m.distance <= 75)
+                  : mechanicsByDistance;
+                if (within.length === 0) {
+                  return (
+                    <Card className="p-8 text-center bg-card border-border">
+                      <div className="w-12 h-12 mx-auto rounded-2xl bg-torqued-red/10 flex items-center justify-center text-torqued-red mb-3"><MapPin size={20} /></div>
+                      <p className="text-sm font-bold">Coming soon to your area</p>
+                      <p className="text-xs text-muted mt-1">{customerCoords ? 'No Torqued workshops within 75 km yet.' : 'We\'re onboarding trusted local mechanics.'} We\'ll notify you the moment one is available nearby.</p>
+                    </Card>
+                  );
+                }
+                return null;
+              })()}
+              {(customerCoords ? mechanicsByDistance.filter(m => m.latitude != null && m.distance <= 75) : mechanicsByDistance)
                 .map((mechanic, idx) => (
                 <motion.div
                   key={mechanic.id}
@@ -3064,7 +3114,7 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                     <div>
                       <h4 className="text-xl font-bold tracking-tight">{job.serviceIds.map(id => SERVICES.find(s => s.id === id)?.name).join(' & ')}</h4>
                       <div className="flex items-center gap-2 text-xs text-muted">
-                        <span>at {MOCK_MECHANICS.find(m => m.id === job.mechanicId)?.name}</span>
+                        <span>at {[...realMechanics, ...MOCK_MECHANICS].find(m => m.id === job.mechanicId)?.name || 'your workshop'}</span>
                         <span>•</span>
                         {isEditingDate === job.id ? (
                           <div className="flex items-center gap-2">

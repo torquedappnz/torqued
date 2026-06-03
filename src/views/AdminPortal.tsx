@@ -27,6 +27,28 @@ export const AdminPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) => {
   const [sPeople, setSPeople] = useState<any[]>([]);
   const [edit, setEdit] = useState<{ kind: 'booking' | 'profile'; row: any } | null>(null);
 
+  // Onboard-a-mechanic form
+  const [onb, setOnb] = useState<{ name: string; email: string; address: string; phone: string; owner_name: string; labour_rate: string; technicians: string; parts_lead_days: string }>(
+    { name: '', email: '', address: '', phone: '', owner_name: '', labour_rate: '', technicians: '1', parts_lead_days: '1' });
+  const [onbBusy, setOnbBusy] = useState(false);
+  const [onbMsg, setOnbMsg] = useState<string | null>(null);
+  const onboardMechanic = async () => {
+    setOnbBusy(true); setOnbMsg(null);
+    try {
+      const res = await fetch('/api/admin/onboard-mechanic', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ key, ...onb }),
+      });
+      const d = await res.json();
+      if (!res.ok) { setOnbMsg(d.error || 'Onboarding failed'); return; }
+      setOnbMsg(`✓ ${onb.name} onboarded and live. Login link emailed.`);
+      setOnb({ name: '', email: '', address: '', phone: '', owner_name: '', labour_rate: '', technicians: '1', parts_lead_days: '1' });
+      await loadAll(key);
+    } catch {
+      setOnbMsg('Could not connect.');
+    } finally { setOnbBusy(false); }
+  };
+
   useEffect(() => {
     const p = new URLSearchParams(window.location.search);
     const s = p.get('setup');
@@ -217,7 +239,30 @@ export const AdminPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) => {
 
         {tab === 'mechanics' && (
           <div className="space-y-3">
-            <h2 className="text-lg font-black uppercase tracking-tight">Mechanics</h2>
+            {/* Onboard a new workshop */}
+            <div className="bg-card border border-torqued-red/20 rounded-2xl p-5 space-y-3">
+              <div>
+                <h2 className="text-lg font-black uppercase tracking-tight">Onboard a workshop</h2>
+                <p className="text-xs text-white/40">Creates a live, pre-confirmed mechanic account, geocodes the address for distance search, and emails them a login link.</p>
+              </div>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                {([
+                  ['name', 'Workshop name *'], ['email', 'Email *'], ['address', 'Full address (for map/distance)'],
+                  ['phone', 'Phone'], ['owner_name', 'Owner name'], ['labour_rate', 'Labour rate ($/hr)'],
+                  ['technicians', '# Technicians'], ['parts_lead_days', 'Parts lead (days)'],
+                ] as const).map(([field, label]) => (
+                  <input key={field} value={(onb as any)[field]} placeholder={label}
+                    onChange={e => setOnb(o => ({ ...o, [field]: e.target.value }))}
+                    className={`bg-white/5 border border-white/10 rounded-xl px-3 h-11 text-sm text-white placeholder:text-white/30 focus:outline-none focus:border-torqued-red ${field === 'address' ? 'sm:col-span-2' : ''}`} />
+                ))}
+              </div>
+              {onbMsg && <p className={`text-xs font-bold ${onbMsg.startsWith('✓') ? 'text-emerald-400' : 'text-torqued-red'}`}>{onbMsg}</p>}
+              <Button className="bg-torqued-red text-white" disabled={onbBusy || !onb.name || !onb.email} onClick={onboardMechanic}>
+                {onbBusy ? 'Onboarding…' : 'Onboard workshop'}
+              </Button>
+            </div>
+
+            <h2 className="text-lg font-black uppercase tracking-tight pt-2">Mechanics</h2>
             {mechanics.map(m => (
               <div key={m.id} className="bg-card border border-white/10 rounded-2xl p-4 flex items-center justify-between gap-4">
                 <div><p className="font-bold">{m.name}</p><p className="text-xs text-white/40">{m.email} · ★ {m.rating || 0} ({m.review_count || 0})</p></div>

@@ -247,13 +247,33 @@ app.get('/api/mechanics', async (_req, res) => {
     if (!supabase) return res.json({ mechanics: [] });
     const { data } = await supabase
       .from('profiles')
-      .select('id, name, address, labour_rate, technicians, parts_lead_days, rating, review_count')
+      .select('id, name, address, labour_rate, technicians, parts_lead_days, rating, review_count, latitude, longitude')
       .eq('role', 'mechanic')
       .eq('subscription_active', true);
     res.json({ mechanics: data ?? [] });
   } catch (err) {
     console.error('[mechanics]', err);
     res.json({ mechanics: [] });
+  }
+});
+
+// GET /api/mechanic/jobs?mechanicId= — bookings for a mechanic (service role, bypasses RLS)
+app.get('/api/mechanic/jobs', async (req, res) => {
+  try {
+    const mechanicId = req.query.mechanicId as string;
+    if (!mechanicId) return res.status(400).json({ error: 'mechanicId required' });
+    const supabase = getSupabaseAdmin();
+    if (!supabase) return res.json({ jobs: [] });
+    const { data, error } = await supabase
+      .from('bookings')
+      .select('*')
+      .eq('mechanic_id', mechanicId)
+      .order('created_at', { ascending: false });
+    if (error) return res.status(500).json({ error: error.message });
+    res.json({ jobs: data ?? [] });
+  } catch (err) {
+    console.error('[mechanic/jobs]', err);
+    res.json({ jobs: [] });
   }
 });
 
@@ -1210,6 +1230,82 @@ app.post('/api/admin/set-subscription', async (req, res) => {
   const { error } = await supabase.from('profiles').update({ subscription_active: !!active }).eq('id', mechanicId);
   if (error) return res.status(500).json({ error: error.message });
   res.json({ success: true });
+});
+
+// POST /api/admin/onboard-mechanic — a Torqued employee onboards a workshop directly
+app.post('/api/admin/onboard-mechanic', async (req, res) => {
+  if (!adminOk(req)) return res.status(401).json({ error: 'Unauthorized' });
+  try {
+    const { email, name, address, phone, labour_rate, technicians, parts_lead_days, owner_name } = req.body;
+    if (!email || !name) return res.status(400).json({ error: 'Workshop name and email are required' });
+    const supabase = getSupabaseAdmin();
+    if (!supabase) return res.status(500).json({ error: 'Database not configured' });
+    const origin = getOrigin(req);
+
+    // Create a pre-confirmed account with a random temporary password
+    const tempPassword = crypto.randomBytes(9).toString('base64url');
+    let userId: string | null = null;
+    const { data: authData, error: authError } = await supabase.auth.admin.createUser({
+      email, password: tempPassword, email_confirm: true,
+      user_metadata: { name, role: 'mechanic' },
+    });
+    if (authError) {
+      if (/already|registered|exists/i.test(authError.message)) {
+        // Account exists — find it and just activate/update the profile
+        const { data: existing } = await supabase.from('profiles').select('id').eq('email', email).single();
+        userId = existing?.id ?? null;
+        if (!userId) return res.status(409).json({ error: 'An account exists but could not be located.' });
+      } else {
+        return res.status(400).json({ error: authError.message });
+      }
+    } else {
+      userId = authData.user?.id ?? null;
+    }
+    if (!userId) return res.status(500).json({ error: 'Could not create account' });
+
+    // Geocode the workshop address (free, no key) so distance search works
+    let latitude: number | null = null, longitude: number | null = null;
+    if (address) {
+      try {
+        const geoRes = await fetch(`https://nominatim.openstreetmap.org/search?format=json&limit=1&countrycodes=nz&q=${encodeURIComponent(address)}`, {
+          headers: { 'User-Agent': 'TorquedNZ/1.0 (torquedapp.nz@gmail.com)' },
+        });
+        const geo = await geoRes.json();
+        if (Array.isArray(geo) && geo[0]) { latitude = parseFloat(geo[0].lat); longitude = parseFloat(geo[0].lon); }
+      } catch (e) { console.warn('Geocode failed (non-blocking):', (e as Error).message); }
+    }
+
+    await supabase.from('profiles').upsert({
+      id: userId, email, name, role: 'mechanic',
+      address: address || null, phone: phone || null, owner_name: owner_name || null,
+      labour_rate: labour_rate != null && labour_rate !== '' ? Number(labour_rate) : null,
+      technicians: technicians != null && technicians !== '' ? Number(technicians) : 1,
+      parts_lead_days: parts_lead_days != null && parts_lead_days !== '' ? Number(parts_lead_days) : 1,
+      latitude, longitude,
+      subscription_active: true,      // live immediately — appears to customers
+      onboarding_complete: true,
+    }, { onConflict: 'id' });
+
+    // Send a magic login link so they can access the portal and set their own password
+    const { data: link } = await supabase.auth.admin.generateLink({
+      type: 'magiclink', email, options: { redirectTo: `${origin}/mechanic` },
+    });
+    const loginLink = link?.properties?.action_link || `${origin}/mechanic`;
+    const transporter = getMailTransporter();
+    if (transporter) {
+      await transporter.sendMail({
+        from: process.env.SMTP_FROM || '"Torqued" <torquedapp.nz@gmail.com>',
+        to: email,
+        subject: 'Your Torqued workshop account is live',
+        html: generateMechanicConfirmEmailHtml(name, loginLink),
+      }).catch(e => console.warn('Onboard email failed (non-blocking):', e?.message));
+    }
+
+    res.json({ success: true, mechanicId: userId, loginLink });
+  } catch (err) {
+    console.error('[admin/onboard-mechanic]', err);
+    res.status(500).json({ error: 'Onboarding failed' });
+  }
 });
 
 // POST /api/mechanic/save-onboarding — persist onboarding details (service role)

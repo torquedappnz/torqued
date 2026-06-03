@@ -69,6 +69,8 @@ export interface Mechanic {
   estimatedPrice: number;
   technicians?: number;
   partsLeadDays?: number;
+  latitude?: number;
+  longitude?: number;
 }
 
 export interface Job {

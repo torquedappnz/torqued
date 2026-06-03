@@ -370,15 +370,11 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
         }));
       });
 
-    // Incoming jobs from bookings assigned to this mechanic
-    supabase
-      .from('bookings')
-      .select('*')
-      .eq('mechanic_id', user.id)
-      .in('status', ['booked', 'pending_payment', 'pending'])
-      .order('created_at', { ascending: false })
-      .then(({ data, error }) => {
-        if (error) { console.error('Failed to load jobs:', error.message); return; }
+    // Incoming jobs from bookings assigned to this mechanic (service role — bypasses RLS)
+    fetch(`/api/mechanic/jobs?mechanicId=${user.id}`)
+      .then(r => r.json())
+      .then(({ jobs: rows }) => {
+        const data = (rows || []).filter((r: any) => !['completed', 'cancelled', 'declined'].includes(r.status));
         if (!data || data.length === 0) return;
         const jobs = data.map((row: any) => ({
           id: row.id,
