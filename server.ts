@@ -774,6 +774,48 @@ app.get('/api/admin/overview', async (req, res) => {
 
 function round2(n: number) { return Math.round(n * 100) / 100; }
 
+// POST /api/admin/send-login — email admin access details + ask them to set a password
+app.post('/api/admin/send-login', async (req, res) => {
+  if (!adminOk(req)) return res.status(401).json({ error: 'Unauthorized' });
+  try {
+    const { email } = req.body;
+    if (!email) return res.status(400).json({ error: 'email required' });
+    const transporter = getMailTransporter();
+    if (!transporter) return res.status(503).json({ error: 'Email not configured' });
+
+    const tempPass = process.env.ADMIN_PASSWORD || 'torqued-admin-2026';
+    const html = `<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="color-scheme" content="light dark"></head>
+<body style="margin:0;padding:0;background:#f4f4f6;font-family:-apple-system,Arial,sans-serif">
+<table width="100%" cellpadding="0" cellspacing="0" style="background:#f4f4f6;padding:32px 8px"><tr><td align="center">
+<table width="100%" cellpadding="0" cellspacing="0" style="max-width:480px;background:#ffffff;border-radius:20px;overflow:hidden;border:1px solid #e6e6ea">
+<tr><td style="background:#150402;padding:24px 32px;border-bottom:3px solid #FF1800;text-align:center"><img src="${LOGO_URL}" width="200" height="67" style="width:200px;height:67px;border:0"/></td></tr>
+<tr><td style="padding:36px 32px;color:#150402">
+<span style="display:inline-block;background:rgba(255,24,0,.1);color:#FF1800;font-size:9.5px;font-weight:900;letter-spacing:2px;text-transform:uppercase;padding:6px 14px;border-radius:6px">ADMIN ACCESS</span>
+<h1 style="margin:18px 0 6px;font-size:22px;font-weight:900;text-transform:uppercase">Back-Office Login</h1>
+<p style="margin:0 0 20px;font-size:14px;color:#555;line-height:1.5">You've been granted admin access to the Torqued back-office.</p>
+<div style="background:#f7f7f9;border:1px solid #e6e6ea;border-radius:12px;padding:16px;font-size:14px">
+<p style="margin:0 0 8px"><strong>Portal:</strong> <a href="https://torquednz.vercel.app/admin" style="color:#FF1800">torquednz.vercel.app/admin</a></p>
+<p style="margin:0"><strong>Temporary password:</strong> <span style="font-family:monospace">${tempPass}</span></p>
+</div>
+<div style="background:#fff7e6;border:1px solid #ffe2a8;border-radius:12px;padding:16px;margin-top:16px">
+<p style="margin:0;font-size:13px;color:#7a5b00"><strong>Action required:</strong> for security, please generate a strong password of your own and reply with it (or send it to the team) so we can set it on your admin account. Don't keep the temporary password.</p>
+</div>
+<a href="https://torquednz.vercel.app/admin" style="display:inline-block;background:#FF1800;color:#fff;font-weight:900;text-transform:uppercase;font-size:13px;letter-spacing:1px;text-decoration:none;padding:14px 32px;border-radius:10px;margin-top:18px">Open Admin Portal</a>
+</td></tr></table></td></tr></table></body></html>`;
+
+    await transporter.sendMail({
+      from: process.env.SMTP_FROM || '"Torqued" <torquedapp.nz@gmail.com>',
+      to: email,
+      subject: 'Your Torqued admin access — set your password',
+      html,
+    });
+    res.json({ sent: true });
+  } catch (err) {
+    console.error('[admin/send-login]', err);
+    res.status(500).json({ error: 'Failed to send' });
+  }
+});
+
 // GET /api/admin/mechanics — mechanic list with status
 app.get('/api/admin/mechanics', async (req, res) => {
   if (!adminOk(req)) return res.status(401).json({ error: 'Unauthorized' });
