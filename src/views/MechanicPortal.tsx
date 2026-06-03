@@ -212,6 +212,10 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
       .catch(() => setOnboardingComplete(true));
   }, [user]);
 
+  // Capacity settings
+  const [cap, setCap] = useState({ technicians: 1, parts_lead_days: 1, labour_rate: 145 });
+  const [capSaving, setCapSaving] = useState(false);
+
   // Service packages
   const [packages, setPackages] = useState<any[]>([]);
   const [newPkg, setNewPkg] = useState({ name: '', price: '', durationMin: '60', description: '' });
@@ -288,11 +292,12 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
     // Profile
     supabase
       .from('profiles')
-      .select('name, phone, address, nzbn, service_areas, diagnostic_tools, certifications, labour_rate, shop_fee, banner_image')
+      .select('name, phone, address, nzbn, service_areas, diagnostic_tools, certifications, labour_rate, shop_fee, banner_image, technicians, parts_lead_days')
       .eq('id', user.id)
       .single()
       .then(({ data }) => {
         if (!data) return;
+        setCap({ technicians: data.technicians ?? 1, parts_lead_days: data.parts_lead_days ?? 1, labour_rate: data.labour_rate ?? 145 });
         setProfileData(prev => ({
           ...prev,
           name: data.name || prev.name,
@@ -1267,6 +1272,28 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
 
   const renderCalendar = () => (
     <div className="space-y-6">
+      {/* Capacity settings — drive customer turnaround estimates */}
+      <Card className="p-6 space-y-4">
+        <div className="flex items-center gap-2 border-b border-black/5 pb-4">
+          <CalendarIcon size={20} className="text-torqued-red" />
+          <h3 className="text-xl">Availability & Capacity</h3>
+          <span className="text-[10px] text-muted ml-auto">Sets realistic drop-off / ready times for customers</span>
+        </div>
+        <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
+          <div><label className="text-[10px] font-black uppercase tracking-widest text-muted block mb-1">Technicians</label><Input type="number" value={String(cap.technicians)} onChange={e => setCap({ ...cap, technicians: parseInt(e.target.value) || 1 })} className="bg-background text-foreground" /></div>
+          <div><label className="text-[10px] font-black uppercase tracking-widest text-muted block mb-1">Parts lead (days)</label><Input type="number" value={String(cap.parts_lead_days)} onChange={e => setCap({ ...cap, parts_lead_days: parseInt(e.target.value) || 0 })} className="bg-background text-foreground" /></div>
+          <div><label className="text-[10px] font-black uppercase tracking-widest text-muted block mb-1">Labour $/hr</label><Input type="number" value={String(cap.labour_rate)} onChange={e => setCap({ ...cap, labour_rate: parseFloat(e.target.value) || 0 })} className="bg-background text-foreground" /></div>
+        </div>
+        <p className="text-xs text-muted">Quick jobs (oil, WOF) → next business day. Jobs needing parts (cambelt, rotors) → drop-off after your parts lead time. More technicians = faster turnaround on big jobs.</p>
+        <Button className="bg-torqued-red text-white" disabled={capSaving} onClick={async () => {
+          if (!user) return;
+          setCapSaving(true);
+          try {
+            await fetch('/api/mechanic/save-onboarding', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ mechanicId: user.id, fields: cap }) });
+          } finally { setCapSaving(false); }
+        }}>{capSaving ? 'Saving…' : 'Save Capacity'}</Button>
+      </Card>
+
       <div className="flex justify-between items-center">
         <h2 className="text-3xl">Workshop Calendar</h2>
         <div className="flex bg-white p-1 rounded-xl border border-black/5">

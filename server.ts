@@ -220,7 +220,7 @@ app.get('/api/mechanics', async (_req, res) => {
     if (!supabase) return res.json({ mechanics: [] });
     const { data } = await supabase
       .from('profiles')
-      .select('id, name')
+      .select('id, name, address, labour_rate, technicians, parts_lead_days, rating, review_count')
       .eq('role', 'mechanic')
       .eq('subscription_active', true);
     res.json({ mechanics: data ?? [] });

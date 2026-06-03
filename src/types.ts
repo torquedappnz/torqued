@@ -67,6 +67,8 @@ export interface Mechanic {
   nextAvailable: string;
   isFeatured?: boolean;
   estimatedPrice: number;
+  technicians?: number;
+  partsLeadDays?: number;
 }
 
 export interface Job {

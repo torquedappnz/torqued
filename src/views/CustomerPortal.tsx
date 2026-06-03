@@ -400,14 +400,18 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
           id: m.id,                       // real account UUID — bookings route here
           name: m.name || 'Workshop',
           logo: `https://ui-avatars.com/api/?name=${encodeURIComponent(m.name || 'W')}&background=FF1800&color=fff&bold=true`,
-          suburb: 'Dunedin',
+          suburb: m.address ? String(m.address).split(',').slice(-1)[0].trim() : 'NZ',
+          address: m.address || undefined,
           distance: 1.2,
-          rating: 5.0,
-          reviews: 0,
+          rating: m.rating || 5.0,
+          reviews: m.review_count || 0,
+          labourRate: m.labour_rate || undefined,
           specialisations: ['General Service', 'Diagnostics'],
           nextAvailable: 'Tomorrow, 8am',
           isFeatured: true,
           estimatedPrice: 0,
+          technicians: m.technicians || 1,
+          partsLeadDays: m.parts_lead_days ?? 1,
         }));
         setRealMechanics(mapped);
       })
@@ -983,25 +987,48 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
     );
   };
 
-  // Calculate estimated ready time
+  // Typical job durations (minutes) per service
+  const SERVICE_DURATIONS: Record<string, number> = {
+    oil: 45, wof: 60, full: 180, brakes_front_pads: 90, brakes_front_rotors: 120,
+    brakes_rear_pads: 90, brakes_rear_rotors: 120, timing: 480, transmission: 240,
+    battery: 30, diag_inspection: 60, spark_plugs: 90, cabin_filter: 20, brake_fluid: 60,
+  };
+  // Services that usually need parts ordered in (incur the workshop's parts lead time)
+  const NEEDS_PARTS = new Set(['timing', 'transmission', 'brakes_front_rotors', 'brakes_rear_rotors', 'spark_plugs']);
+
+  const addBusinessDays = (from: Date, days: number) => {
+    const d = new Date(from);
+    let added = 0;
+    while (added < days) { d.setDate(d.getDate() + 1); if (d.getDay() !== 0 && d.getDay() !== 6) added++; }
+    return d;
+  };
+
+  // Capacity-aware turnaround: parts lead time + job duration + technician capacity
   useEffect(() => {
     if (!selectedTime) return;
-    
-    const isComplex = selectedServices.some(id => 
-      id.includes('timing') || id.includes('transmission') || id.includes('clutch') || id.includes('head')
-    );
-    
-    if (isComplex) {
-      setEstimatedReadyTime('5:00 PM (End of Day)');
+    const totalMins = selectedServices.reduce((s, id) => s + (SERVICE_DURATIONS[id] || 60), 0);
+    const technicians = selectedMechanic?.technicians || 1;
+    const partsLead = selectedMechanic?.partsLeadDays ?? 1;
+    const needsParts = selectedServices.some(id => NEEDS_PARTS.has(id));
+    // Effective bay-hours: longer jobs split across technicians
+    const effectiveHours = (totalMins / 60) / Math.max(1, technicians);
+
+    // Drop-off: next business day, or +partsLead if parts must be ordered
+    const earliestDrop = needsParts ? addBusinessDays(new Date(), Math.max(1, partsLead) + 1) : addBusinessDays(new Date(), 1);
+    setSelectedDate(earliestDrop.toISOString().slice(0, 10));
+
+    const [hour, min] = selectedTime.split(':').map(Number);
+    if (effectiveHours > 7) {
+      // Multi-day job → ready next business day 5pm
+      setEstimatedReadyTime('Next day, 5:00 PM');
     } else {
-      // Simple 4h turnaround
-      const [hour, min] = selectedTime.split(':').map(Number);
-      let readyHour = hour + 4;
+      let readyHour = hour + Math.ceil(effectiveHours);
+      if (readyHour >= 17) { setEstimatedReadyTime('Same day, 5:00 PM'); return; }
       const ampm = readyHour >= 12 ? 'PM' : 'AM';
       if (readyHour > 12) readyHour -= 12;
       setEstimatedReadyTime(`${readyHour}:${min === 0 ? '00' : min} ${ampm}`);
     }
-  }, [selectedServices, selectedTime]);
+  }, [selectedServices, selectedTime, selectedMechanic]);
 
   const handleMockPaymentSuccess = async () => {
     if (!stripeInputEmail || !stripeInputEmail.includes('@')) {
