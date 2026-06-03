@@ -13,6 +13,7 @@ import { useTheme } from '../context/ThemeContext';
 
 import { useAuth } from '../context/AuthContext';
 import { supabase } from '../lib/supabase';
+import { authPasskey, registerPasskey, passkeysSupported } from '../lib/passkey';
 
 export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) => {
   const { theme, setTheme } = useTheme();
@@ -357,6 +358,13 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
   const [entryNotes, setEntryNotes] = useState('');
   const [isParsingReceipt, setIsParsingReceipt] = useState(false);
   const [receiptError, setReceiptError] = useState<string | null>(null);
+  // Multi-file drag-and-drop service-history import
+  type ParsedRecord = { id: string; date: string; service: string; provider: string; mileage: string; price: string; notes: string; fileName: string };
+  const [parsedBatch, setParsedBatch] = useState<ParsedRecord[]>([]);
+  const [batchProgress, setBatchProgress] = useState<{ done: number; total: number } | null>(null);
+  const [isDragging, setIsDragging] = useState(false);
+  const [batchSaving, setBatchSaving] = useState(false);
+  const [showBatchReview, setShowBatchReview] = useState(false);
   const [isDiagnosticMode, setIsDiagnosticMode] = useState(false);
   const [isDiagnosticSimulatedComplete, setIsDiagnosticSimulatedComplete] = useState(false);
   const [isRepairFromDiagnostic, setIsRepairFromDiagnostic] = useState(false);
@@ -452,6 +460,46 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
       .catch(() => setPlateMatchError('Verification failed. Please try again.'))
       .finally(() => setMagicVerifying(false));
   }, []);
+  // Verify a returning customer with a passkey (Face/Touch ID). Magic link remains the fallback.
+  const [passkeyError, setPasskeyError] = useState<string | null>(null);
+  const verifyWithPasskey = async (plate: string) => {
+    setPasskeyError(null);
+    setMagicVerifying(true);
+    try {
+      const r = await authPasskey('customer', plate);
+      if (r.email) setCustomerEmail(r.email);
+      if (r.ownerId) setCustomerOwnerId(r.ownerId);
+      if (Array.isArray(r.vehicles) && r.vehicles.length) {
+        setGarageVehicles(r.vehicles.map((v: any) => ({ id: v.rego, rego: v.rego, make: v.make, model: v.model, year: v.year, variant: v.variant ?? undefined, mileage: v.mileage ?? 0, thumbnail: v.thumbnail ?? undefined })));
+      }
+      setRego((r.rego || plate));
+      await loadVehicleByRego(r.rego || plate);
+      setMagicSentTo(null);
+    } catch (e: any) {
+      setPasskeyError(e?.message || 'Passkey sign-in failed — use the email link instead.');
+    } finally {
+      setMagicVerifying(false);
+    }
+  };
+
+  // First booking → offer to create a passkey for faster future logins
+  const [pkPrompted, setPkPrompted] = useState(false);
+  useEffect(() => {
+    if (step !== 7 || pkPrompted || !passkeysSupported()) return;
+    const plate = (rego || vehicle?.rego || '').toUpperCase();
+    if (!plate) return;
+    setPkPrompted(true);
+    const t = setTimeout(async () => {
+      try {
+        if (window.confirm('Booking confirmed! 🎉\n\nWant faster access next time? Create a passkey to sign in with Face ID / Touch ID — no email link needed.')) {
+          await registerPasskey('customer', plate);
+          window.alert('Passkey created. Next time you enter your plate, just tap "Verify with Face / Touch ID".');
+        }
+      } catch { /* cancelled — magic link still works */ }
+    }, 1200);
+    return () => clearTimeout(t);
+  }, [step, pkPrompted, rego, vehicle]);
+
   // Review flow (opened from the review link in the completion email)
   const [reviewCtx, setReviewCtx] = useState<{ bookingId: string; mechanicId: string } | null>(null);
   const [reviewRating, setReviewRating] = useState(5);
@@ -855,6 +903,13 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
       // Per-vehicle service pricing from the DB (vehicle_specs.service_prices)
       const specs = Array.isArray(data.vehicle_specs) ? data.vehicle_specs[0] : data.vehicle_specs;
       setVehiclePrices(specs?.service_prices || {});
+      // Load any saved/imported service history for this vehicle
+      if (Array.isArray(data.history) && data.history.length) {
+        setManualHistory(data.history.map((h: any) => ({
+          date: h.service_date || '', service: h.work_done || '', provider: h.provider || '',
+          mileage: h.mileage != null ? String(h.mileage) : '', price: h.price || '', notes: h.notes || '',
+        })));
+      }
       // Ensure this car is in the garage list
       setGarageVehicles(prev => prev.some(g => g.rego === v.rego) ? prev : [...prev, v]);
       if (user) {
@@ -907,6 +962,79 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
       setReceiptError('Could not read that file. Try a clear photo or PDF.');
     } finally {
       setIsParsingReceipt(false);
+    }
+  };
+
+  const fileToBase64 = (file: File): Promise<string> => new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve((reader.result as string).split(',')[1] || '');
+    reader.onerror = reject;
+    reader.readAsDataURL(file);
+  });
+
+  // Parse MANY receipts/PDFs at once (drag-and-drop or multi-select) into editable records
+  const handleMultiUpload = async (files: File[]) => {
+    const list = files.filter(f => f.type.startsWith('image/') || f.type === 'application/pdf');
+    if (list.length === 0) { setReceiptError('Only images or PDFs are supported.'); return; }
+    setReceiptError(null);
+    setBatchProgress({ done: 0, total: list.length });
+    setShowBatchReview(true);
+    const results: ParsedRecord[] = [];
+    for (let i = 0; i < list.length; i++) {
+      const file = list[i];
+      try {
+        const base64 = await fileToBase64(file);
+        const res = await fetch('/api/ai/parse-receipt', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ fileData: base64, mimeType: file.type }),
+        });
+        const d = await res.json();
+        if (res.ok) {
+          results.push({
+            id: `${Date.now()}-${i}`, date: d.date || '', service: d.service || '', provider: d.provider || '',
+            mileage: d.mileage ? String(d.mileage) : '', price: d.price || '', notes: d.notes || '', fileName: file.name,
+          });
+        } else {
+          results.push({ id: `${Date.now()}-${i}`, date: '', service: '', provider: '', mileage: '', price: '', notes: `⚠️ Could not read (${d.error || 'parse failed'})`, fileName: file.name });
+        }
+      } catch {
+        results.push({ id: `${Date.now()}-${i}`, date: '', service: '', provider: '', mileage: '', price: '', notes: '⚠️ Could not read this file', fileName: file.name });
+      }
+      setBatchProgress({ done: i + 1, total: list.length });
+      setParsedBatch([...results]);
+    }
+    setBatchProgress(null);
+  };
+
+  const updateBatchRecord = (id: string, field: keyof ParsedRecord, value: string) =>
+    setParsedBatch(prev => prev.map(r => r.id === id ? { ...r, [field]: value } : r));
+  const removeBatchRecord = (id: string) => setParsedBatch(prev => prev.filter(r => r.id !== id));
+
+  // Persist the reviewed batch against the vehicle + customer in the Torqued DB
+  const saveBatch = async () => {
+    const plate = (rego || vehicle?.rego || '').toUpperCase();
+    if (!plate) { setReceiptError('No vehicle selected.'); return; }
+    setBatchSaving(true);
+    try {
+      const res = await fetch('/api/customer/save-history', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          rego: plate, ownerId: customerOwnerId,
+          records: parsedBatch.map(r => ({ date: r.date, service: r.service, provider: r.provider, mileage: r.mileage ? Number(r.mileage) : null, price: r.price, notes: r.notes })),
+        }),
+      });
+      const d = await res.json();
+      if (!res.ok) { setReceiptError(d.error || 'Could not save history.'); return; }
+      // Reflect saved records in the on-screen history immediately
+      setManualHistory(prev => [
+        ...parsedBatch.map(r => ({ date: r.date, service: r.service, provider: r.provider, mileage: r.mileage || '', price: r.price, notes: r.notes })),
+        ...prev,
+      ]);
+      setParsedBatch([]); setShowBatchReview(false);
+    } catch {
+      setReceiptError('Could not save. Please try again.');
+    } finally {
+      setBatchSaving(false);
     }
   };
 
@@ -1281,6 +1409,30 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                       </div>
                     </div>
                     {receiptError && <p className="text-[10px] text-torqued-red font-bold">{receiptError}</p>}
+
+                    {/* Drag-and-drop multi-file importer (PDF + images) */}
+                    <div
+                      onDragOver={(e) => { e.preventDefault(); setIsDragging(true); }}
+                      onDragLeave={() => setIsDragging(false)}
+                      onDrop={(e) => { e.preventDefault(); setIsDragging(false); handleMultiUpload(Array.from(e.dataTransfer.files)); }}
+                      className={cn(
+                        "rounded-xl border-2 border-dashed p-4 text-center transition-all",
+                        isDragging ? "border-torqued-red bg-torqued-red/5" : "border-border hover:border-torqued-red/40"
+                      )}
+                    >
+                      <label className="cursor-pointer block">
+                        <Download size={18} className="mx-auto text-torqued-red mb-1.5" />
+                        <p className="text-xs font-bold">Drag &amp; drop receipts here</p>
+                        <p className="text-[10px] text-muted">Multiple PDFs or photos at once · AI reads them into your history</p>
+                        <input
+                          type="file"
+                          accept="image/*,application/pdf"
+                          multiple
+                          className="hidden"
+                          onChange={(e) => { handleMultiUpload(Array.from(e.target.files || [])); e.target.value = ''; }}
+                        />
+                      </label>
+                    </div>
 
                     <div className="space-y-2">
                       {manualHistory.map((item, i) => (
@@ -3353,6 +3505,64 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
         )}
       </AnimatePresence>
 
+      {/* Batch service-history review modal */}
+      <AnimatePresence>
+        {showBatchReview && (
+          <div className="fixed inset-0 z-[120] flex items-center justify-center p-4 bg-black/70 backdrop-blur-sm">
+            <motion.div
+              initial={{ opacity: 0, scale: 0.96, y: 20 }} animate={{ opacity: 1, scale: 1, y: 0 }} exit={{ opacity: 0, scale: 0.96, y: 20 }}
+              className="w-full max-w-2xl max-h-[88vh] overflow-y-auto bg-card border border-border rounded-3xl p-6 space-y-4 shadow-2xl"
+            >
+              <div className="flex items-center justify-between">
+                <div>
+                  <h3 className="text-xl font-black tracking-tight">Review imported records</h3>
+                  <p className="text-xs text-muted">Edit anything the AI got wrong, remove unwanted rows, then save to your vehicle.</p>
+                </div>
+                <button onClick={() => { if (!batchSaving) { setShowBatchReview(false); setParsedBatch([]); } }} className="text-muted hover:text-foreground text-2xl leading-none">×</button>
+              </div>
+
+              {batchProgress && (
+                <div className="space-y-1.5">
+                  <div className="flex justify-between text-[10px] font-bold uppercase tracking-widest text-muted">
+                    <span>Reading files…</span><span>{batchProgress.done} / {batchProgress.total}</span>
+                  </div>
+                  <div className="h-1.5 bg-background rounded-full overflow-hidden"><div className="h-full bg-torqued-red transition-all" style={{ width: `${(batchProgress.done / batchProgress.total) * 100}%` }} /></div>
+                </div>
+              )}
+
+              {parsedBatch.length === 0 && !batchProgress && <p className="text-sm text-muted italic text-center py-8">No records parsed.</p>}
+
+              <div className="space-y-3">
+                {parsedBatch.map(r => (
+                  <div key={r.id} className="p-3 bg-background border border-border rounded-2xl space-y-2">
+                    <div className="flex items-center justify-between">
+                      <p className="text-[10px] font-bold uppercase tracking-widest text-muted/60 truncate">{r.fileName}</p>
+                      <button onClick={() => removeBatchRecord(r.id)} className="text-torqued-red text-[10px] font-bold hover:underline">Remove</button>
+                    </div>
+                    <div className="grid grid-cols-2 gap-2">
+                      <input value={r.date} onChange={e => updateBatchRecord(r.id, 'date', e.target.value)} placeholder="Date" className="bg-card border border-border rounded-lg px-2.5 h-9 text-xs" />
+                      <input value={r.mileage} onChange={e => updateBatchRecord(r.id, 'mileage', e.target.value)} placeholder="Mileage (km)" className="bg-card border border-border rounded-lg px-2.5 h-9 text-xs" />
+                      <input value={r.service} onChange={e => updateBatchRecord(r.id, 'service', e.target.value)} placeholder="Work done" className="bg-card border border-border rounded-lg px-2.5 h-9 text-xs col-span-2" />
+                      <input value={r.provider} onChange={e => updateBatchRecord(r.id, 'provider', e.target.value)} placeholder="Provider" className="bg-card border border-border rounded-lg px-2.5 h-9 text-xs" />
+                      <input value={r.price} onChange={e => updateBatchRecord(r.id, 'price', e.target.value)} placeholder="Price" className="bg-card border border-border rounded-lg px-2.5 h-9 text-xs" />
+                      <input value={r.notes} onChange={e => updateBatchRecord(r.id, 'notes', e.target.value)} placeholder="Notes" className="bg-card border border-border rounded-lg px-2.5 h-9 text-xs col-span-2" />
+                    </div>
+                  </div>
+                ))}
+              </div>
+
+              {receiptError && <p className="text-xs text-torqued-red font-bold">{receiptError}</p>}
+              <div className="flex gap-3 pt-1">
+                <Button variant="ghost" fullWidth disabled={batchSaving} onClick={() => { setShowBatchReview(false); setParsedBatch([]); }}>Cancel</Button>
+                <Button fullWidth className="bg-torqued-red text-white" disabled={batchSaving || !!batchProgress || parsedBatch.length === 0} onClick={saveBatch}>
+                  {batchSaving ? 'Saving…' : `Save ${parsedBatch.length} record${parsedBatch.length === 1 ? '' : 's'}`}
+                </Button>
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
       {/* Magic-link sent modal */}
       <AnimatePresence>
         {magicSentTo && (
@@ -3376,7 +3586,16 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                   <a href={magicFallbackLink} className="text-xs text-torqued-red font-bold break-all underline">{magicFallbackLink}</a>
                 </div>
               )}
-              <Button variant="ghost" fullWidth onClick={() => { setMagicSentTo(null); setMagicFallbackLink(null); }}>Close</Button>
+              {passkeysSupported() && (
+                <>
+                  <div className="flex items-center gap-3 text-[10px] font-black uppercase tracking-widest text-muted/50"><span className="flex-1 h-px bg-border" />faster<span className="flex-1 h-px bg-border" /></div>
+                  <Button fullWidth className="bg-torqued-red text-white" onClick={() => verifyWithPasskey(rego)}>
+                    🔑 Verify instantly with Face / Touch ID
+                  </Button>
+                  {passkeyError && <p className="text-xs text-torqued-red font-bold">{passkeyError}</p>}
+                </>
+              )}
+              <Button variant="ghost" fullWidth onClick={() => { setMagicSentTo(null); setMagicFallbackLink(null); setPasskeyError(null); }}>Close</Button>
             </motion.div>
           </div>
         )}

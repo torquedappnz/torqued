@@ -45,6 +45,7 @@ import { useTheme } from '../context/ThemeContext';
 import { useAuth } from '../context/AuthContext';
 import { useEffect } from 'react';
 import { supabase } from '../lib/supabase';
+import { authPasskey, registerPasskey, passkeysSupported } from '../lib/passkey';
 import { SERVICES } from '../constants';
 import { 
   InventoryPart, 
@@ -2201,6 +2202,10 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                     try {
                       if (mechAuthMode === 'login') {
                         await loginMechanic(mechEmail, mechPassword);
+                        // First-time login: offer a passkey for next time
+                        if (passkeysSupported() && mechEmail && window.confirm('Set up a passkey for faster sign-in? You\'ll use Face ID / Touch ID instead of your password next time.')) {
+                          try { await registerPasskey('mechanic', mechEmail); window.alert('Passkey added.'); } catch {}
+                        }
                       } else {
                         const result = await signUpMechanic(mechEmail, mechPassword, mechName);
                         if (result.error) setMechAuthError(result.error);
@@ -2215,6 +2220,26 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                 >
                   {mechAuthLoading ? 'Please wait...' : mechAuthMode === 'login' ? 'Log In' : 'Create Account'}
                 </Button>
+
+                {mechAuthMode === 'login' && passkeysSupported() && (
+                  <button
+                    onClick={async () => {
+                      setMechAuthError(null); setMechAuthLoading(true);
+                      try {
+                        const r = await authPasskey('mechanic', mechEmail || undefined);
+                        if (!r.tokenHash) throw new Error('Could not establish session — use password.');
+                        const { error } = await supabase.auth.verifyOtp({ type: 'magiclink', token_hash: r.tokenHash });
+                        if (error) throw new Error(error.message);
+                        // AuthContext picks up the session via onAuthStateChange
+                      } catch (e: any) {
+                        setMechAuthError(e?.message || 'Passkey sign-in failed');
+                      } finally { setMechAuthLoading(false); }
+                    }}
+                    className="w-full text-xs font-bold text-white/70 hover:text-white border border-white/10 rounded-xl h-12 flex items-center justify-center gap-2"
+                  >
+                    <span aria-hidden>🔑</span> Sign in with passkey
+                  </button>
+                )}
               </div>
             ) : (
               <div className="space-y-6">

@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { Logo } from '../components/Logo';
 import { Button } from '../components/Button';
+import { authPasskey, registerPasskey, passkeysSupported } from '../lib/passkey';
 
 export const AdminPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) => {
   const [key, setKey] = useState('');               // admin session token
@@ -50,6 +51,26 @@ export const AdminPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) => {
     const d = await res.json();
     if (!res.ok) { setAuthError(d.error || 'Login failed'); return; }
     setKey(d.key); await loadAll(d.key); setAuthed(true);
+    // Offer to set up a passkey for faster future logins
+    if (passkeysSupported() && email) {
+      try {
+        if (window.confirm('Set up a passkey for faster sign-in next time? You\'ll use Face ID / Touch ID instead of a password.')) {
+          await registerPasskey('admin', email);
+          window.alert('Passkey added. Next time, tap "Sign in with passkey".');
+        }
+      } catch { /* user cancelled or unsupported — password still works */ }
+    }
+  };
+
+  const loginPasskey = async () => {
+    setAuthError(null);
+    try {
+      const r = await authPasskey('admin', email || undefined);
+      if (!r.key) throw new Error('No session returned');
+      setKey(r.key); await loadAll(r.key); setAuthed(true);
+    } catch (e: any) {
+      setAuthError(e?.message || 'Passkey sign-in failed');
+    }
   };
 
   const runSearch = async () => {
@@ -102,6 +123,11 @@ export const AdminPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) => {
             className="w-full bg-white/5 border border-white/10 rounded-xl px-4 h-12 text-sm text-white placeholder:text-white/30 focus:outline-none focus:border-torqued-red" />
           {authError && <p className="text-xs text-torqued-red font-bold">{authError}</p>}
           <Button fullWidth className="bg-torqued-red text-white" onClick={login}>Log In</Button>
+          {passkeysSupported() && (
+            <button onClick={loginPasskey} className="w-full text-xs font-bold text-white/70 hover:text-white border border-white/10 rounded-xl h-11 flex items-center justify-center gap-2">
+              <span aria-hidden>🔑</span> Sign in with passkey
+            </button>
+          )}
           {onBack && <button onClick={onBack} className="text-xs text-white/40 hover:text-white w-full">← Back</button>}
         </div>
       </div>

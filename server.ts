@@ -257,6 +257,136 @@ app.get('/api/mechanics', async (_req, res) => {
   }
 });
 
+// ── Passkeys (WebAuthn) ─────────────────────────────────────
+const RP_ID = 'torquednz.vercel.app';
+const RP_ORIGIN = 'https://torquednz.vercel.app';
+const RP_NAME = 'Torqued';
+
+// POST /api/passkey/register-options — begin passkey registration
+app.post('/api/passkey/register-options', async (req, res) => {
+  try {
+    const { actorType, ownerRef } = req.body;
+    if (!actorType || !ownerRef) return res.status(400).json({ error: 'actorType and ownerRef required' });
+    const supabase = getSupabaseAdmin();
+    if (!supabase) return res.status(500).json({ error: 'Database not configured' });
+    const { generateRegistrationOptions } = await import('@simplewebauthn/server');
+
+    const { data: existing } = await supabase.from('webauthn_credentials')
+      .select('credential_id, transports').eq('actor_type', actorType).eq('owner_ref', String(ownerRef).toLowerCase());
+
+    const options = await generateRegistrationOptions({
+      rpName: RP_NAME, rpID: RP_ID,
+      userName: String(ownerRef), userID: new TextEncoder().encode(String(ownerRef).toLowerCase()),
+      attestationType: 'none',
+      excludeCredentials: (existing ?? []).map((c: any) => ({ id: c.credential_id, transports: c.transports || undefined })),
+      authenticatorSelection: { residentKey: 'preferred', userVerification: 'preferred' },
+    });
+    const challengeToken = signAdmin({ kind: 'pk-reg', actorType, ownerRef: String(ownerRef).toLowerCase(), challenge: options.challenge }, 5 * 60 * 1000);
+    res.json({ options, challengeToken });
+  } catch (err) {
+    console.error('[passkey/register-options]', err);
+    res.status(500).json({ error: 'Could not start registration' });
+  }
+});
+
+// POST /api/passkey/register-verify — finish registration, store credential
+app.post('/api/passkey/register-verify', async (req, res) => {
+  try {
+    const { challengeToken, response } = req.body;
+    const data = challengeToken ? readSigned(challengeToken) : null;
+    if (!data || data.kind !== 'pk-reg') return res.status(400).json({ error: 'Registration session expired.' });
+    const { verifyRegistrationResponse } = await import('@simplewebauthn/server');
+    const verification = await verifyRegistrationResponse({
+      response, expectedChallenge: data.challenge, expectedOrigin: RP_ORIGIN, expectedRPID: RP_ID,
+    });
+    if (!verification.verified || !verification.registrationInfo) return res.status(400).json({ error: 'Verification failed' });
+    const cred = verification.registrationInfo.credential;
+    const supabase = getSupabaseAdmin();
+    if (!supabase) return res.status(500).json({ error: 'Database not configured' });
+    await supabase.from('webauthn_credentials').insert({
+      actor_type: data.actorType, owner_ref: data.ownerRef,
+      credential_id: cred.id,
+      public_key: Buffer.from(cred.publicKey).toString('base64url'),
+      counter: cred.counter || 0,
+      transports: cred.transports || null,
+    });
+    res.json({ success: true });
+  } catch (err) {
+    console.error('[passkey/register-verify]', err);
+    res.status(500).json({ error: 'Could not save passkey' });
+  }
+});
+
+// POST /api/passkey/auth-options — begin passkey authentication
+app.post('/api/passkey/auth-options', async (req, res) => {
+  try {
+    const { actorType, ownerRef } = req.body;
+    const supabase = getSupabaseAdmin();
+    if (!supabase) return res.status(500).json({ error: 'Database not configured' });
+    const { generateAuthenticationOptions } = await import('@simplewebauthn/server');
+    let allow: any[] | undefined;
+    if (ownerRef) {
+      const { data: creds } = await supabase.from('webauthn_credentials')
+        .select('credential_id, transports').eq('actor_type', actorType).eq('owner_ref', String(ownerRef).toLowerCase());
+      if (!creds || creds.length === 0) return res.status(404).json({ error: 'No passkey registered for this account.' });
+      allow = creds.map((c: any) => ({ id: c.credential_id, transports: c.transports || undefined }));
+    }
+    const options = await generateAuthenticationOptions({ rpID: RP_ID, userVerification: 'preferred', allowCredentials: allow });
+    const challengeToken = signAdmin({ kind: 'pk-auth', actorType, ownerRef: ownerRef ? String(ownerRef).toLowerCase() : null, challenge: options.challenge }, 5 * 60 * 1000);
+    res.json({ options, challengeToken });
+  } catch (err) {
+    console.error('[passkey/auth-options]', err);
+    res.status(500).json({ error: 'Could not start sign-in' });
+  }
+});
+
+// POST /api/passkey/auth-verify — finish authentication, return a session for the actor
+app.post('/api/passkey/auth-verify', async (req, res) => {
+  try {
+    const { challengeToken, response } = req.body;
+    const data = challengeToken ? readSigned(challengeToken) : null;
+    if (!data || data.kind !== 'pk-auth') return res.status(400).json({ error: 'Sign-in session expired.' });
+    const supabase = getSupabaseAdmin();
+    if (!supabase) return res.status(500).json({ error: 'Database not configured' });
+
+    const { data: cred } = await supabase.from('webauthn_credentials').select('*').eq('credential_id', response.id).single();
+    if (!cred) return res.status(404).json({ error: 'Passkey not recognised.' });
+
+    const { verifyAuthenticationResponse } = await import('@simplewebauthn/server');
+    const verification = await verifyAuthenticationResponse({
+      response, expectedChallenge: data.challenge, expectedOrigin: RP_ORIGIN, expectedRPID: RP_ID,
+      credential: { id: cred.credential_id, publicKey: Buffer.from(cred.public_key, 'base64url'), counter: Number(cred.counter) || 0 },
+    });
+    if (!verification.verified) return res.status(400).json({ error: 'Verification failed' });
+    await supabase.from('webauthn_credentials').update({ counter: verification.authenticationInfo.newCounter }).eq('id', cred.id);
+
+    // Issue the right kind of session for the actor
+    if (cred.actor_type === 'admin') {
+      return res.json({ success: true, actorType: 'admin', key: signAdmin({ kind: 'admin-session', email: cred.owner_ref }, 12 * 60 * 60 * 1000) });
+    }
+    if (cred.actor_type === 'mechanic') {
+      // Mint a Supabase session without password via a magiclink token_hash (client calls verifyOtp)
+      const { data: link } = await supabase.auth.admin.generateLink({ type: 'magiclink', email: cred.owner_ref });
+      return res.json({ success: true, actorType: 'mechanic', email: cred.owner_ref, tokenHash: link?.properties?.hashed_token || null });
+    }
+    // customer: return rego + garage (no Supabase session needed)
+    const rego = cred.owner_ref.toUpperCase();
+    const { data: vehicle } = await supabase.from('vehicles').select('owner_id').eq('rego', rego).single();
+    let email: string | null = null, ownerId: string | null = null, vehicles: any[] = [];
+    if (vehicle?.owner_id) {
+      ownerId = vehicle.owner_id;
+      const { data: p } = await supabase.from('profiles').select('email').eq('id', ownerId).single();
+      email = p?.email ?? null;
+      const { data: rows } = await supabase.from('vehicles').select('rego, make, model, year, variant, mileage, thumbnail').eq('owner_id', ownerId);
+      vehicles = rows ?? [];
+    }
+    res.json({ success: true, actorType: 'customer', rego, email, ownerId, vehicles });
+  } catch (err) {
+    console.error('[passkey/auth-verify]', err);
+    res.status(500).json({ error: 'Sign-in failed' });
+  }
+});
+
 // POST /api/customer/check-plate — checks plate, triggers OTP for returning customers
 app.post('/api/customer/check-plate', async (req, res) => {
   try {
@@ -1247,6 +1377,37 @@ Be direct and practical. No disclaimers.`;
   }
 });
 
+// POST /api/customer/save-history — persist reviewed service-history records against vehicle + customer
+app.post('/api/customer/save-history', async (req, res) => {
+  try {
+    const { rego, ownerId, records } = req.body;
+    if (!rego || !Array.isArray(records) || records.length === 0) return res.status(400).json({ error: 'rego and records are required' });
+    const supabase = getSupabaseAdmin();
+    if (!supabase) return res.status(500).json({ error: 'Database not configured' });
+
+    const plate = String(rego).toUpperCase();
+    // Resolve owner from the vehicle if not supplied
+    let owner = ownerId || null;
+    if (!owner) {
+      const { data: v } = await supabase.from('vehicles').select('owner_id').eq('rego', plate).single();
+      owner = v?.owner_id ?? null;
+    }
+
+    const rows = records.map((r: any) => ({
+      rego: plate, owner_id: owner,
+      service_date: r.date || null, work_done: r.service || null, provider: r.provider || null,
+      mileage: r.mileage != null && r.mileage !== '' ? Number(r.mileage) : null,
+      price: r.price || null, notes: r.notes || null, source: 'import',
+    }));
+    const { error } = await supabase.from('vehicle_history').insert(rows);
+    if (error) return res.status(500).json({ error: error.message });
+    res.json({ success: true, saved: rows.length });
+  } catch (err) {
+    console.error('[save-history]', err);
+    res.status(500).json({ error: 'Could not save history' });
+  }
+});
+
 // POST /api/ai/parse-receipt — extracts service history from a receipt image via OpenAI vision
 app.post('/api/ai/parse-receipt', async (req, res) => {
   try {
@@ -1254,9 +1415,7 @@ app.post('/api/ai/parse-receipt', async (req, res) => {
     if (!fileData || !mimeType) return res.status(400).json({ error: 'fileData and mimeType are required' });
     if (!process.env.OPENAI_API_KEY) return res.status(503).json({ error: 'AI receipt scanning is not configured yet.' });
 
-    if (String(mimeType).includes('pdf')) {
-      return res.status(422).json({ error: 'Please upload a photo of the receipt (JPG/PNG). PDF support is coming soon.' });
-    }
+    const isPdf = String(mimeType).includes('pdf');
 
     const prompt = `You are an automotive service receipt parser for New Zealand workshops.
 Read this service receipt/invoice and extract:
@@ -1269,9 +1428,13 @@ Read this service receipt/invoice and extract:
 Return ONLY a JSON object with keys: service, date, mileage, provider, price, notes.
 Use an empty string for anything you cannot find. Do not guess.`;
 
+    const fileBlock = isPdf
+      ? { type: 'file', file: { filename: 'receipt.pdf', file_data: `data:application/pdf;base64,${fileData}` } }
+      : { type: 'image_url', image_url: { url: `data:${mimeType};base64,${fileData}` } };
+
     const text = await callOpenAI([
       { type: 'text', text: prompt },
-      { type: 'image_url', image_url: { url: `data:${mimeType};base64,${fileData}` } },
+      fileBlock,
     ], true);
 
     let parsed: any = {};
@@ -1370,7 +1533,10 @@ app.get('/api/vehicles/:rego', async (req, res) => {
     .single();
 
   if (error || !data) return res.status(404).json({ error: 'Vehicle not found' });
-  res.json(data);
+  // Attach any saved/imported service history for this vehicle
+  const { data: history } = await supabase
+    .from('vehicle_history').select('*').eq('rego', formattedRego).order('created_at', { ascending: false });
+  res.json({ ...data, history: history ?? [] });
 });
 
 // POST /api/otp/verify — validates code, clears it, and returns the owner's email
