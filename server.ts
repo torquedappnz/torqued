@@ -740,8 +740,115 @@ app.get('/api/reviews', async (req, res) => {
 // ── Admin back-office (gated by ADMIN_PASSWORD) ─────────────
 function adminOk(req: express.Request): boolean {
   const key = (req.query.key as string) || req.body?.key;
-  return !!key && key === (process.env.ADMIN_PASSWORD || 'torqued-admin-2026');
+  if (!key) return false;
+  // Accept the master env password OR a valid signed admin session token
+  return key === (process.env.ADMIN_PASSWORD || 'torqued-admin-2026') || !!readAdminSession(key);
 }
+
+// ── Admin auth helpers (pbkdf2 hashing + signed session/setup tokens) ──
+function hashPassword(pw: string): string {
+  const salt = crypto.randomBytes(16).toString('hex');
+  const hash = crypto.pbkdf2Sync(pw, salt, 100000, 64, 'sha512').toString('hex');
+  return `${salt}:${hash}`;
+}
+function verifyPassword(pw: string, stored: string): boolean {
+  const [salt, hash] = (stored || '').split(':');
+  if (!salt || !hash) return false;
+  const test = crypto.pbkdf2Sync(pw, salt, 100000, 64, 'sha512').toString('hex');
+  return crypto.timingSafeEqual(Buffer.from(test, 'hex'), Buffer.from(hash, 'hex'));
+}
+function signAdmin(payload: object, ttlMs: number): string {
+  const body = Buffer.from(JSON.stringify({ ...payload, exp: Date.now() + ttlMs })).toString('base64url');
+  const sig = crypto.createHmac('sha256', MAGIC_SECRET).update(body).digest('base64url');
+  return `${body}.${sig}`;
+}
+function readSigned(token: string): any | null {
+  try {
+    const [body, sig] = token.split('.');
+    if (!body || !sig) return null;
+    if (sig !== crypto.createHmac('sha256', MAGIC_SECRET).update(body).digest('base64url')) return null;
+    const data = JSON.parse(Buffer.from(body, 'base64url').toString());
+    if (Date.now() > data.exp) return null;
+    return data;
+  } catch { return null; }
+}
+function readAdminSession(token: string): any | null {
+  const d = readSigned(token);
+  return d && d.kind === 'admin-session' ? d : null;
+}
+
+// POST /api/admin/request-setup — email an admin a "set your password" link (master key gated)
+app.post('/api/admin/request-setup', async (req, res) => {
+  if (!adminOk(req)) return res.status(401).json({ error: 'Unauthorized' });
+  try {
+    const { email } = req.body;
+    if (!email) return res.status(400).json({ error: 'email required' });
+    const supabase = getSupabaseAdmin();
+    if (!supabase) return res.status(500).json({ error: 'Database not configured' });
+    await supabase.from('admin_users').upsert({ email }, { onConflict: 'email' });
+
+    const token = signAdmin({ kind: 'admin-setup', email }, 24 * 60 * 60 * 1000);
+    const link = `https://torquednz.vercel.app/admin?setup=${token}`;
+    const transporter = getMailTransporter();
+    if (transporter) {
+      const html = `<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="color-scheme" content="light dark"></head>
+<body style="margin:0;padding:0;background:#f4f4f6;font-family:-apple-system,Arial,sans-serif">
+<table width="100%" cellpadding="0" cellspacing="0" style="background:#f4f4f6;padding:32px 8px"><tr><td align="center">
+<table width="100%" cellpadding="0" cellspacing="0" style="max-width:480px;background:#ffffff;border-radius:20px;overflow:hidden;border:1px solid #e6e6ea">
+<tr><td style="background:#150402;padding:24px 32px;border-bottom:3px solid #FF1800;text-align:center"><img src="${LOGO_URL}" width="200" height="67" style="width:200px;height:67px;border:0"/></td></tr>
+<tr><td style="padding:36px 32px;color:#150402">
+<span style="display:inline-block;background:rgba(255,24,0,.1);color:#FF1800;font-size:9.5px;font-weight:900;letter-spacing:2px;text-transform:uppercase;padding:6px 14px;border-radius:6px">ADMIN ACCESS</span>
+<h1 style="margin:18px 0 6px;font-size:22px;font-weight:900;text-transform:uppercase">Create your admin password</h1>
+<p style="margin:0 0 22px;font-size:14px;color:#555;line-height:1.5">You've been granted admin access to the Torqued back-office. Set your own secure password using the button below — it's never shared.</p>
+<a href="${link}" style="display:inline-block;background:#FF1800;color:#fff;font-weight:900;text-transform:uppercase;font-size:13px;letter-spacing:1px;text-decoration:none;padding:14px 32px;border-radius:10px">Create Password</a>
+<p style="margin:22px 0 0;font-size:11px;color:#999;line-height:1.5">Link expires in 24 hours. Or paste:<br/><a href="${link}" style="color:#999;word-break:break-all">${link}</a></p>
+</td></tr></table></td></tr></table></body></html>`;
+      await transporter.sendMail({ from: process.env.SMTP_FROM || '"Torqued" <torquedapp.nz@gmail.com>', to: email, subject: 'Set your Torqued admin password', html });
+    }
+    res.json({ sent: true });
+  } catch (err) {
+    console.error('[admin/request-setup]', err);
+    res.status(500).json({ error: 'Failed to send setup link' });
+  }
+});
+
+// POST /api/admin/set-password — admin sets their password via the setup token
+app.post('/api/admin/set-password', async (req, res) => {
+  try {
+    const { token, password } = req.body;
+    const data = token ? readSigned(token) : null;
+    if (!data || data.kind !== 'admin-setup') return res.status(400).json({ error: 'This setup link is invalid or expired.' });
+    if (!password || String(password).length < 8) return res.status(400).json({ error: 'Password must be at least 8 characters.' });
+    const supabase = getSupabaseAdmin();
+    if (!supabase) return res.status(500).json({ error: 'Database not configured' });
+    const { error } = await supabase.from('admin_users')
+      .update({ password_hash: hashPassword(password), password_set_at: new Date().toISOString() })
+      .eq('email', data.email);
+    if (error) return res.status(500).json({ error: error.message });
+    res.json({ success: true, email: data.email });
+  } catch (err) {
+    console.error('[admin/set-password]', err);
+    res.status(500).json({ error: 'Could not set password' });
+  }
+});
+
+// POST /api/admin/login — email + password -> signed admin session token
+app.post('/api/admin/login', async (req, res) => {
+  try {
+    const { email, password } = req.body;
+    if (!email || !password) return res.status(400).json({ error: 'Email and password required' });
+    const supabase = getSupabaseAdmin();
+    if (!supabase) return res.status(500).json({ error: 'Database not configured' });
+    const { data: admin } = await supabase.from('admin_users').select('email, password_hash').eq('email', email).single();
+    if (!admin || !admin.password_hash) return res.status(401).json({ error: 'No admin account or password not set yet.' });
+    if (!verifyPassword(password, admin.password_hash)) return res.status(401).json({ error: 'Incorrect password.' });
+    const sessionKey = signAdmin({ kind: 'admin-session', email }, 12 * 60 * 60 * 1000);
+    res.json({ success: true, key: sessionKey });
+  } catch (err) {
+    console.error('[admin/login]', err);
+    res.status(500).json({ error: 'Login failed' });
+  }
+});
 
 // GET /api/admin/overview — revenue + platform metrics
 app.get('/api/admin/overview', async (req, res) => {
@@ -827,6 +934,73 @@ app.post('/api/admin/send-login', async (req, res) => {
   } catch (err) {
     console.error('[admin/send-login]', err);
     res.status(500).json({ error: 'Failed to send' });
+  }
+});
+
+// GET /api/admin/search?q= — search bookings, customers, mechanics
+app.get('/api/admin/search', async (req, res) => {
+  if (!adminOk(req)) return res.status(401).json({ error: 'Unauthorized' });
+  try {
+    const q = ((req.query.q as string) || '').trim();
+    const supabase = getSupabaseAdmin();
+    if (!supabase) return res.json({ bookings: [], people: [] });
+    if (!q) return res.json({ bookings: [], people: [] });
+    const like = `%${q}%`;
+
+    const { data: bookings } = await supabase.from('bookings')
+      .select('id, vehicle_rego, mechanic_id, customer_name, email, total_price, quoted_price, status, payment_status, refunded_amount, date, created_at')
+      .or(`id.ilike.${like},vehicle_rego.ilike.${like},email.ilike.${like},customer_name.ilike.${like}`)
+      .order('created_at', { ascending: false }).limit(40);
+
+    const { data: people } = await supabase.from('profiles')
+      .select('id, name, email, role, phone, subscription_active, rating')
+      .or(`name.ilike.${like},email.ilike.${like}`)
+      .limit(40);
+
+    res.json({ bookings: bookings ?? [], people: people ?? [] });
+  } catch (err) {
+    console.error('[admin/search]', err);
+    res.status(500).json({ error: 'Search failed' });
+  }
+});
+
+// POST /api/admin/update-booking — edit any booking field (whitelisted)
+app.post('/api/admin/update-booking', async (req, res) => {
+  if (!adminOk(req)) return res.status(401).json({ error: 'Unauthorized' });
+  try {
+    const { id, fields } = req.body;
+    if (!id || !fields) return res.status(400).json({ error: 'id and fields required' });
+    const allowed = ['status','payment_status','total_price','quoted_price','date','customer_name','email','phone','vehicle_rego','mechanic_id'];
+    const update: Record<string, any> = {};
+    for (const k of allowed) if (fields[k] !== undefined) update[k] = fields[k];
+    const supabase = getSupabaseAdmin();
+    if (!supabase) return res.status(500).json({ error: 'Database not configured' });
+    const { error } = await supabase.from('bookings').update(update).eq('id', id);
+    if (error) return res.status(500).json({ error: error.message });
+    res.json({ success: true });
+  } catch (err) {
+    console.error('[admin/update-booking]', err);
+    res.status(500).json({ error: 'Update failed' });
+  }
+});
+
+// POST /api/admin/update-profile — edit any customer/mechanic profile (whitelisted)
+app.post('/api/admin/update-profile', async (req, res) => {
+  if (!adminOk(req)) return res.status(401).json({ error: 'Unauthorized' });
+  try {
+    const { id, fields } = req.body;
+    if (!id || !fields) return res.status(400).json({ error: 'id and fields required' });
+    const allowed = ['name','email','phone','role','subscription_active','address','nzbn','labour_rate','technicians','parts_lead_days'];
+    const update: Record<string, any> = {};
+    for (const k of allowed) if (fields[k] !== undefined) update[k] = fields[k];
+    const supabase = getSupabaseAdmin();
+    if (!supabase) return res.status(500).json({ error: 'Database not configured' });
+    const { error } = await supabase.from('profiles').update(update).eq('id', id);
+    if (error) return res.status(500).json({ error: error.message });
+    res.json({ success: true });
+  } catch (err) {
+    console.error('[admin/update-profile]', err);
+    res.status(500).json({ error: 'Update failed' });
   }
 });
 
