@@ -2176,14 +2176,14 @@ app.post('/api/stripe/create-payment', async (req, res) => {
       });
     }
 
-    // Persist booking to Supabase before redirecting to Stripe.
-    // The webhook updates it to confirmed once payment completes.
-    if (bookingData && userId) {
+    // Persist booking to Supabase before redirecting to Stripe (even for anonymous
+    // customers — keyed on mechanic so it shows in the mechanic/admin portals).
+    if (bookingData) {
       const supabase = getSupabaseAdmin();
       if (supabase) {
         const { error } = await supabase.from('bookings').upsert({
           id: bookingId,
-          customer_id: userId,
+          customer_id: userId || null,
           mechanic_id: bookingData.mechanicId,
           vehicle_rego: bookingData.vehicleId || null,
           service_ids: bookingData.serviceIds || [],
@@ -2193,6 +2193,8 @@ app.post('/api/stripe/create-payment', async (req, res) => {
           date: bookingData.date || null,
           total_price: bookingData.totalPrice || 0,
           deposit_paid: bookingData.depositPaid ?? null,
+          customer_name: bookingData.customerName || null,
+          email: bookingData.email || customerEmail || null,
         }, { onConflict: 'id' });
         if (error) console.error('[create-payment] Failed to persist booking:', error.message);
       }
@@ -2230,7 +2232,7 @@ app.post('/api/stripe/create-payment', async (req, res) => {
     } as any);
 
     // Store the session id on the booking so refunds work even without webhooks
-    if (bookingData && userId) {
+    if (bookingData) {
       const sb = getSupabaseAdmin();
       if (sb) await sb.from('bookings').update({ stripe_session_id: session.id }).eq('id', bookingId);
     }

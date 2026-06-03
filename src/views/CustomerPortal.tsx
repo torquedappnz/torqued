@@ -1160,8 +1160,8 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
             bookingId: newJob.id,
             customerEmail: customerEmail || userProfile?.email || user?.email || 'customer@torqued.nz',
             description: `Torqued Repair Booking Ref ${newJob.id}`,
-            bookingData: newJob,
-            userId: user?.id ?? null,
+            bookingData: { ...newJob, email: customerEmail || userProfile?.email || user?.email || null, customerName: userName || undefined },
+            userId: user?.id ?? customerOwnerId ?? null,
           })
         });
         
