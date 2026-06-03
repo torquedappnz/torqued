@@ -90,7 +90,24 @@ function getOrigin(req: express.Request): string {
 const otpStore = new Map<string, { code: string; expiresAt: number }>();
 
 // Magic-link tokens for customer verification: token -> { rego, expiresAt }
-const magicStore = new Map<string, { rego: string; expiresAt: number }>();
+// Stateless signed magic tokens (work across serverless instances — no shared memory)
+const MAGIC_SECRET = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.ADMIN_PASSWORD || 'torqued-magic-secret';
+function makeMagicToken(rego: string): string {
+  const payload = Buffer.from(JSON.stringify({ rego, exp: Date.now() + 15 * 60 * 1000 })).toString('base64url');
+  const sig = crypto.createHmac('sha256', MAGIC_SECRET).update(payload).digest('base64url');
+  return `${payload}.${sig}`;
+}
+function readMagicToken(token: string): { rego: string } | null {
+  try {
+    const [payload, sig] = token.split('.');
+    if (!payload || !sig) return null;
+    const expect = crypto.createHmac('sha256', MAGIC_SECRET).update(payload).digest('base64url');
+    if (sig !== expect) return null;
+    const data = JSON.parse(Buffer.from(payload, 'base64url').toString());
+    if (Date.now() > data.exp) return null;
+    return { rego: data.rego };
+  } catch { return null; }
+}
 
 function generateMagicEmailHtml(rego: string, link: string): string {
   return `<!DOCTYPE html><html><head><meta charset="utf-8">
@@ -122,8 +139,7 @@ function generateMagicEmailHtml(rego: string, link: string): string {
 
 // Create a magic token, email the link, and return delivery info (+ fallback link if email fails)
 async function sendMagicLink(rego: string, email: string, origin: string) {
-  const token = crypto.randomBytes(24).toString('hex');
-  magicStore.set(token, { rego, expiresAt: Date.now() + 15 * 60 * 1000 });
+  const token = makeMagicToken(rego);
   const link = `${origin}/customer?vt=${token}`;
   let delivered = false;
   const transporter = getMailTransporter();
@@ -297,10 +313,8 @@ app.post('/api/customer/check-plate', async (req, res) => {
 app.get('/api/customer/verify-link', async (req, res) => {
   try {
     const token = req.query.token as string;
-    const entry = token ? magicStore.get(token) : null;
-    if (!entry) return res.status(400).json({ error: 'This link is invalid or already used.' });
-    if (Date.now() > entry.expiresAt) { magicStore.delete(token); return res.status(400).json({ error: 'This link has expired. Please request a new one.' }); }
-    magicStore.delete(token); // one-time use
+    const entry = token ? readMagicToken(token) : null;
+    if (!entry) return res.status(400).json({ error: 'This link is invalid or has expired. Please request a new one.' });
 
     const supabase = getSupabaseAdmin();
     if (!supabase) return res.status(500).json({ error: 'Database not configured' });
