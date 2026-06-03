@@ -24,6 +24,7 @@ import {
   Map,
   Award,
   PenSquare,
+  History,
   Trash2,
   Plus,
   Wrench,
@@ -243,6 +244,7 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
     setQLabourRate(profileData.labourRate || 145);
     setQDiscount(0);
     setQOther([]);
+    setQNotes('');
   };
   const qPartsTotal = qParts.reduce((s, p) => s + (p.qty || 0) * (p.unitPrice || 0), 0);
   const qLabourTotal = (qLabourHours || 0) * (qLabourRate || 0);
@@ -508,6 +510,38 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
       .catch(() => setJobHistory([]));
   }, [selectedJobId, incomingJobs]);
 
+  // Mechanic records the odometer at check-in / check-out → updates system-wide for that rego
+  const recordMileage = async (job: any, phase: 'in' | 'out') => {
+    const reg = job.reg;
+    if (!reg) { alert('No registration on this job.'); return; }
+    const entered = prompt(`Odometer reading (km) at ${phase === 'in' ? 'check-IN (vehicle received)' : 'check-OUT (vehicle returned)'} for ${reg}:`);
+    if (entered == null) return;
+    const km = parseInt(entered.replace(/\D/g, ''), 10);
+    if (!Number.isFinite(km) || km <= 0) { alert('Please enter a valid number.'); return; }
+    try {
+      const r = await fetch(`/api/vehicles/${encodeURIComponent(reg)}/mileage`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ mileage: km, phase, bookingId: job.id }),
+      });
+      if (r.ok) alert(`Recorded ${km.toLocaleString()} km. Updated system-wide for ${reg}.`);
+      else alert('Could not save mileage.');
+    } catch { alert('Could not save mileage.'); }
+  };
+
+  // Mechanic sends a real email to the customer (reply-to torqued.nz@icloud.com)
+  const messageCustomer = async (job: any) => {
+    const msg = prompt(`Message to the customer about ${job.reg || 'this job'}:`);
+    if (msg == null || !msg.trim()) return;
+    try {
+      const r = await fetch('/api/mechanic/message-customer', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ bookingId: job.id, message: msg }),
+      });
+      const d = await r.json();
+      alert(r.ok ? 'Message emailed to the customer.' : (d.error || 'Could not send message.'));
+    } catch { alert('Could not send message.'); }
+  };
+
   const handleAcceptJob = (jobId: string) => {
     const job = incomingJobs.find(j => j.id === jobId);
     if (!job) return;
@@ -579,6 +613,7 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
     { id: 'dashboard', label: 'Dashboard', icon: LayoutDashboard },
     { id: 'jobs', label: 'Incoming Jobs', icon: Inbox, badge: pendingJobsCount > 0 ? pendingJobsCount : undefined },
     { id: 'manual-quotes', label: 'Manual Quotes', icon: PenSquare, badge: manualQuotesCount > 0 ? manualQuotesCount : undefined },
+    { id: 'history', label: 'Job History', icon: History },
     { id: 'calendar', label: 'Calendar', icon: CalendarIcon },
     { id: 'parts', label: 'Parts', icon: Package },
     { id: 'payments', label: 'Payments', icon: CreditCard },
@@ -1115,11 +1150,13 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
               {showOnlyDiagnostics ? (
                 <>
                   <Button className="flex-1 bg-torqued-red text-white" onClick={() => setSelectedJobId(job.id)}>Write Quote / Begin Diagnostic</Button>
-                  <Button variant="outline" className="flex-1 border-border text-foreground hover:bg-card">Message Customer</Button>
+                  <Button variant="outline" className="flex-1 border-border text-foreground hover:bg-card" onClick={() => messageCustomer(job)}>Message Customer</Button>
                 </>
               ) : (
                 <>
                   <Button className="flex-1 bg-emerald-600 hover:bg-emerald-700 text-white font-bold" onClick={() => handleAcceptJob(job.id)}>Accept Job</Button>
+                  <Button variant="outline" className="text-foreground border-border hover:bg-card" onClick={() => recordMileage(job, 'in')}>Check-in km</Button>
+                  <Button variant="outline" className="text-foreground border-border hover:bg-card" onClick={() => recordMileage(job, 'out')}>Check-out km</Button>
                   <Button variant="outline" className="flex-1 border-border text-foreground hover:bg-card" onClick={async () => {
                     try {
                       const r = await fetch('/api/reviews/request', {
@@ -2048,11 +2085,53 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
     );
   };
 
+  const renderJobHistory = () => (
+    <div className="space-y-4 pb-12">
+      <div>
+        <h2 className="text-2xl sm:text-3xl font-black tracking-tight text-foreground">Job History</h2>
+        <p className="text-sm text-muted">Jobs you've accepted, in progress, or completed. View details, edit the quote, or message the customer.</p>
+      </div>
+      {pastJobs.length === 0 && (
+        <Card className="p-10 text-center text-muted italic bg-card border-border">No accepted jobs yet.</Card>
+      )}
+      {pastJobs.map((j: any) => {
+        const jobShape = {
+          id: j.id, reg: j.vehicle_rego || '', customerName: j.customer_name,
+          model: j.customer_name ? `${j.vehicle_rego} — ${j.customer_name}` : j.vehicle_rego || 'Vehicle',
+          services: (j.service_ids || []).map((id: string) => SERVICES.find(s => s.id === id)?.name || id),
+          suggestedQuote: parseFloat(j.total_price) || 0,
+        };
+        return (
+          <Card key={j.id} className="p-4 sm:p-5 bg-card border-border space-y-3">
+            <div className="flex items-start justify-between gap-3">
+              <div>
+                <p className="font-black text-foreground">{j.vehicle_rego || '—'} {j.customer_name ? <span className="text-muted font-medium">· {j.customer_name}</span> : null}</p>
+                <p className="text-xs text-muted">{jobShape.services.join(', ') || '—'}</p>
+                <p className="text-[11px] text-muted mt-1">
+                  {j.date || '—'} · <span className="uppercase font-bold">{j.status}</span> · {j.payment_status === 'confirmed' ? 'Paid' : (j.payment_status || 'unpaid')}
+                  {j.mileage_in ? ` · in ${Number(j.mileage_in).toLocaleString()}km` : ''}{j.mileage_out ? ` · out ${Number(j.mileage_out).toLocaleString()}km` : ''}
+                </p>
+                {j.description && <p className="text-xs text-muted italic mt-1">“{j.description}”</p>}
+              </div>
+              <span className="font-black text-torqued-red shrink-0">{formatCurrency(parseFloat(j.quoted_price ?? j.total_price) || 0)}</span>
+            </div>
+            <div className="flex flex-wrap gap-2">
+              <Button size="sm" variant="outline" className="text-foreground border-border hover:bg-background" onClick={() => openQuoteEditor(jobShape)}>Edit / Build Quote</Button>
+              <Button size="sm" variant="outline" className="text-foreground border-border hover:bg-background" onClick={() => messageCustomer(jobShape)}>Message Customer</Button>
+              <Button size="sm" variant="outline" className="text-foreground border-border hover:bg-background" onClick={() => recordMileage(jobShape, 'out')}>Check-out km</Button>
+            </div>
+          </Card>
+        );
+      })}
+    </div>
+  );
+
   const renderContent = () => {
     switch (activeTab) {
       case 'dashboard': return renderDashboard();
       case 'jobs': return renderIncomingJobs();
       case 'manual-quotes': return renderIncomingJobs(true);
+      case 'history': return renderJobHistory();
       case 'parts': return renderParts();
       case 'profile': return renderProfile();
       case 'calendar': return renderCalendar();

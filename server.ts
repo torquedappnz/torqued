@@ -276,6 +276,63 @@ app.post('/api/mechanic/update-job-status', async (req, res) => {
   }
 });
 
+// POST /api/bookings/persist — service-role booking upsert (used by $0/promo bookings that skip Stripe)
+app.post('/api/bookings/persist', async (req, res) => {
+  try {
+    const { bookingData, userId } = req.body;
+    if (!bookingData?.id) return res.status(400).json({ error: 'bookingData.id required' });
+    const supabase = getSupabaseAdmin();
+    if (!supabase) return res.status(500).json({ error: 'Database not configured' });
+    const { error } = await supabase.from('bookings').upsert({
+      id: bookingData.id,
+      customer_id: userId || null,
+      mechanic_id: bookingData.mechanicId,
+      vehicle_rego: bookingData.vehicleId || null,
+      service_ids: bookingData.serviceIds || [],
+      status: bookingData.status || 'booked',
+      payment_status: bookingData.paymentStatus || 'confirmed',
+      payment_method: bookingData.paymentMethod || null,
+      date: bookingData.date || null,
+      total_price: bookingData.totalPrice || 0,
+      deposit_paid: bookingData.depositPaid ?? null,
+      customer_name: bookingData.customerName || null,
+      email: bookingData.email || null,
+      description: bookingData.description || null,
+    }, { onConflict: 'id' });
+    if (error) return res.status(500).json({ error: error.message });
+    res.json({ success: true });
+  } catch (err) {
+    console.error('[bookings/persist]', err);
+    res.status(500).json({ error: 'Could not save booking' });
+  }
+});
+
+// POST /api/vehicles/:rego/mileage — update system-wide odometer for a rego.
+// phase: 'customer' (quoting screen) | 'in' (mechanic check-in) | 'out' (mechanic check-out)
+app.post('/api/vehicles/:rego/mileage', async (req, res) => {
+  try {
+    const rego = req.params.rego.toUpperCase().trim();
+    const { mileage, phase, bookingId } = req.body;
+    const km = Number(mileage);
+    if (!Number.isFinite(km) || km < 0) return res.status(400).json({ error: 'Valid mileage required' });
+    const supabase = getSupabaseAdmin();
+    if (!supabase) return res.status(500).json({ error: 'Database not configured' });
+
+    // Always update the system-wide record for this rego
+    const { error } = await supabase.from('vehicles').update({ mileage: km }).eq('rego', rego);
+    if (error) return res.status(500).json({ error: error.message });
+
+    // Record check-in / check-out odometer against the specific job
+    if (bookingId && (phase === 'in' || phase === 'out')) {
+      await supabase.from('bookings').update(phase === 'in' ? { mileage_in: km } : { mileage_out: km }).eq('id', bookingId);
+    }
+    res.json({ success: true, mileage: km });
+  } catch (err) {
+    console.error('[vehicles/mileage]', err);
+    res.status(500).json({ error: 'Could not update mileage' });
+  }
+});
+
 // GET /api/quote/:bookingId — full quote detail for the review-and-pay screen (QR deep-link target)
 app.get('/api/quote/:bookingId', async (req, res) => {
   try {
@@ -802,6 +859,43 @@ function quoteReadyEmailHtml(custName: string, vehicleLabel: string, mechanicNam
 <p style="margin:28px 0 0;color:#555">Kind regards,<br/>the Torqued team</p>
 </td></tr></table></td></tr></table></body></html>`;
 }
+
+// POST /api/mechanic/message-customer — mechanic sends a real email to the customer
+app.post('/api/mechanic/message-customer', async (req, res) => {
+  try {
+    const { bookingId, message } = req.body;
+    if (!bookingId || !message?.trim()) return res.status(400).json({ error: 'bookingId and message required' });
+    const ctx = await getBookingContext(bookingId);
+    if (!ctx.email) return res.status(400).json({ error: 'No customer email on this booking.' });
+    const transporter = getMailTransporter();
+    if (!transporter) return res.status(503).json({ error: 'Email not configured' });
+    const car = ctx.vehicleLabel || 'your vehicle';
+    const safeMsg = String(message).replace(/</g, '&lt;').replace(/\n/g, '<br/>');
+    const html = `<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="color-scheme" content="light"></head>
+<body style="margin:0;padding:0;background:#f4f4f6;font-family:-apple-system,Arial,sans-serif">
+<table width="100%" cellpadding="0" cellspacing="0" style="background:#f4f4f6;padding:32px 8px"><tr><td align="center">
+<table width="100%" cellpadding="0" cellspacing="0" style="max-width:480px;background:#fff;border-radius:20px;overflow:hidden;border:1px solid #e6e6ea">
+<tr><td style="background:#150402;padding:24px 32px;border-bottom:3px solid #FF1800;text-align:center"><img src="${LOGO_URL}" width="200" height="67" style="width:200px;height:67px;border:0"/></td></tr>
+<tr><td style="padding:36px 32px;color:#150402;font-size:15px;line-height:1.6">
+<p style="margin:0 0 16px">Dear ${ctx.custName || 'Customer'},</p>
+<p style="margin:0 0 8px;color:#777;font-size:12px;text-transform:uppercase;letter-spacing:1px;font-weight:bold">Message from ${ctx.mechanicName || 'your workshop'} regarding ${car}</p>
+<div style="margin:0 0 20px;padding:16px;background:#f7f7f9;border-radius:12px;border-left:3px solid #FF1800">${safeMsg}</div>
+<p style="margin:0;color:#555">Reply to this email to respond directly.</p>
+<p style="margin:24px 0 0;color:#555">Kind regards,<br/>${ctx.mechanicName || 'Your workshop'} via Torqued</p>
+</td></tr></table></td></tr></table></body></html>`;
+    await transporter.sendMail({
+      from: process.env.SMTP_FROM || '"Torqued" <torquedapp.nz@gmail.com>',
+      replyTo: 'torqued.nz@icloud.com',
+      to: ctx.email,
+      subject: `Message about your ${ctx.vehicleLabel || 'vehicle'} — Torqued`,
+      html,
+    });
+    res.json({ success: true });
+  } catch (err) {
+    console.error('[message-customer]', err);
+    res.status(500).json({ error: 'Could not send message' });
+  }
+});
 
 // POST /api/mechanic/update-quote — mechanic edits a booking's quote (price + note)
 app.post('/api/mechanic/update-quote', async (req, res) => {
@@ -2615,6 +2709,7 @@ app.post('/api/stripe/create-payment', async (req, res) => {
           deposit_paid: bookingData.depositPaid ?? null,
           customer_name: bookingData.customerName || null,
           email: bookingData.email || customerEmail || null,
+          description: bookingData.description || null,
         }, { onConflict: 'id' });
         if (error) console.error('[create-payment] Failed to persist booking:', error.message);
       }

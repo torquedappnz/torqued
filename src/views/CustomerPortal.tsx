@@ -366,6 +366,7 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
   const [batchSaving, setBatchSaving] = useState(false);
   const [showBatchReview, setShowBatchReview] = useState(false);
   const [isDiagnosticMode, setIsDiagnosticMode] = useState(false);
+  const [diagnosticComment, setDiagnosticComment] = useState('');
   const [isDiagnosticSimulatedComplete, setIsDiagnosticSimulatedComplete] = useState(false);
   const [isRepairFromDiagnostic, setIsRepairFromDiagnostic] = useState(false);
   const [insurancePolicyNumber, setInsurancePolicyNumber] = useState('');
@@ -1346,6 +1347,7 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
       date: selectedDate,
       totalPrice: finalCalculatedPrice,
       depositPaid: undefined,
+      description: selectedServices.includes('diag_inspection') ? (diagnosticComment || undefined) : (faultCode || undefined),
     };
 
     if (isImmediatePayment) {
@@ -1358,23 +1360,14 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
         newJob.status = 'booked';
         localStorage.setItem('pending_booking', JSON.stringify(newJob));
 
-        if (user) {
-          supabase.from('bookings').upsert({
-            id: newJob.id,
-            customer_id: user.id,
-            mechanic_id: newJob.mechanicId,
-            vehicle_rego: newJob.vehicleId || null,
-            service_ids: newJob.serviceIds,
-            status: 'booked',
-            payment_status: 'confirmed',
-            payment_method: newJob.paymentMethod,
-            date: newJob.date,
-            total_price: newJob.totalPrice,
-            deposit_paid: newJob.depositPaid ?? null,
-          }, { onConflict: 'id' }).then(({ error }) => {
-            if (error) console.error('Failed to persist $0 booking:', error.message);
-          });
-        }
+        // Persist via service role so it shows in mechanic/admin portals even for anonymous customers
+        fetch('/api/bookings/persist', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            bookingData: { ...newJob, email: customerEmail || userProfile?.email || user?.email || null, customerName: userName || undefined },
+            userId: user?.id ?? customerOwnerId ?? null,
+          }),
+        }).catch(e => console.error('Failed to persist $0 booking:', e));
 
         setActiveJobs(prev => [...prev, newJob]);
         setLatestBooking(newJob);
@@ -1718,12 +1711,22 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                   <CheckCircle2 className="hidden sm:block ml-auto text-green-500" size={32} />
                 </Card>
                 <div className="mt-8 space-y-4">
-                  <Input 
+                  <Input
                     label="Current Mileage (km)"
                     placeholder="E.g. 98000"
                     type="number"
                     value={mileage}
                     onChange={(e) => setMileage(e.target.value)}
+                    onBlur={() => {
+                      const km = parseInt(mileage, 10);
+                      const plate = (vehicle?.rego || rego || '').toUpperCase();
+                      if (plate && Number.isFinite(km) && km > 0) {
+                        fetch(`/api/vehicles/${encodeURIComponent(plate)}/mileage`, {
+                          method: 'POST', headers: { 'Content-Type': 'application/json' },
+                          body: JSON.stringify({ mileage: km, phase: 'customer' }),
+                        }).catch(() => {});
+                      }
+                    }}
                     className="bg-card border-border text-foreground"
                   />
                   
@@ -2096,12 +2099,23 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                       ))}
                    </div>
 
-                   <div className="pt-6">
+                   <div className="space-y-2 pt-2 text-left">
+                      <label className="text-[10px] font-black uppercase tracking-widest text-white/50">What are you experiencing? (optional)</label>
+                      <textarea
+                        value={diagnosticComment}
+                        onChange={(e) => setDiagnosticComment(e.target.value)}
+                        rows={3}
+                        placeholder="E.g. Grinding noise when braking, judder at 80km/h, warning light on dash…"
+                        className="w-full bg-white/5 border border-white/10 rounded-xl px-3 py-2 text-sm text-white placeholder:text-white/30 resize-none focus:outline-none focus:border-torqued-red"
+                      />
+                      <p className="text-[11px] text-white/40">Your mechanic sees this before diagnosing.</p>
+                   </div>
+
+                   <div className="pt-2">
                       <Button fullWidth size="lg" className="bg-torqued-red text-white hover:bg-red-700" onClick={() => {
-                        // For the demo, we simulate booking leading to a "Quote Ready" state
                         setIsDiagnosticMode(false);
-                        setSelectedServices(['diag_inspection']); 
-                        setStep(3); // Go to find mechanics for diagnostic
+                        setSelectedServices(['diag_inspection']);
+                        setStep(3); // Find a mechanic, then pay — quote comes after inspection
                       }}>Book Diagnostic Appointment →</Button>
                    </div>
                 </Card>
@@ -2302,12 +2316,9 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                         <Button variant="outline" size="sm" className="flex-1 sm:flex-initial border-border text-foreground hover:bg-card h-10 px-6 font-bold uppercase tracking-widest text-[10px]">Profile</Button>
                         <Button size="sm" className="flex-[2] sm:flex-initial bg-torqued-red hover:bg-red-700 text-white h-10 px-8 font-bold uppercase tracking-widest text-[10px] shadow-lg shadow-torqued-red/20" onClick={() => {
                           setSelectedMechanic({ ...mechanic, estimatedPrice: totalPrice + (idx * 20) });
-                          if (selectedServices.includes('diag_inspection')) {
-                            setIsDiagnosticSimulatedComplete(true);
-                          } else {
-                            setStep(5);
-                          }
-                        }}>{selectedServices.includes('diag_inspection') ? 'Book Visit' : 'Select & Schedule'}</Button>
+                          // Diagnostic is booked & paid like any other service — the mechanic quotes after inspecting.
+                          setStep(5);
+                        }}>{selectedServices.includes('diag_inspection') ? 'Book Diagnostic' : 'Select & Schedule'}</Button>
                       </div>
                     </div>
                   </Card>
