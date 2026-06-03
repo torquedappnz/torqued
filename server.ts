@@ -276,6 +276,45 @@ app.post('/api/mechanic/update-job-status', async (req, res) => {
   }
 });
 
+// GET /api/customer/bookings — all bookings for a customer (by ownerId and/or rego list). Single source of truth.
+app.get('/api/customer/bookings', async (req, res) => {
+  try {
+    const ownerId = req.query.ownerId as string | undefined;
+    const regos = (req.query.regos as string | undefined)?.split(',').map(r => r.toUpperCase().trim()).filter(Boolean);
+    if (!ownerId && (!regos || regos.length === 0)) return res.json({ bookings: [] });
+    const supabase = getSupabaseAdmin();
+    if (!supabase) return res.json({ bookings: [] });
+    let q = supabase.from('bookings').select('*').order('created_at', { ascending: false });
+    if (ownerId && regos && regos.length) q = q.or(`customer_id.eq.${ownerId},vehicle_rego.in.(${regos.join(',')})`);
+    else if (ownerId) q = q.eq('customer_id', ownerId);
+    else if (regos) q = q.in('vehicle_rego', regos);
+    const { data, error } = await q;
+    if (error) return res.status(500).json({ error: error.message });
+    res.json({ bookings: data ?? [] });
+  } catch (err) {
+    console.error('[customer/bookings]', err);
+    res.json({ bookings: [] });
+  }
+});
+
+// GET /api/history/:rego — combined, portable service history for a vehicle (follows the rego across mechanics)
+app.get('/api/history/:rego', async (req, res) => {
+  try {
+    const rego = req.params.rego.toUpperCase().trim();
+    const supabase = getSupabaseAdmin();
+    if (!supabase) return res.json({ imported: [], jobs: [] });
+    const [{ data: imported }, { data: jobs }] = await Promise.all([
+      supabase.from('vehicle_history').select('*').eq('rego', rego).order('created_at', { ascending: false }),
+      supabase.from('bookings').select('id, service_ids, status, payment_status, total_price, date, created_at, mechanic_id, completed_at')
+        .eq('vehicle_rego', rego).order('created_at', { ascending: false }),
+    ]);
+    res.json({ imported: imported ?? [], jobs: jobs ?? [] });
+  } catch (err) {
+    console.error('[history]', err);
+    res.json({ imported: [], jobs: [] });
+  }
+});
+
 // GET /api/mechanic/jobs?mechanicId= — bookings for a mechanic (service role, bypasses RLS)
 app.get('/api/mechanic/jobs', async (req, res) => {
   try {
@@ -1170,7 +1209,21 @@ app.get('/api/admin/search', async (req, res) => {
       .or(`name.ilike.${like},email.ilike.${like}`)
       .limit(40);
 
-    res.json({ bookings: bookings ?? [], people: people ?? [] });
+    // Vehicles matched by rego or owner, with their full service history (portable across mechanics)
+    const ownerIds = (people ?? []).map((p: any) => p.id);
+    let vehQ = supabase.from('vehicles').select('rego, make, model, year, variant, mileage, owner_id');
+    vehQ = ownerIds.length
+      ? vehQ.or(`rego.ilike.${like},owner_id.in.(${ownerIds.join(',')})`)
+      : vehQ.ilike('rego', like);
+    const { data: vehicles } = await vehQ.limit(40);
+    const regos = (vehicles ?? []).map((v: any) => v.rego);
+    let history: any[] = [];
+    if (regos.length) {
+      const { data: h } = await supabase.from('vehicle_history').select('*').in('rego', regos).order('created_at', { ascending: false });
+      history = h ?? [];
+    }
+
+    res.json({ bookings: bookings ?? [], people: people ?? [], vehicles: vehicles ?? [], history });
   } catch (err) {
     console.error('[admin/search]', err);
     res.status(500).json({ error: 'Search failed' });

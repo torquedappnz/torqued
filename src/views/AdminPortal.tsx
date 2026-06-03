@@ -25,6 +25,8 @@ export const AdminPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) => {
   const [q, setQ] = useState('');
   const [sBookings, setSBookings] = useState<any[]>([]);
   const [sPeople, setSPeople] = useState<any[]>([]);
+  const [sVehicles, setSVehicles] = useState<any[]>([]);
+  const [sHistory, setSHistory] = useState<any[]>([]);
   const [edit, setEdit] = useState<{ kind: 'booking' | 'profile'; row: any } | null>(null);
 
   // Onboard-a-mechanic form
@@ -98,6 +100,7 @@ export const AdminPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) => {
   const runSearch = async () => {
     const r = await fetch(`/api/admin/search?key=${encodeURIComponent(key)}&q=${encodeURIComponent(q)}`).then(r => r.json());
     setSBookings(r.bookings || []); setSPeople(r.people || []);
+    setSVehicles(r.vehicles || []); setSHistory(r.history || []);
   };
 
   const saveEdit = async () => {
@@ -233,7 +236,29 @@ export const AdminPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) => {
                 <Button size="sm" variant="outline" className="text-white border-white/20 text-[10px]" onClick={() => setEdit({ kind: 'profile', row: { ...p } })}>Edit</Button>
               </div>
             ))}
-            {q && sBookings.length === 0 && sPeople.length === 0 && <p className="text-white/40 text-sm">No matches.</p>}
+            {sVehicles.length > 0 && <h3 className="text-sm font-black uppercase text-white/40 pt-2">Vehicles & service history</h3>}
+            {sVehicles.map(v => {
+              const hist = sHistory.filter(h => h.rego === v.rego);
+              return (
+                <div key={v.rego} className="bg-card border border-white/10 rounded-2xl p-4 space-y-2 text-sm">
+                  <div className="flex items-center justify-between">
+                    <p className="font-bold">{v.year} {v.make} {v.model} <span className="text-white/30 font-mono text-xs">{v.rego}</span></p>
+                    <span className="text-[10px] text-white/40">{v.mileage ? `${Number(v.mileage).toLocaleString()} km` : ''} · {hist.length} record{hist.length === 1 ? '' : 's'}</span>
+                  </div>
+                  {hist.length > 0 && (
+                    <div className="space-y-1 border-t border-white/10 pt-2">
+                      {hist.map(h => (
+                        <div key={h.id} className="flex justify-between text-xs text-white/60">
+                          <span>{h.service_date || '—'} · {h.work_done || 'Service'}{h.provider ? ` · ${h.provider}` : ''}</span>
+                          <span className="text-white/30">{h.mileage ? `${Number(h.mileage).toLocaleString()} km` : ''}{h.price ? ` · ${h.price}` : ''}</span>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+            {q && sBookings.length === 0 && sPeople.length === 0 && sVehicles.length === 0 && <p className="text-white/40 text-sm">No matches.</p>}
           </div>
         )}
 

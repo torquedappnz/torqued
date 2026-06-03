@@ -501,6 +501,33 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
     } catch {}
   }, []);
 
+  // Load ALL of this customer's real bookings (multiple jobs, persistent across refresh)
+  const loadCustomerBookings = async () => {
+    const regos = garageVehicles.map(g => g.rego).filter(Boolean);
+    if (!customerOwnerId && regos.length === 0) return;
+    try {
+      const qs = new URLSearchParams();
+      if (customerOwnerId) qs.set('ownerId', customerOwnerId);
+      if (regos.length) qs.set('regos', regos.join(','));
+      const res = await fetch(`/api/customer/bookings?${qs.toString()}`);
+      const { bookings } = await res.json();
+      if (!Array.isArray(bookings)) return;
+      const mapped: Job[] = bookings
+        .filter((r: any) => !['cancelled', 'declined'].includes(r.status))
+        .map((r: any) => ({
+          id: r.id, vehicleId: r.vehicle_rego || '', serviceIds: r.service_ids || [],
+          mechanicId: r.mechanic_id || '', status: r.status || 'booked',
+          paymentStatus: r.payment_status === 'confirmed' ? 'confirmed' : 'pending',
+          paymentMethod: r.payment_method || '', date: r.date || '',
+          totalPrice: parseFloat(r.total_price) || 0, depositPaid: r.deposit_paid ?? undefined,
+          description: r.description || undefined, customerName: r.customer_name || undefined,
+          email: r.email || undefined, phone: r.phone || undefined,
+        }));
+      setActiveJobs(mapped);
+    } catch { /* keep local jobs */ }
+  };
+  useEffect(() => { if (garageUnlocked) loadCustomerBookings(); /* eslint-disable-next-line */ }, [garageUnlocked, customerOwnerId, garageVehicles.length]);
+
   // Verify a magic link on load (?vt=token)
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);

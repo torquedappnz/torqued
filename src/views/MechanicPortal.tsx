@@ -448,6 +448,7 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
   const [incomingJobs, setIncomingJobs] = useState<typeof INITIAL_JOB_REQUESTS>([]);
   const [weekRevenue, setWeekRevenue] = useState(0);
   const [pastJobs, setPastJobs] = useState<any[]>([]);
+  const [jobHistory, setJobHistory] = useState<any[]>([]);
   const [procurementQueue, setProcurementQueue] = useState<ProcurementItem[]>([]);
   const [diagnosticStep, setDiagnosticStep] = useState<'review' | 'inspect' | 'quote' | 'sent'>('review');
   const [diagnosticFindings, setDiagnosticFindings] = useState('');
@@ -474,6 +475,28 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
     shopFee: 25,
     bannerImage: 'https://images.unsplash.com/photo-1486006920555-c77dcf18193c?auto=format&fit=crop&q=80&w=1920'
   });
+
+  // Load the vehicle's portable service history (imported + Torqued jobs) when a job is opened
+  useEffect(() => {
+    const job = incomingJobs.find(j => j.id === selectedJobId);
+    const reg = job?.reg;
+    if (!reg) { setJobHistory([]); return; }
+    fetch(`/api/history/${encodeURIComponent(reg)}`)
+      .then(r => r.json())
+      .then(({ imported, jobs }) => {
+        const fromImports = (imported || []).map((h: any, i: number) => ({
+          id: `imp${i}`, date: h.service_date || '', mileage: h.mileage || undefined,
+          service: h.work_done || 'Service', provider: h.provider || 'Customer record', isExternal: true,
+        }));
+        const fromJobs = (jobs || []).filter((j: any) => j.status === 'completed').map((j: any) => ({
+          id: `job${j.id}`, date: j.completed_at || j.date || j.created_at,
+          service: (j.service_ids || []).map((id: string) => SERVICES.find(s => s.id === id)?.name || id).join(', ') || 'Torqued service',
+          provider: 'Torqued', isExternal: false,
+        }));
+        setJobHistory([...fromImports, ...fromJobs]);
+      })
+      .catch(() => setJobHistory([]));
+  }, [selectedJobId, incomingJobs]);
 
   const handleAcceptJob = (jobId: string) => {
     const job = incomingJobs.find(j => j.id === jobId);
@@ -1734,10 +1757,9 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
     if (!job) return null;
 
     const isDiagnostic = job.services.includes('Diagnostic Inspection');
-    const history = (job as any).manualHistory 
-      ? (job as any).manualHistory.map((h: any, i: number) => ({ id: `mh${i}`, ...h, isExternal: true }))
-      : VEHICLE_HISTORY_RAH190;
-    const recommendations = job.id === 'req1' ? RECOMMENDATIONS_RAH190 : [];
+    // Real portable history for this vehicle (customer imports + past Torqued jobs)
+    const history = jobHistory;
+    const recommendations: typeof RECOMMENDATIONS_RAH190 = [];
 
     return (
       <div className="fixed inset-0 bg-black/80 backdrop-blur-sm z-50 flex items-center justify-center p-4">
