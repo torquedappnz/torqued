@@ -30,8 +30,8 @@ export const AdminPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) => {
   const [edit, setEdit] = useState<{ kind: 'booking' | 'profile'; row: any } | null>(null);
 
   // Onboard-a-mechanic form
-  const [onb, setOnb] = useState<{ name: string; email: string; address: string; phone: string; owner_name: string; labour_rate: string; technicians: string; parts_lead_days: string }>(
-    { name: '', email: '', address: '', phone: '', owner_name: '', labour_rate: '', technicians: '1', parts_lead_days: '1' });
+  const [onb, setOnb] = useState<{ name: string; email: string; address: string; phone: string; owner_name: string; labour_rate: string; technicians: string; parts_lead_days: string; billing: string; trialDays: string }>(
+    { name: '', email: '', address: '', phone: '', owner_name: '', labour_rate: '', technicians: '1', parts_lead_days: '1', billing: 'stripe', trialDays: '30' });
   const [onbBusy, setOnbBusy] = useState(false);
   const [onbMsg, setOnbMsg] = useState<string | null>(null);
   const onboardMechanic = async () => {
@@ -43,8 +43,10 @@ export const AdminPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) => {
       });
       const d = await res.json();
       if (!res.ok) { setOnbMsg(d.error || 'Onboarding failed'); return; }
-      setOnbMsg(`✓ ${onb.name} onboarded and live. Login link emailed.`);
-      setOnb({ name: '', email: '', address: '', phone: '', owner_name: '', labour_rate: '', technicians: '1', parts_lead_days: '1' });
+      setOnbMsg(d.activated
+        ? `✓ ${onb.name} onboarded with complimentary access — live now. Login link emailed.`
+        : `✓ ${onb.name} onboarded. Subscription activation link emailed${onb.billing === 'trial' ? ` (${onb.trialDays}-day free trial)` : ''} — they go live once payment is set up.`);
+      setOnb({ name: '', email: '', address: '', phone: '', owner_name: '', labour_rate: '', technicians: '1', parts_lead_days: '1', billing: 'stripe', trialDays: '30' });
       await loadAll(key);
     } catch {
       setOnbMsg('Could not connect.');
@@ -280,6 +282,24 @@ export const AdminPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) => {
                     onChange={e => setOnb(o => ({ ...o, [field]: e.target.value }))}
                     className={`bg-white/5 border border-white/10 rounded-xl px-3 h-11 text-sm text-white placeholder:text-white/30 focus:outline-none focus:border-torqued-red ${field === 'address' ? 'sm:col-span-2' : ''}`} />
                 ))}
+              </div>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5 pt-1">
+                <div>
+                  <label className="text-[10px] font-black uppercase tracking-widest text-white/40">Billing</label>
+                  <select value={onb.billing} onChange={e => setOnb(o => ({ ...o, billing: e.target.value }))}
+                    className="w-full bg-white/5 border border-white/10 rounded-xl px-3 h-11 text-sm text-white focus:outline-none focus:border-torqued-red">
+                    <option value="stripe">$99/mo — email Stripe activation link</option>
+                    <option value="trial">Free trial then $99/mo — Stripe link</option>
+                    <option value="comp">Complimentary (free, live now)</option>
+                  </select>
+                </div>
+                {onb.billing === 'trial' && (
+                  <div>
+                    <label className="text-[10px] font-black uppercase tracking-widest text-white/40">Trial days</label>
+                    <input value={onb.trialDays} onChange={e => setOnb(o => ({ ...o, trialDays: e.target.value }))} placeholder="30"
+                      className="w-full bg-white/5 border border-white/10 rounded-xl px-3 h-11 text-sm text-white focus:outline-none focus:border-torqued-red" />
+                  </div>
+                )}
               </div>
               {onbMsg && <p className={`text-xs font-bold ${onbMsg.startsWith('✓') ? 'text-emerald-400' : 'text-torqued-red'}`}>{onbMsg}</p>}
               <Button className="bg-torqued-red text-white" disabled={onbBusy || !onb.name || !onb.email} onClick={onboardMechanic}>

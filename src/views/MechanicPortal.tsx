@@ -382,6 +382,9 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
         }));
       });
 
+    // Subscription status + payment history
+    fetch(`/api/mechanic/billing?mechanicId=${user.id}`).then(r => r.json()).then(setBilling).catch(() => {});
+
     // Incoming jobs from bookings assigned to this mechanic (service role — bypasses RLS)
     fetch(`/api/mechanic/jobs?mechanicId=${user.id}`)
       .then(r => r.json())
@@ -461,6 +464,7 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
   const [weekRevenue, setWeekRevenue] = useState(0);
   const [pastJobs, setPastJobs] = useState<any[]>([]);
   const [jobHistory, setJobHistory] = useState<any[]>([]);
+  const [billing, setBilling] = useState<any>(null);
   const [procurementQueue, setProcurementQueue] = useState<ProcurementItem[]>([]);
   const [diagnosticStep, setDiagnosticStep] = useState<'review' | 'inspect' | 'quote' | 'sent'>('review');
   const [diagnosticFindings, setDiagnosticFindings] = useState('');
@@ -2126,12 +2130,74 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
     </div>
   );
 
+  const renderPayments = () => {
+    const paidJobs = pastJobs.filter((j: any) => j.payment_status === 'confirmed');
+    const grossAll = paidJobs.reduce((s: number, j: any) => s + (parseFloat(j.total_price) || 0), 0);
+    const payoutAll = grossAll * 0.96;
+    const sub = billing || {};
+    return (
+      <div className="space-y-5 pb-12 max-w-3xl">
+        <div>
+          <h2 className="text-2xl sm:text-3xl font-black tracking-tight text-foreground">Payments & Subscription</h2>
+          <p className="text-sm text-muted">Your $99/month subscription is billed to your card. Job payouts are paid out less Torqued's 4% commission.</p>
+        </div>
+
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+          <Card className="p-4 bg-card border-border">
+            <p className="text-[10px] font-black uppercase tracking-widest text-muted">Subscription</p>
+            <p className={`text-lg font-black mt-1 ${sub.active ? 'text-emerald-500' : 'text-torqued-red'}`}>{(sub.status || (sub.active ? 'active' : 'inactive')).toUpperCase()}</p>
+            {sub.nextBilling && <p className="text-[11px] text-muted">Next bill {new Date(sub.nextBilling).toLocaleDateString('en-NZ')}</p>}
+          </Card>
+          <Card className="p-4 bg-card border-border">
+            <p className="text-[10px] font-black uppercase tracking-widest text-muted">Paid jobs (net 4%)</p>
+            <p className="text-lg font-black mt-1 text-foreground">{formatCurrency(payoutAll)}</p>
+            <p className="text-[11px] text-muted">{paidJobs.length} paid job{paidJobs.length === 1 ? '' : 's'}</p>
+          </Card>
+          <Card className="p-4 bg-card border-border">
+            <p className="text-[10px] font-black uppercase tracking-widest text-muted">This week (net)</p>
+            <p className="text-lg font-black mt-1 text-foreground">{formatCurrency(weekRevenue)}</p>
+          </Card>
+        </div>
+
+        {!sub.active && (
+          <Card className="p-4 bg-torqued-red/5 border-torqued-red/20 flex items-center justify-between gap-4">
+            <p className="text-sm font-bold">Subscription not active — activate to start receiving leads.</p>
+            <Button size="sm" className="bg-torqued-red text-white shrink-0" onClick={async () => {
+              const r = await fetch('/api/stripe/create-subscription', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ email: user!.email, mechanicId: user!.id }) });
+              const d = await r.json(); if (d.url) window.location.href = d.url;
+            }}>Activate $99/mo</Button>
+          </Card>
+        )}
+
+        <div>
+          <h3 className="text-sm font-black uppercase tracking-widest text-muted mb-2">Subscription payment history</h3>
+          {(!sub.invoices || sub.invoices.length === 0) ? (
+            <Card className="p-6 text-center text-muted text-sm italic bg-card border-border">{sub.note || 'No subscription payments yet.'}</Card>
+          ) : (
+            <div className="space-y-2">
+              {sub.invoices.map((inv: any) => (
+                <Card key={inv.id} className="p-3 bg-card border-border flex items-center justify-between text-sm">
+                  <div>
+                    <p className="font-bold">{new Date(inv.date).toLocaleDateString('en-NZ')} · {formatCurrency(inv.amount)}</p>
+                    <p className="text-[11px] text-muted uppercase">{inv.status}</p>
+                  </div>
+                  {(inv.pdf || inv.url) && <a href={inv.pdf || inv.url} target="_blank" rel="noreferrer" className="text-xs font-bold text-torqued-red hover:underline">Receipt</a>}
+                </Card>
+              ))}
+            </div>
+          )}
+        </div>
+      </div>
+    );
+  };
+
   const renderContent = () => {
     switch (activeTab) {
       case 'dashboard': return renderDashboard();
       case 'jobs': return renderIncomingJobs();
       case 'manual-quotes': return renderIncomingJobs(true);
       case 'history': return renderJobHistory();
+      case 'payments': return renderPayments();
       case 'parts': return renderParts();
       case 'profile': return renderProfile();
       case 'calendar': return renderCalendar();

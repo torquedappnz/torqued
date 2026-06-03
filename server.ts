@@ -1447,6 +1447,9 @@ app.post('/api/admin/onboard-mechanic', async (req, res) => {
   if (!adminOk(req)) return res.status(401).json({ error: 'Unauthorized' });
   try {
     const { email, name, address, phone, labour_rate, technicians, parts_lead_days, owner_name } = req.body;
+    // billing: 'stripe' (paid link, default) | 'trial' (Stripe link w/ free trial days) | 'comp' (free, activated now)
+    const billing: string = req.body.billing || 'stripe';
+    const trialDays: number = Number(req.body.trialDays) || 0;
     if (!email || !name) return res.status(400).json({ error: 'Workshop name and email are required' });
     const supabase = getSupabaseAdmin();
     if (!supabase) return res.status(500).json({ error: 'Database not configured' });
@@ -1485,6 +1488,8 @@ app.post('/api/admin/onboard-mechanic', async (req, res) => {
       } catch (e) { console.warn('Geocode failed (non-blocking):', (e as Error).message); }
     }
 
+    // Comp accounts go live immediately; paid/trial accounts activate on successful Stripe checkout.
+    const compActivate = billing === 'comp';
     await supabase.from('profiles').upsert({
       id: userId, email, name, role: 'mechanic',
       address: address || null, phone: phone || null, owner_name: owner_name || null,
@@ -1492,26 +1497,51 @@ app.post('/api/admin/onboard-mechanic', async (req, res) => {
       technicians: technicians != null && technicians !== '' ? Number(technicians) : 1,
       parts_lead_days: parts_lead_days != null && parts_lead_days !== '' ? Number(parts_lead_days) : 1,
       latitude, longitude,
-      subscription_active: true,      // live immediately — appears to customers
+      subscription_active: compActivate,
       onboarding_complete: true,
     }, { onConflict: 'id' });
 
-    // Send a magic login link so they can access the portal and set their own password
+    // Build the Stripe subscription checkout link (unless comped)
+    let billingLink = '';
+    if (!compActivate) {
+      const sub = await makeSubscriptionCheckout(email, userId, origin, billing === 'trial' ? (trialDays || 30) : 0);
+      billingLink = sub.url || '';
+    }
+
+    // Magic login link so they can access the portal + set their password
     const { data: link } = await supabase.auth.admin.generateLink({
       type: 'magiclink', email, options: { redirectTo: `${origin}/mechanic` },
     });
     const loginLink = link?.properties?.action_link || `${origin}/mechanic`;
+
     const transporter = getMailTransporter();
     if (transporter) {
+      const activationBlock = compActivate
+        ? `<p style="margin:0 0 20px">Your workshop is live on Torqued — complimentary access has been applied. Log in to set up your profile.</p>`
+        : `<p style="margin:0 0 8px">To go live and start receiving leads, activate your $99/month subscription${billing === 'trial' ? ` (your first ${trialDays || 30} days are free)` : ''}:</p>
+           <p style="margin:0 0 20px"><a href="${billingLink}" style="display:inline-block;background:#FF1800;color:#fff;font-weight:900;text-transform:uppercase;font-size:13px;letter-spacing:1px;text-decoration:none;padding:14px 32px;border-radius:10px">Activate subscription</a></p>`;
+      const html = `<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="color-scheme" content="light"></head>
+<body style="margin:0;padding:0;background:#f4f4f6;font-family:-apple-system,Arial,sans-serif">
+<table width="100%" cellpadding="0" cellspacing="0" style="background:#f4f4f6;padding:32px 8px"><tr><td align="center">
+<table width="100%" cellpadding="0" cellspacing="0" style="max-width:480px;background:#fff;border-radius:20px;overflow:hidden;border:1px solid #e6e6ea">
+<tr><td style="background:#150402;padding:24px 32px;border-bottom:3px solid #FF1800;text-align:center"><img src="${LOGO_URL}" width="200" height="67" style="width:200px;height:67px;border:0"/></td></tr>
+<tr><td style="padding:36px 32px;color:#150402;font-size:15px;line-height:1.6">
+<p style="margin:0 0 16px">Kia ora ${name},</p>
+<p style="margin:0 0 16px">Welcome to Torqued — your workshop account has been created.</p>
+${activationBlock}
+<p style="margin:0 0 8px">Access your portal:</p>
+<p style="margin:0 0 20px"><a href="${loginLink}" style="display:inline-block;background:#150402;color:#fff;font-weight:900;text-transform:uppercase;font-size:13px;letter-spacing:1px;text-decoration:none;padding:14px 32px;border-radius:10px">Open Garage Portal</a></p>
+<p style="margin:24px 0 0;color:#555">Kind regards,<br/>the Torqued team</p>
+</td></tr></table></td></tr></table></body></html>`;
       await transporter.sendMail({
         from: process.env.SMTP_FROM || '"Torqued" <torquedapp.nz@gmail.com>',
         to: email,
-        subject: 'Your Torqued workshop account is live',
-        html: generateMechanicConfirmEmailHtml(name, loginLink),
+        subject: compActivate ? 'Your Torqued workshop account is live' : 'Activate your Torqued workshop subscription',
+        html,
       }).catch(e => console.warn('Onboard email failed (non-blocking):', e?.message));
     }
 
-    res.json({ success: true, mechanicId: userId, loginLink });
+    res.json({ success: true, mechanicId: userId, loginLink, billingLink, activated: compActivate });
   } catch (err) {
     console.error('[admin/onboard-mechanic]', err);
     res.status(500).json({ error: 'Onboarding failed' });
@@ -2021,55 +2051,40 @@ app.post('/api/stripe/webhook', async (req, res) => {
 // REST API Endpoints
 
 // Endpoint 1: Create Stripe Checkout Session for Mechanic Subscription
+// Shared: create a $99/mo subscription checkout session (optionally with a free-trial). Returns {url,...}.
+async function makeSubscriptionCheckout(email: string, mechanicId: string, origin: string, trialDays?: number) {
+  const stripe = getStripe();
+  if (!stripe) {
+    return { id: 'mock_sub_session_id', url: `${origin}/mechanic?session_id=mock_sub_session_id&mechanic_id=${mechanicId}`, isMock: true };
+  }
+  const session = await stripe.checkout.sessions.create({
+    payment_method_types: ['card'],
+    mode: 'subscription',
+    allow_promotion_codes: true,
+    line_items: [{
+      price_data: {
+        currency: 'nzd',
+        recurring: { interval: 'month' },
+        product_data: { name: 'Torqued Garage Portal Subscription', description: 'Access to NZ-wide high-value repair marketplace leads' },
+        unit_amount: 9900,
+      },
+      quantity: 1,
+    }],
+    ...(trialDays && trialDays > 0 ? { subscription_data: { trial_period_days: trialDays } } : {}),
+    success_url: `${origin}/mechanic?session_id={CHECKOUT_SESSION_ID}&mechanic_id=${mechanicId}`,
+    cancel_url: `${origin}/mechanic?canceled=true`,
+    customer_email: email,
+    metadata: { mechanicId, type: 'subscription' },
+  } as any);
+  return { id: session.id, url: session.url };
+}
+
 app.post('/api/stripe/create-subscription', async (req, res) => {
   try {
     const { email, mechanicId } = req.body;
-    if (!email || !mechanicId) {
-      return res.status(400).json({ error: 'Email and mechanicId are required' });
-    }
-
-    const stripe = getStripe();
-    const origin = getOrigin(req);
-
-    if (!stripe) {
-      // Return a simulated mock session URL if Stripe key is not set
-      console.log('Stripe API Key missing. Falling back to mock Checkout URL.');
-      return res.json({
-        id: 'mock_sub_session_id',
-        url: `${origin}/mechanic?session_id=mock_sub_session_id&mechanic_id=${mechanicId}`,
-        isMock: true
-      });
-    }
-
-    // Create checkout session for subscription ($99 NZD monthly)
-    const session = await stripe.checkout.sessions.create({
-      payment_method_types: ['card'],
-      mode: 'subscription',
-      allow_promotion_codes: true, // promo code field on the subscription checkout
-      line_items: [
-        {
-          price_data: {
-            currency: 'nzd',
-            recurring: { interval: 'month' },
-            product_data: {
-              name: 'Torqued Garage Portal Subscription',
-              description: 'Access to NZ-wide high-value repair marketplace leads',
-            },
-            unit_amount: 9900, // $99.00 NZD
-          },
-          quantity: 1,
-        },
-      ],
-      success_url: `${origin}/mechanic?session_id={CHECKOUT_SESSION_ID}&mechanic_id=${mechanicId}`,
-      cancel_url: `${origin}/mechanic?canceled=true`,
-      customer_email: email,
-      metadata: {
-        mechanicId,
-        type: 'subscription'
-      }
-    } as any);
-
-    res.json({ id: session.id, url: session.url });
+    if (!email || !mechanicId) return res.status(400).json({ error: 'Email and mechanicId are required' });
+    const out = await makeSubscriptionCheckout(email, mechanicId, getOrigin(req));
+    res.json(out);
   } catch (err) {
     console.error('Error creating Stripe subscription session:', err);
     res.status(500).json({ error: err instanceof Error ? err.message : 'Internal Server Error' });
@@ -2106,6 +2121,41 @@ app.post('/api/stripe/activate-subscription', async (req, res) => {
   } catch (err) {
     console.error('[activate-subscription]', err);
     res.status(500).json({ error: 'Activation failed' });
+  }
+});
+
+// GET /api/mechanic/billing?mechanicId= — subscription status + payment history from Stripe
+app.get('/api/mechanic/billing', async (req, res) => {
+  try {
+    const mechanicId = req.query.mechanicId as string;
+    if (!mechanicId) return res.status(400).json({ error: 'mechanicId required' });
+    const supabase = getSupabaseAdmin();
+    if (!supabase) return res.json({ active: false, invoices: [] });
+    const { data: p } = await supabase.from('profiles').select('subscription_active, stripe_subscription_id').eq('id', mechanicId).single();
+    const active = !!p?.subscription_active;
+    const stripe = getStripe();
+    if (!stripe || !p?.stripe_subscription_id) {
+      return res.json({ active, status: active ? 'active' : 'inactive', invoices: [], note: p?.stripe_subscription_id ? undefined : 'No Stripe subscription on file (comp or promo account).' });
+    }
+    let status = active ? 'active' : 'inactive', nextBilling: number | null = null, customer: string | undefined;
+    try {
+      const sub: any = await stripe.subscriptions.retrieve(p.stripe_subscription_id);
+      status = sub.status; nextBilling = sub.current_period_end ? sub.current_period_end * 1000 : null; customer = sub.customer;
+    } catch {}
+    let invoices: any[] = [];
+    if (customer) {
+      try {
+        const list = await stripe.invoices.list({ customer, limit: 12 });
+        invoices = list.data.map((inv: any) => ({
+          id: inv.id, date: inv.created * 1000, amount: (inv.amount_paid || inv.amount_due || 0) / 100,
+          status: inv.status, url: inv.hosted_invoice_url || null, pdf: inv.invoice_pdf || null,
+        }));
+      } catch {}
+    }
+    res.json({ active, status, nextBilling, invoices });
+  } catch (err) {
+    console.error('[mechanic/billing]', err);
+    res.status(500).json({ error: 'Could not load billing' });
   }
 });
 
