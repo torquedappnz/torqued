@@ -99,6 +99,25 @@ export const AdminPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) => {
     }
   };
 
+  const [detail, setDetail] = useState<any | null>(null);
+  const viewBooking = async (id: string) => {
+    setDetail({ loading: true });
+    const r = await fetch(`/api/admin/booking/${encodeURIComponent(id)}?key=${encodeURIComponent(key)}`);
+    const d = await r.json();
+    setDetail(r.ok ? d : null);
+  };
+  const refundBooking = async (b: any) => {
+    const amt = window.prompt('Refund amount (NZD). Leave blank for a FULL refund:');
+    if (amt == null) return;
+    const r = await fetch('/api/stripe/refund', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ bookingId: b.id, amount: amt.trim() ? parseFloat(amt) : undefined }),
+    });
+    const d = await r.json();
+    window.alert(d.success ? `Refunded $${d.refunded}.` : (d.error || 'Refund failed.'));
+    if (d.success) { await loadAll(key); if (q) runSearch(); }
+  };
+
   const cancelBooking = async (b: any) => {
     if (!window.confirm(`Cancel booking ${b.id}${b.vehicle_rego ? ` (${b.vehicle_rego})` : ''}? This updates it system-wide.`)) return;
     await fetch('/api/admin/update-booking', {
@@ -238,6 +257,7 @@ export const AdminPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) => {
                   <p className="text-xs text-white/40">{b.customer_name || b.email || '—'} · {b.status} · {b.payment_status} · ${b.total_price || 0}{b.refunded_amount>0?` · refunded $${b.refunded_amount}`:''}</p>
                 </div>
                 <div className="flex gap-2 shrink-0">
+                  <Button size="sm" variant="outline" className="text-white border-white/20 text-[10px]" onClick={() => viewBooking(b.id)}>View</Button>
                   <Button size="sm" variant="outline" className="text-white border-white/20 text-[10px]" onClick={() => setEdit({ kind: 'booking', row: { ...b } })}>Edit</Button>
                   {b.status !== 'cancelled' && <Button size="sm" variant="outline" className="text-torqued-red border-torqued-red/40 text-[10px]" onClick={() => cancelBooking(b)}>Cancel</Button>}
                 </div>
@@ -341,13 +361,30 @@ export const AdminPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) => {
 
         {tab === 'bookings' && (
           <div className="space-y-3">
-            <h2 className="text-lg font-black uppercase tracking-tight">Recent Bookings</h2>
+            <div className="flex items-center justify-between gap-3 flex-wrap">
+              <h2 className="text-lg font-black uppercase tracking-tight">Recent Bookings</h2>
+              <Button size="sm" className="bg-torqued-red text-white" onClick={async () => {
+                const r = await fetch(`/api/admin/weekly-report?key=${encodeURIComponent(key)}`);
+                const d = await r.json();
+                const rows = d.rows || [];
+                const header = 'Mechanic,Jobs,Gross,Commission (4%),Payout\n';
+                const body = rows.map((x: any) => `"${(x.name || '').replace(/"/g, '""')}",${x.jobs},${x.gross},${x.commission},${x.payout}`).join('\n');
+                const totals = rows.reduce((a: any, x: any) => ({ jobs: a.jobs + x.jobs, gross: a.gross + x.gross, commission: a.commission + x.commission, payout: a.payout + x.payout }), { jobs: 0, gross: 0, commission: 0, payout: 0 });
+                const csv = header + body + `\n"TOTAL",${totals.jobs},${totals.gross.toFixed(2)},${totals.commission.toFixed(2)},${totals.payout.toFixed(2)}`;
+                const blob = new Blob([csv], { type: 'text/csv' });
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement('a'); a.href = url;
+                a.download = `Torqued-Weekly-Report-${(d.periodStart || '').slice(0, 10)}.csv`; a.click();
+                URL.revokeObjectURL(url);
+              }}>Download weekly report (CSV)</Button>
+            </div>
             {bookings.map(b => (
               <div key={b.id} className="bg-card border border-white/10 rounded-2xl p-4 flex items-center justify-between gap-4 text-sm">
                 <div><p className="font-bold">{b.vehicle_rego || '—'} <span className="text-white/30 font-mono text-xs">#{b.id}</span></p>
                   <p className="text-xs text-white/40">{b.status} · {b.payment_status}</p></div>
                 <div className="flex items-center gap-3">
-                  <span className="font-black text-torqued-red">${b.total_price || 0}</span>
+                  <span className="font-black text-torqued-red">${b.quoted_price || b.total_price || 0}</span>
+                  <Button size="sm" variant="outline" className="text-white border-white/20 text-[10px]" onClick={() => viewBooking(b.id)}>View</Button>
                   <Button size="sm" variant="outline" className="text-white border-white/20 text-[10px]" onClick={() => setEdit({ kind: 'booking', row: { ...b } })}>Edit</Button>
                   {b.status !== 'cancelled' && <Button size="sm" variant="outline" className="text-torqued-red border-torqued-red/40 text-[10px]" onClick={() => cancelBooking(b)}>Cancel</Button>}
                 </div>
@@ -370,6 +407,89 @@ export const AdminPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) => {
           </div>
         )}
       </main>
+
+      {/* Booking detail modal */}
+      {detail && (
+        <div className="fixed inset-0 z-[120] flex items-center justify-center p-4 bg-black/70 backdrop-blur-sm overflow-y-auto">
+          <div className="w-full max-w-lg my-8 bg-card border border-white/10 rounded-3xl p-6 space-y-4">
+            {detail.loading ? <p className="text-white/60 text-sm py-8 text-center">Loading…</p> : (() => {
+              const b = detail.booking; const m = detail.mechanic; const v = detail.vehicle;
+              return (
+                <>
+                  <div className="flex items-start justify-between">
+                    <div>
+                      <h3 className="text-lg font-black uppercase text-white">{b.vehicle_rego || '—'} <span className="font-mono text-xs text-white/30">#{b.id}</span></h3>
+                      <p className="text-xs text-white/40">{b.status} · {b.payment_status}{b.is_cold_quote ? ' · cold quote' : ''}{b.refunded_amount > 0 ? ` · refunded $${b.refunded_amount}` : ''}</p>
+                    </div>
+                    <button onClick={() => setDetail(null)} className="text-white/40 hover:text-white text-2xl leading-none">×</button>
+                  </div>
+
+                  <div className="grid grid-cols-2 gap-3 text-sm">
+                    <div className="bg-white/5 rounded-xl p-3">
+                      <p className="text-[10px] uppercase font-black text-white/40 mb-1">Customer</p>
+                      <p className="text-white font-bold">{b.customer_name || '—'}</p>
+                      <p className="text-white/50 text-xs">{b.email || '—'}</p>
+                      <p className="text-white/50 text-xs">{b.customer_phone || b.phone || ''}</p>
+                    </div>
+                    <div className="bg-white/5 rounded-xl p-3">
+                      <p className="text-[10px] uppercase font-black text-white/40 mb-1">Mechanic</p>
+                      <p className="text-white font-bold">{m?.name || '—'}</p>
+                      <p className="text-white/50 text-xs">{m?.email || ''}</p>
+                      <p className="text-white/50 text-xs">{m?.address || ''}</p>
+                    </div>
+                    <div className="bg-white/5 rounded-xl p-3">
+                      <p className="text-[10px] uppercase font-black text-white/40 mb-1">Vehicle</p>
+                      <p className="text-white font-bold">{v ? `${v.year || ''} ${v.make || ''} ${v.model || ''}`.trim() : (b.vehicle_rego || '—')}</p>
+                      <p className="text-white/50 text-xs">{v?.variant || ''}</p>
+                      <p className="text-white/50 text-xs">{v?.mileage ? `${Number(v.mileage).toLocaleString()} km` : ''}</p>
+                    </div>
+                    <div className="bg-white/5 rounded-xl p-3">
+                      <p className="text-[10px] uppercase font-black text-white/40 mb-1">This job</p>
+                      <p className="text-white/70 text-xs">{(b.service_ids || []).join(', ') || '—'}</p>
+                      <p className="text-torqued-red font-black mt-1">${b.quoted_price || b.total_price || 0}</p>
+                      {b.description && <p className="text-white/40 text-xs italic mt-1">“{b.description}”</p>}
+                    </div>
+                  </div>
+
+                  {detail.torquedJobs?.length > 0 && (
+                    <div>
+                      <p className="text-[10px] uppercase font-black text-white/40 mb-1">Previous Torqued jobs ({detail.torquedJobs.length})</p>
+                      <div className="space-y-1 max-h-28 overflow-y-auto">
+                        {detail.torquedJobs.map((j: any) => (
+                          <div key={j.id} className="flex justify-between text-xs text-white/60 bg-white/5 rounded px-2 py-1">
+                            <span>{j.date || (j.created_at || '').slice(0, 10)} · {(j.service_ids || []).join(', ') || '—'}</span>
+                            <span>{j.status} · ${j.quoted_price || j.total_price || 0}</span>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                  {detail.history?.length > 0 && (
+                    <div>
+                      <p className="text-[10px] uppercase font-black text-white/40 mb-1">Service history ({detail.history.length})</p>
+                      <div className="space-y-1 max-h-28 overflow-y-auto">
+                        {detail.history.map((h: any) => (
+                          <div key={h.id} className="flex justify-between text-xs text-white/60 bg-white/5 rounded px-2 py-1">
+                            <span>{h.service_date || '—'} · {h.work_done || 'Service'}{h.provider ? ` · ${h.provider}` : ''}</span>
+                            <span>{h.mileage ? `${Number(h.mileage).toLocaleString()} km` : ''}</span>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                  <div className="flex flex-wrap gap-2 pt-2 border-t border-white/10">
+                    <Button size="sm" className="bg-white/10 text-white text-[10px]" onClick={() => { setEdit({ kind: 'booking', row: { ...b } }); setDetail(null); }}>Edit</Button>
+                    <Button size="sm" variant="outline" className="text-amber-400 border-amber-400/40 text-[10px]" onClick={() => refundBooking(b)}>Refund / Partial</Button>
+                    {b.status !== 'cancelled' && <Button size="sm" variant="outline" className="text-torqued-red border-torqued-red/40 text-[10px]" onClick={async () => { await cancelBooking(b); setDetail(null); }}>Cancel booking</Button>}
+                  </div>
+                </>
+              );
+            })()}
+          </div>
+        </div>
+      )}
 
       {/* Edit modal */}
       {edit && (

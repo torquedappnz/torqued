@@ -266,6 +266,47 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
     fetch(src).then(r => r.blob()).then(b => { const fr = new FileReader(); fr.onloadend = () => resolve(fr.result as string); fr.onerror = () => resolve(null); fr.readAsDataURL(b); }).catch(() => resolve(null));
   });
 
+  // Prior completed week (Mon 00:00 → Sun 23:59) relative to now
+  const priorWeekRange = () => {
+    const now = new Date();
+    const dow = (now.getDay() + 6) % 7; // 0 = Monday
+    const thisMon = new Date(now); thisMon.setHours(0, 0, 0, 0); thisMon.setDate(now.getDate() - dow);
+    const start = new Date(thisMon); start.setDate(thisMon.getDate() - 7);
+    const end = new Date(thisMon); end.setMilliseconds(-1);
+    return { start, end };
+  };
+
+  // Download the weekly revenue report (prior Mon–Sun, jobs − 4% commission)
+  const downloadWeeklyReport = async () => {
+    const { start, end } = priorWeekRange();
+    const jobs = pastJobs.filter((j: any) => {
+      if (j.payment_status !== 'confirmed') return false;
+      const t = new Date(j.completed_at || j.created_at).getTime();
+      return t >= start.getTime() && t <= end.getTime();
+    });
+    const gross = jobs.reduce((s: number, j: any) => s + (parseFloat(j.total_price) || 0), 0);
+    const commission = gross * 0.04, payout = gross - commission;
+    const doc = new jsPDF({ unit: 'mm', format: 'a4' });
+    const logo = await fetchDataUrl('/torqued-logo.png');
+    doc.setFillColor(21, 4, 2); doc.rect(0, 0, 210, 40, 'F'); doc.setFillColor(255, 24, 0); doc.rect(0, 40, 210, 2, 'F');
+    if (logo) doc.addImage(logo, 'PNG', 15, 11, 52, 17.4);
+    doc.setTextColor(255, 255, 255); doc.setFont('Helvetica', 'bold'); doc.setFontSize(11); doc.text('WEEKLY REVENUE REPORT', 195, 18, { align: 'right' });
+    doc.setFont('Helvetica', 'normal'); doc.setFontSize(8.5); doc.setTextColor(180, 180, 180);
+    doc.text(`${start.toLocaleDateString('en-NZ')} – ${end.toLocaleDateString('en-NZ')}`, 195, 24, { align: 'right' });
+    doc.text(profileData.name || 'Workshop', 195, 29, { align: 'right' });
+    let y = 54; doc.setTextColor(21, 4, 2); doc.setFontSize(9);
+    const row = (a: string, b: string, c: string, d: string, bold = false) => { doc.setFont('Helvetica', bold ? 'bold' : 'normal'); doc.text(a, 15, y); doc.text(b, 110, y); doc.text(c, 150, y); doc.text(d, 195, y, { align: 'right' }); y += 6.5; };
+    row('Date', 'Vehicle', 'Customer', 'Amount', true); y += 1; doc.setDrawColor(226, 232, 240); doc.line(15, y - 4, 195, y - 4);
+    if (jobs.length === 0) { doc.setFont('Helvetica', 'italic'); doc.text('No paid jobs in this period.', 15, y); y += 8; }
+    jobs.forEach((j: any) => row(new Date(j.completed_at || j.created_at).toLocaleDateString('en-NZ'), (j.vehicle_rego || '—').slice(0, 18), (j.customer_name || '—').slice(0, 18), `$${(parseFloat(j.total_price) || 0).toFixed(2)}`));
+    y += 4; doc.line(15, y, 195, y); y += 8; doc.setFontSize(10);
+    row('', '', 'Gross (jobs)', `$${gross.toFixed(2)}`);
+    row('', '', 'Torqued commission (4%)', `-$${commission.toFixed(2)}`);
+    doc.setTextColor(255, 24, 0); row('', '', 'YOUR PAYOUT', `$${payout.toFixed(2)}`, true);
+    doc.setTextColor(120, 120, 120); doc.setFontSize(8); doc.text('Your $99/month subscription is billed separately to your card and is not deducted here.', 15, y + 4);
+    doc.save(`Torqued-Weekly-Report-${start.toISOString().slice(0, 10)}.pdf`);
+  };
+
   // Build & download a branded TAX INVOICE for a paid job (from its stored quote_items)
   const exportInvoice = async (job: any) => {
     const qi = job.quote_items || {};
@@ -441,9 +482,10 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
         const weekAgo = Date.now() - 7 * 864e5;
         const paidThisWeek = all.filter((r: any) => r.payment_status === 'confirmed' && new Date(r.completed_at || r.created_at).getTime() >= weekAgo);
         setWeekRevenue(Math.round(paidThisWeek.reduce((s: number, r: any) => s + (parseFloat(r.total_price) || 0) * 0.96, 0)));
-        setPastJobs(all.filter((r: any) => ['completed', 'in_progress'].includes(r.status)));
-        // Incoming queue = jobs still needing the mechanic's action
-        const data = all.filter((r: any) => ['booked', 'pending_payment', 'pending'].includes(r.status));
+        // Job History = accepted/in-progress/completed jobs + all cold quotes (mechanic-created)
+        setPastJobs(all.filter((r: any) => ['completed', 'in_progress'].includes(r.status) || r.is_cold_quote));
+        // Incoming queue = real customer jobs still needing action (cold quotes excluded — they live in History)
+        const data = all.filter((r: any) => ['booked', 'pending_payment', 'pending'].includes(r.status) && !r.is_cold_quote);
         if (!data || data.length === 0) { setIncomingJobs([]); return; }
         const jobs = data.map((row: any) => ({
           id: row.id,
@@ -520,11 +562,7 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
   const [diagnosticStep, setDiagnosticStep] = useState<'review' | 'inspect' | 'quote' | 'sent'>('review');
   const [diagnosticFindings, setDiagnosticFindings] = useState('');
   const [customQuotePrice, setCustomQuotePrice] = useState('580');
-  const [deliveredParts, setDeliveredParts] = useState<DeliveryItem[]>([
-    { id: 'd1', supplier: 'EuroParts', items: 3, eta: 'Today 9:15 AM', status: 'In Transit', icon: '🚚' },
-    { id: 'd2', supplier: 'Repco', items: 1, eta: 'Today 10:30 AM', status: 'Packed', icon: '📦' },
-    { id: 'd3', supplier: 'BNT', items: 2, eta: 'Tomorrow 8:00 AM', status: 'Scheduled', icon: '🚛' },
-  ]);
+  const [deliveredParts, setDeliveredParts] = useState<DeliveryItem[]>([]);
   const [isAddingPart, setIsAddingPart] = useState(false);
   const [newPart, setNewPart] = useState<Partial<InventoryPart>>({ name: '', quantity: 0, unitPrice: 0 });
   const [showProcurement, setShowProcurement] = useState(false);
@@ -834,37 +872,38 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
               <div className="flex justify-between items-start mb-6">
                 <div>
                    <h3 className="text-xl">Courier Feed</h3>
-                   <p className="text-muted text-[10px] font-bold uppercase tracking-widest mt-1">Today & Tomorrow Status</p>
+                   <p className="text-muted text-[10px] font-bold uppercase tracking-widest mt-1">Manual entries</p>
                 </div>
-                <Button variant="ghost" size="sm" className="bg-card text-foreground border-none h-8 text-[10px]">Track All</Button>
+                <Button variant="ghost" size="sm" className="bg-card text-foreground border-none h-8 text-[10px]" onClick={() => {
+                  const supplier = prompt('Supplier / courier name:'); if (!supplier?.trim()) return;
+                  const items = parseInt(prompt('Number of parts:') || '0', 10) || 0;
+                  const eta = prompt('ETA (e.g. Tomorrow 9:00 AM):') || 'TBC';
+                  setDeliveredParts(prev => [{ id: Math.random().toString(36).slice(2), supplier: supplier.trim(), items, eta, status: 'Expected', icon: '📦' }, ...prev]);
+                }}>+ Add delivery</Button>
               </div>
 
               <div className="space-y-4">
+                {deliveredParts.length === 0 && <p className="text-sm text-muted italic py-2">No deliveries logged. Tap "+ Add delivery" to track one.</p>}
                 {deliveredParts.map(delivery => (
-                  <div key={delivery.id} className="flex gap-4 items-center bg-card p-3 rounded-2xl hover:bg-background/80 transition-all cursor-pointer border border-border">
+                  <div key={delivery.id} className="flex gap-4 items-center bg-card p-3 rounded-2xl transition-all border border-border">
                     <div className="text-2xl">{delivery.icon}</div>
                     <div className="flex-1">
                       <div className="flex justify-between items-center">
                          <h4 className="text-sm font-bold">{delivery.supplier}</h4>
-                         <span className="text-[10px] font-mono text-emerald-400 font-bold uppercase">{delivery.status}</span>
+                         <span className="text-[10px] font-mono text-emerald-500 font-bold uppercase">{delivery.status}</span>
                       </div>
                       <div className="flex justify-between items-center mt-1">
                          <p className="text-xs text-muted">{delivery.items} parts arriving</p>
                          <p className="text-[10px] font-bold text-muted">{delivery.eta}</p>
                       </div>
                     </div>
+                    <button onClick={() => setDeliveredParts(prev => prev.filter(d => d.id !== delivery.id))} className="text-muted hover:text-torqued-red"><X size={14} /></button>
                   </div>
                 ))}
               </div>
 
-              <div className="mt-6 pt-6 border-t border-white/10 space-y-2">
-                 <div className="flex justify-between text-[10px] font-bold uppercase tracking-widest">
-                    <span className="text-white/40 italic">Daily Parts Intake</span>
-                    <span className="text-torqued-red">85% Processed</span>
-                 </div>
-                 <div className="h-1 bg-white/10 rounded-full overflow-hidden">
-                    <div className="h-full bg-torqued-red w-[85%]" />
-                 </div>
+              <div className="mt-6 pt-6 border-t border-border">
+                 <p className="text-[10px] font-bold uppercase tracking-widest text-muted italic">Automated courier tracking coming soon</p>
               </div>
             </div>
           </Card>
@@ -912,10 +951,10 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
       </div>
 
       {isAddingPart && (
-        <Card className="p-6 border-torqued-red/20 bg-red-50/10 space-y-4">
+        <Card className="p-6 border-torqued-red/20 bg-card space-y-4">
           <div className="flex justify-between items-center">
-            <h3 className="text-xl font-bold">Add New Part</h3>
-            <button onClick={() => setIsAddingPart(false)}><X size={20} className="text-white/40 hover:text-white" /></button>
+            <h3 className="text-xl font-bold text-foreground">Add New Part</h3>
+            <button onClick={() => setIsAddingPart(false)}><X size={20} className="text-muted hover:text-foreground" /></button>
           </div>
           <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
             <Input 
@@ -974,29 +1013,31 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
             <p className="text-2xl font-bold">{formatCurrency(parts.reduce((sum, p) => sum + (p.quantity * p.unitPrice), 0))} <span className="text-[10px] font-normal text-muted">excl. GST</span></p>
           </div>
         </Card>
-        <Card className="p-4 flex items-center gap-4 border-none bg-white">
-          <div className="w-10 h-10 bg-black/5 rounded-lg flex items-center justify-center">
+        <Card className="p-4 flex items-center gap-4 border-none bg-background text-foreground shadow-sm">
+          <div className="w-10 h-10 bg-card rounded-lg flex items-center justify-center border border-border">
             <AlertCircle size={20} className="text-yellow-500" />
           </div>
           <div>
-            <p className="text-[10px] font-bold uppercase text-white/40">Low Stock Items</p>
-            <p className="text-2xl font-bold">2</p>
+            <p className="text-[10px] font-bold uppercase text-muted">Low Stock Items</p>
+            <p className="text-2xl font-bold">{parts.filter(p => p.quantity <= (p.minStockLevel ?? 2)).length}</p>
           </div>
         </Card>
-        <Card className="p-4 flex items-center gap-4 border-none bg-white">
-          <div className="w-10 h-10 bg-black/5 rounded-lg flex items-center justify-center">
+        <Card className="p-4 flex items-center gap-4 border-none bg-background text-foreground shadow-sm">
+          <div className="w-10 h-10 bg-card rounded-lg flex items-center justify-center border border-border">
             <TrendingUp size={20} className="text-green-500" />
           </div>
           <div>
-            <p className="text-[10px] font-bold uppercase text-white/40">Orders This Month</p>
-            <p className="text-2xl font-bold">12</p>
+            <p className="text-[10px] font-bold uppercase text-muted">Distinct Parts</p>
+            <p className="text-2xl font-bold">{parts.length}</p>
           </div>
         </Card>
       </div>
 
-      <Card className="overflow-hidden">
+      <Card className="overflow-hidden bg-card border-border">
+        {parts.length === 0 && <p className="p-8 text-center text-muted italic text-sm">No parts in your inventory yet. Add one above.</p>}
+        {parts.length > 0 && (
         <table className="w-full text-left">
-          <thead className="bg-white/5 text-[10px] font-bold uppercase text-white/40">
+          <thead className="bg-background text-[10px] font-bold uppercase text-muted">
             <tr>
               <th className="px-6 py-4">Part Details</th>
               <th className="px-6 py-4">Stock Level</th>
@@ -1005,17 +1046,17 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
               <th className="px-6 py-4 text-right">Actions</th>
             </tr>
           </thead>
-          <tbody className="divide-y divide-white/5">
+          <tbody className="divide-y divide-border">
             {parts.map(part => (
-              <tr key={part.id} className="hover:bg-white/5 transition-colors group">
+              <tr key={part.id} className="hover:bg-background transition-colors group">
                 <td className="px-6 py-4">
                   <div className="flex items-center gap-3">
-                    <div className="w-8 h-8 bg-white/10 rounded flex items-center justify-center">
-                      <Package size={14} className="text-white/40" />
+                    <div className="w-8 h-8 bg-background rounded flex items-center justify-center border border-border">
+                      <Package size={14} className="text-muted" />
                     </div>
                     <div>
-                      <p className="font-bold text-white">{part.name}</p>
-                      {part.description && <p className="text-xs text-white/40">{part.description}</p>}
+                      <p className="font-bold text-foreground">{part.name}</p>
+                      {part.description && <p className="text-xs text-muted">{part.description}</p>}
                     </div>
                   </div>
                 </td>
@@ -1023,33 +1064,30 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                   <div className="flex items-center gap-2">
                     <span className={cn(
                       "font-bold",
-                      part.quantity < 5 ? "text-torqued-red" : "text-white"
+                      part.quantity < 5 ? "text-torqued-red" : "text-foreground"
                     )}>{part.quantity} units</span>
                     {part.quantity < 5 && (
                       <span className="text-[8px] bg-torqued-red/20 text-torqued-red px-1.5 py-0.5 rounded font-bold uppercase tracking-widest border border-torqued-red/20">Order Now</span>
                     )}
                   </div>
-                  <div className="w-24 h-1.5 bg-white/10 rounded-full mt-1.5 overflow-hidden">
-                    <div 
+                  <div className="w-24 h-1.5 bg-background rounded-full mt-1.5 overflow-hidden">
+                    <div
                       className={cn("h-full", part.quantity < 5 ? "bg-torqued-red" : "bg-emerald-500")}
                       style={{ width: `${Math.min((part.quantity / 50) * 100, 100)}%` }}
                     />
                   </div>
                 </td>
-                <td className="px-6 py-4 font-medium text-white/80">{formatCurrency(part.unitPrice)}</td>
-                <td className="px-6 py-4 font-bold text-white">{formatCurrency(part.quantity * part.unitPrice)}</td>
+                <td className="px-6 py-4 font-medium text-muted">{formatCurrency(part.unitPrice)}</td>
+                <td className="px-6 py-4 font-bold text-foreground">{formatCurrency(part.quantity * part.unitPrice)}</td>
                 <td className="px-6 py-4 text-right">
                   <div className="flex justify-end gap-2 opacity-0 group-hover:opacity-100 transition-opacity">
-                    <button className="p-2 hover:bg-white/10 rounded-lg text-white/40 hover:text-white">
-                      <PenSquare size={16} />
-                    </button>
                     <button
                       onClick={() => {
                         setParts(parts.filter(p => p.id !== part.id));
                         supabase.from('mechanic_parts').delete().eq('id', part.id)
                           .then(({ error }) => { if (error) console.error('Failed to delete part:', error.message); });
                       }}
-                      className="p-2 hover:bg-torqued-red/20 rounded-lg text-white/40 hover:text-torqued-red"
+                      className="p-2 hover:bg-torqued-red/20 rounded-lg text-muted hover:text-torqued-red"
                     >
                       <Trash2 size={16} />
                     </button>
@@ -1059,6 +1097,7 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
             ))}
           </tbody>
         </table>
+        )}
       </Card>
     </div>
   );
@@ -1345,34 +1384,44 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
             </div>
           </Card>
 
-          <Card className="p-6 space-y-6">
-            <div className="flex items-center gap-2 border-b border-black/5 pb-4 mb-4">
+          <Card className="p-6 space-y-6 bg-card border-border">
+            <div className="flex items-center gap-2 border-b border-border pb-4 mb-4">
               <Award size={20} className="text-torqued-red" />
-              <h3 className="text-xl">Diagnostics & Tools</h3>
+              <h3 className="text-xl text-foreground">Diagnostics & Tools</h3>
             </div>
             <div className="space-y-4">
-              <p className="text-xs font-bold uppercase text-black/40">Specific tools you use</p>
+              <p className="text-xs font-bold uppercase text-muted">Specific tools you use</p>
               <div className="flex flex-wrap gap-2">
                 {profileData.diagnosticTools.map(tool => (
-                  <span key={tool} className="px-3 py-1.5 bg-red-50 text-torqued-red rounded-lg text-[10px] font-bold uppercase border border-torqued-red/10">
+                  <span key={tool} className="px-3 py-1.5 bg-torqued-red/10 text-torqued-red rounded-lg text-[10px] font-bold uppercase border border-torqued-red/20 flex items-center gap-1.5">
                     {tool}
+                    <button onClick={() => setProfileData({ ...profileData, diagnosticTools: profileData.diagnosticTools.filter(t => t !== tool) })} className="hover:text-foreground"><X size={11} /></button>
                   </span>
                 ))}
-                <button className="px-3 py-1.5 border border-dashed border-black/20 rounded-lg text-[10px] font-bold uppercase text-black/40 hover:border-torqued-red hover:text-torqued-red transition-all">
+                <button onClick={() => {
+                  const t = prompt('Add a diagnostic tool (e.g. Autel MaxiSys):');
+                  if (t && t.trim()) setProfileData({ ...profileData, diagnosticTools: [...profileData.diagnosticTools, t.trim()] });
+                }} className="px-3 py-1.5 border border-dashed border-border rounded-lg text-[10px] font-bold uppercase text-muted hover:border-torqued-red hover:text-torqued-red transition-all">
                   + Add Tool
                 </button>
               </div>
             </div>
             <div className="space-y-4 pt-4">
-              <p className="text-xs font-bold uppercase text-black/40">Certifications & Accreditations</p>
+              <p className="text-xs font-bold uppercase text-muted">Certifications & Accreditations</p>
               <div className="space-y-2">
                 {profileData.certifications.map(cert => (
-                  <div key={cert} className="flex items-center gap-3 p-3 bg-black/5 rounded-xl">
+                  <div key={cert} className="flex items-center gap-3 p-3 bg-background rounded-xl">
                     <Award size={16} className="text-torqued-red" />
-                    <span className="text-xs font-bold">{cert}</span>
-                    <button className="ml-auto text-black/20 hover:text-torqued-red"><Trash2 size={14} /></button>
+                    <span className="text-xs font-bold text-foreground">{cert}</span>
+                    <button onClick={() => setProfileData({ ...profileData, certifications: profileData.certifications.filter(c => c !== cert) })} className="ml-auto text-muted hover:text-torqued-red"><Trash2 size={14} /></button>
                   </div>
                 ))}
+                <button onClick={() => {
+                  const c = prompt('Add a certification / accreditation:');
+                  if (c && c.trim()) setProfileData({ ...profileData, certifications: [...profileData.certifications, c.trim()] });
+                }} className="px-3 py-1.5 border border-dashed border-border rounded-lg text-[10px] font-bold uppercase text-muted hover:border-torqued-red hover:text-torqued-red transition-all">
+                  + Add Certification
+                </button>
               </div>
             </div>
           </Card>
@@ -1386,22 +1435,39 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
               <Input label="Labour Rate ($/hr)" value={profileData.labourRate.toString()} onChange={(e) => setProfileData({...profileData, labourRate: parseInt(e.target.value) || 0})} />
               <Input label="Standard Shop Fee ($)" value={profileData.shopFee.toString()} onChange={(e) => setProfileData({...profileData, shopFee: parseInt(e.target.value) || 0})} />
             </div>
-            <div className="p-4 bg-torqued-dark text-white rounded-2xl relative overflow-hidden group">
-              <div className="absolute top-0 right-0 w-32 h-32 bg-torqued-red/10 rounded-full -mr-16 -mt-16 group-hover:scale-110 transition-transform" />
-              <div className="relative z-10 space-y-2">
-                <h4 className="text-sm font-bold">Torqued Merchant Account</h4>
-                <p className="text-xs text-white/60">Your payouts are sent daily via Stripe. Connected since Jan 2026.</p>
-                <div className="pt-2">
-                   <Button variant="ghost" size="sm" className="bg-white/10 text-white border-none h-8 text-[10px]">Stripe Settings</Button>
-                </div>
+            <div className="p-4 bg-background border border-border rounded-2xl space-y-2">
+              <h4 className="text-sm font-bold text-foreground">Billing card</h4>
+              <p className="text-xs text-muted">Your $99/month subscription is billed to your card. Update it securely via Stripe.</p>
+              <div className="pt-1">
+                <Button variant="outline" size="sm" className="text-foreground border-border h-8 text-[10px]" onClick={async () => {
+                  try {
+                    const r = await fetch('/api/mechanic/billing-portal', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ mechanicId: user!.id }) });
+                    const d = await r.json();
+                    if (d.url) window.location.href = d.url; else alert(d.error || 'No active subscription to manage.');
+                  } catch { alert('Could not open billing.'); }
+                }}>Update billing card →</Button>
               </div>
             </div>
           </Card>
 
-          <Card className="p-6 space-y-6 md:col-span-2">
-            <div className="flex items-center gap-2 border-b border-black/5 pb-4 mb-4">
+          {passkeysSupported() && (
+            <Card className="p-6 space-y-4 bg-card border-border">
+              <div className="flex items-center gap-2 border-b border-border pb-4">
+                <CreditCard size={20} className="text-torqued-red" />
+                <h3 className="text-xl text-foreground">Security · Passkey</h3>
+              </div>
+              <p className="text-sm text-muted">Sign in with Face ID / Touch ID instead of your password. Your password still works as a fallback.</p>
+              <Button variant="outline" className="text-foreground border-border" onClick={async () => {
+                try { await registerPasskey('mechanic', user!.email!); alert('Passkey added. Next time, tap "Sign in with passkey".'); }
+                catch (e: any) { alert(e?.message || 'Could not add passkey.'); }
+              }}>🔑 Add a passkey</Button>
+            </Card>
+          )}
+
+          <Card className="p-6 space-y-6 md:col-span-2 bg-card border-border">
+            <div className="flex items-center gap-2 border-b border-border pb-4 mb-4">
               <Map size={20} className="text-torqued-red" />
-              <h3 className="text-xl">Workshop Location</h3>
+              <h3 className="text-xl text-foreground">Workshop Location</h3>
             </div>
             <div className="relative h-[300px] bg-black/5 rounded-2xl overflow-hidden group">
               <img 
@@ -1613,7 +1679,7 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
           <div className="flex gap-4 items-center justify-between border-b border-black/5 pb-4">
              <div className="flex items-center gap-4">
                 <button className="p-2 hover:bg-black/5 rounded-full"><ChevronLeft size={20} /></button>
-                <h3 className="text-xl font-bold uppercase tracking-tight">Monday, 9 March 2026</h3>
+                <h3 className="text-xl font-bold uppercase tracking-tight">{new Date().toLocaleDateString('en-NZ', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' })}</h3>
                 <button className="p-2 hover:bg-black/5 rounded-full"><ChevronRight size={20} /></button>
              </div>
              <Button variant="outline" size="sm">Today</Button>
@@ -2164,7 +2230,8 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
           <Card key={j.id} className="p-4 sm:p-5 bg-card border-border space-y-3">
             <div className="flex items-start justify-between gap-3">
               <div>
-                <p className="font-black text-foreground">{j.vehicle_rego || '—'} {j.customer_name ? <span className="text-muted font-medium">· {j.customer_name}</span> : null}</p>
+                <p className="font-black text-foreground flex items-center gap-2">{j.vehicle_rego || '—'} {j.customer_name ? <span className="text-muted font-medium">· {j.customer_name}</span> : null}
+                  {j.is_cold_quote && <span className="text-[9px] uppercase font-black tracking-widest bg-torqued-red/10 text-torqued-red px-1.5 py-0.5 rounded">Cold quote</span>}</p>
                 <p className="text-xs text-muted">{jobShape.services.join(', ') || '—'}</p>
                 <p className="text-[11px] text-muted mt-1">
                   {j.date || '—'} · <span className="uppercase font-bold">{j.status}</span> · {j.payment_status === 'confirmed' ? 'Paid' : (j.payment_status || 'unpaid')}
@@ -2259,6 +2326,14 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
             }}>Activate $99/mo</Button>
           </Card>
         )}
+
+        <Card className="p-4 bg-card border-border flex items-center justify-between gap-4">
+          <div>
+            <p className="text-sm font-bold text-foreground">Weekly revenue report</p>
+            <p className="text-xs text-muted">Last completed week (Mon–Sun): your jobs less Torqued's 4% commission.</p>
+          </div>
+          <Button size="sm" className="bg-torqued-red text-white shrink-0" onClick={downloadWeeklyReport}>Download PDF</Button>
+        </Card>
 
         <div>
           <h3 className="text-sm font-black uppercase tracking-widest text-muted mb-2">Subscription payment history</h3>
@@ -2932,7 +3007,7 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
             <h1 className="text-4xl text-foreground tracking-tighter">
               {sidebarItems.find(i => i.id === activeTab)?.label}
             </h1>
-            <p className="text-muted font-bold uppercase tracking-widest text-[10px]">Monday, 9 March 2026</p>
+            <p className="text-muted font-bold uppercase tracking-widest text-[10px]">{new Date().toLocaleDateString('en-NZ', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' })}</p>
           </div>
           <div className="flex flex-wrap items-center gap-4">
             {/* Theme Toggle */}

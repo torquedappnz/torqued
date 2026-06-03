@@ -1465,6 +1465,76 @@ app.get('/api/admin/bookings', async (req, res) => {
   res.json({ bookings: data ?? [] });
 });
 
+// GET /api/admin/booking/:id — full booking context for the admin (mechanic, customer, vehicle, history)
+app.get('/api/admin/booking/:id', async (req, res) => {
+  if (!adminOk(req)) return res.status(401).json({ error: 'Unauthorized' });
+  try {
+    const supabase = getSupabaseAdmin();
+    if (!supabase) return res.status(500).json({ error: 'Database not configured' });
+    const { data: b } = await supabase.from('bookings').select('*').eq('id', req.params.id).single();
+    if (!b) return res.status(404).json({ error: 'Booking not found' });
+
+    let mechanic = null, vehicle = null, history: any[] = [], torquedJobs: any[] = [];
+    if (b.mechanic_id) {
+      const { data: m } = await supabase.from('profiles').select('name, email, phone, address').eq('id', b.mechanic_id).single();
+      mechanic = m;
+    }
+    if (b.vehicle_rego) {
+      const { data: v } = await supabase.from('vehicles').select('*').eq('rego', b.vehicle_rego).single();
+      vehicle = v;
+      const { data: h } = await supabase.from('vehicle_history').select('*').eq('rego', b.vehicle_rego).order('created_at', { ascending: false });
+      history = h ?? [];
+      const { data: tj } = await supabase.from('bookings').select('id, service_ids, status, payment_status, total_price, quoted_price, date, created_at')
+        .eq('vehicle_rego', b.vehicle_rego).neq('id', b.id).order('created_at', { ascending: false });
+      torquedJobs = tj ?? [];
+    }
+    res.json({ booking: b, mechanic, vehicle, history, torquedJobs });
+  } catch (err) {
+    console.error('[admin/booking]', err);
+    res.status(500).json({ error: 'Could not load booking' });
+  }
+});
+
+// GET /api/admin/weekly-report — prior Mon–Sun revenue per mechanic (jobs − 4%)
+app.get('/api/admin/weekly-report', async (req, res) => {
+  if (!adminOk(req)) return res.status(401).json({ error: 'Unauthorized' });
+  try {
+    const supabase = getSupabaseAdmin();
+    if (!supabase) return res.json({ rows: [] });
+    const now = new Date();
+    const dow = (now.getDay() + 6) % 7;
+    const thisMon = new Date(now); thisMon.setHours(0, 0, 0, 0); thisMon.setDate(now.getDate() - dow);
+    const start = new Date(thisMon); start.setDate(thisMon.getDate() - 7);
+    const end = new Date(thisMon); end.setMilliseconds(-1);
+
+    const { data: bookings } = await supabase.from('bookings')
+      .select('mechanic_id, total_price, payment_status, created_at, completed_at')
+      .eq('payment_status', 'confirmed')
+      .gte('created_at', start.toISOString());
+    const inRange = (bookings ?? []).filter((b: any) => {
+      const t = new Date(b.completed_at || b.created_at).getTime();
+      return t >= start.getTime() && t <= end.getTime();
+    });
+    const { data: mechs } = await supabase.from('profiles').select('id, name').eq('role', 'mechanic');
+    const nameOf = (id: string) => (mechs ?? []).find((m: any) => m.id === id)?.name || id;
+
+    const byMech: Record<string, { gross: number; jobs: number }> = {};
+    inRange.forEach((b: any) => {
+      const k = b.mechanic_id || 'unassigned';
+      byMech[k] = byMech[k] || { gross: 0, jobs: 0 };
+      byMech[k].gross += parseFloat(b.total_price) || 0; byMech[k].jobs += 1;
+    });
+    const rows = Object.entries(byMech).map(([id, v]) => ({
+      mechanicId: id, name: nameOf(id), jobs: v.jobs,
+      gross: Math.round(v.gross * 100) / 100, commission: Math.round(v.gross * 4) / 100, payout: Math.round(v.gross * 96) / 100,
+    }));
+    res.json({ periodStart: start.toISOString(), periodEnd: end.toISOString(), rows });
+  } catch (err) {
+    console.error('[admin/weekly-report]', err);
+    res.status(500).json({ error: 'Could not build report' });
+  }
+});
+
 // POST /api/admin/set-subscription — suspend/reactivate a mechanic
 app.post('/api/admin/set-subscription', async (req, res) => {
   if (!adminOk(req)) return res.status(401).json({ error: 'Unauthorized' });
@@ -2156,6 +2226,28 @@ app.post('/api/stripe/activate-subscription', async (req, res) => {
   } catch (err) {
     console.error('[activate-subscription]', err);
     res.status(500).json({ error: 'Activation failed' });
+  }
+});
+
+// POST /api/mechanic/billing-portal — Stripe billing portal session to update the card
+app.post('/api/mechanic/billing-portal', async (req, res) => {
+  try {
+    const { mechanicId } = req.body;
+    if (!mechanicId) return res.status(400).json({ error: 'mechanicId required' });
+    const supabase = getSupabaseAdmin();
+    const stripe = getStripe();
+    if (!supabase || !stripe) return res.status(500).json({ error: 'Not configured' });
+    const { data: p } = await supabase.from('profiles').select('stripe_subscription_id').eq('id', mechanicId).single();
+    if (!p?.stripe_subscription_id) return res.status(400).json({ error: 'No active Stripe subscription on file.' });
+    const sub: any = await stripe.subscriptions.retrieve(p.stripe_subscription_id);
+    const session = await stripe.billingPortal.sessions.create({
+      customer: sub.customer as string,
+      return_url: `${getOrigin(req)}/mechanic`,
+    });
+    res.json({ url: session.url });
+  } catch (err) {
+    console.error('[billing-portal]', err);
+    res.status(500).json({ error: 'Could not open billing portal' });
   }
 });
 

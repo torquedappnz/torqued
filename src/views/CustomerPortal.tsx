@@ -2972,6 +2972,18 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
   };
 
   const [isManagingGarage, setIsManagingGarage] = useState(false);
+  const ARCHIVE_KEY = 'torqued_archived_regos';
+  const [archivedRegos, setArchivedRegos] = useState<string[]>(() => {
+    try { return JSON.parse(localStorage.getItem(ARCHIVE_KEY) || '[]'); } catch { return []; }
+  });
+  const [showArchived, setShowArchived] = useState(false);
+  const toggleArchive = (rego: string) => {
+    setArchivedRegos(prev => {
+      const next = prev.includes(rego) ? prev.filter(r => r !== rego) : [...prev, rego];
+      try { localStorage.setItem(ARCHIVE_KEY, JSON.stringify(next)); } catch {}
+      return next;
+    });
+  };
 
   const renderDashboard = () => {
     // Gate: My Garage requires a verification (passkey or magic link) within the last 48h, on this browser
@@ -3179,34 +3191,59 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
               </Card>
             )}
 
+            {vehicle && (
+              <div className="flex items-center gap-2 text-sm">
+                <span className="text-muted">Currently viewing:</span>
+                <span className="font-black text-foreground">{vehicle.make} {vehicle.model}</span>
+                <span className="torqued-badge text-[10px]">{vehicle.rego}</span>
+              </div>
+            )}
+
             <div className="space-y-3">
-              {(garageVehicles.length > 0 ? garageVehicles : (vehicle ? [vehicle] : [])).map(gv => {
+              {(() => {
+                const base = garageVehicles.length > 0 ? garageVehicles : (vehicle ? [vehicle] : []);
+                const list = base.filter(gv => showArchived ? archivedRegos.includes(gv.rego) : !archivedRegos.includes(gv.rego));
+                return list.map(gv => {
                 const isActive = vehicle?.rego === gv.rego;
+                const isArchived = archivedRegos.includes(gv.rego);
                 return (
                   <Card
                     key={gv.rego}
-                    onClick={() => selectGarageVehicle(gv.rego)}
+                    onClick={() => !isArchived && selectGarageVehicle(gv.rego)}
                     className={cn(
-                      "p-4 flex items-center gap-4 cursor-pointer transition-all active:scale-[0.99]",
-                      isActive ? "border-torqued-red ring-1 ring-torqued-red bg-torqued-red/5" : "liquid-glass border-white/10 hover:border-torqued-red/30"
+                      "p-4 flex items-center gap-4 transition-all",
+                      isArchived ? "opacity-60 border-border" : "cursor-pointer active:scale-[0.99]",
+                      isActive ? "border-torqued-red ring-2 ring-torqued-red bg-torqued-red/5" : "liquid-glass border-white/10 hover:border-torqued-red/30"
                     )}
                   >
                     {gv.thumbnail
                       ? <img src={gv.thumbnail} alt="Car" className="w-20 h-20 rounded-xl object-cover ring-1 ring-white/10" />
                       : <div className="w-20 h-20 rounded-xl bg-card flex items-center justify-center ring-1 ring-white/10"><Car size={28} className="text-muted" /></div>}
-                    <div className="flex-1">
-                      <div className="torqued-badge text-[10px] mb-1">{gv.rego}</div>
-                      <h4 className="text-lg leading-none font-bold">{gv.year} {gv.make} {gv.model}</h4>
+                    <div className="flex-1 min-w-0">
+                      <div className="flex items-center gap-2 mb-1">
+                        <div className="torqued-badge text-[10px]">{gv.rego}</div>
+                        {isActive && <span className="text-[9px] font-black uppercase bg-torqued-red text-white px-2 py-0.5 rounded-full tracking-widest">✓ Selected</span>}
+                      </div>
+                      <h4 className="text-lg leading-none font-bold truncate">{gv.year} {gv.make} {gv.model}</h4>
                       <p className="text-xs text-muted mt-1">{gv.variant}</p>
-                      {isActive && <span className="text-[10px] font-black uppercase text-torqued-red tracking-widest mt-1 inline-block">Selected</span>}
                     </div>
-                    <ChevronRight className="text-white/20" />
+                    <button
+                      onClick={(e) => { e.stopPropagation(); toggleArchive(gv.rego); }}
+                      className="text-[10px] font-bold uppercase tracking-widest text-muted hover:text-torqued-red shrink-0 px-2"
+                    >{isArchived ? 'Restore' : 'Archive'}</button>
                   </Card>
                 );
-              })}
+                });
+              })()}
 
               {garageVehicles.length === 0 && !vehicle && (
                 <p className="text-sm text-muted text-center py-4">No vehicles yet. Add one below to start tracking its history.</p>
+              )}
+
+              {archivedRegos.length > 0 && (
+                <button onClick={() => setShowArchived(s => !s)} className="w-full text-xs font-bold text-muted hover:text-foreground py-2">
+                  {showArchived ? '← Back to active vehicles' : `View archived (${archivedRegos.length})`}
+                </button>
               )}
 
               <button
@@ -3227,9 +3264,10 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
               <section className="space-y-6">
                 <h3 className="text-2xl font-bold tracking-tight">Service History</h3>
                 <div className="space-y-3">
-                  {(manualHistory.length > 0 ? manualHistory : [
-                    { date: '2025-01-15', service: 'Full Inspection', provider: 'Torqued Certified', mileage: '95,000' }
-                  ]).map((history, idx) => (
+                  {manualHistory.length === 0 && (
+                    <Card className="p-6 bg-card border-border text-center text-sm text-muted italic">No service history yet for this vehicle. Upload past receipts above to build it.</Card>
+                  )}
+                  {manualHistory.map((history, idx) => (
                     <Card key={idx} className="p-4 bg-card border-border flex items-center justify-between group hover:border-torqued-red/30 transition-all">
                       <div className="flex items-center gap-4">
                         <div className="w-10 h-10 bg-background rounded-xl flex items-center justify-center border border-border group-hover:bg-torqued-red/10 group-hover:border-torqued-red/20 transition-all">
