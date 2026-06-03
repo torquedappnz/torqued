@@ -99,6 +99,23 @@ export const AdminPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) => {
     }
   };
 
+  const [mechDetail, setMechDetail] = useState<any | null>(null);
+  const viewMechanic = async (id: string) => {
+    setMechDetail({ loading: true });
+    const r = await fetch(`/api/admin/mechanic/${encodeURIComponent(id)}?key=${encodeURIComponent(key)}`);
+    const d = await r.json();
+    setMechDetail(r.ok ? d : null);
+  };
+  const resetPassword = async (userId: string) => {
+    if (!window.confirm('Email a password reset link to this user?')) return;
+    const r = await fetch('/api/admin/reset-password', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ key, userId }),
+    });
+    const d = await r.json();
+    window.alert(r.ok ? 'Password reset link emailed.' : (d.error || 'Could not send reset.'));
+  };
+
   const [detail, setDetail] = useState<any | null>(null);
   const viewBooking = async (id: string) => {
     setDetail({ loading: true });
@@ -271,7 +288,11 @@ export const AdminPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) => {
                   <p className="font-bold">{p.name} <span className="text-[10px] uppercase bg-white/10 px-1.5 py-0.5 rounded ml-1">{p.role}</span></p>
                   <p className="text-xs text-white/40">{p.email} {p.phone ? `· ${p.phone}` : ''}{p.role==='mechanic'?` · ${p.subscription_active?'active':'suspended'}`:''}</p>
                 </div>
-                <Button size="sm" variant="outline" className="text-white border-white/20 text-[10px]" onClick={() => setEdit({ kind: 'profile', row: { ...p } })}>Edit</Button>
+                <div className="flex gap-2 shrink-0">
+                  {p.role === 'mechanic' && <Button size="sm" variant="outline" className="text-white border-white/20 text-[10px]" onClick={() => viewMechanic(p.id)}>View</Button>}
+                  <Button size="sm" variant="outline" className="text-white border-white/20 text-[10px]" onClick={() => setEdit({ kind: 'profile', row: { ...p } })}>Edit</Button>
+                  <Button size="sm" variant="outline" className="text-white border-white/20 text-[10px]" onClick={() => resetPassword(p.id)}>Reset PW</Button>
+                </div>
               </div>
             ))}
             {sVehicles.length > 0 && <h3 className="text-sm font-black uppercase text-white/40 pt-2">Vehicles & service history</h3>}
@@ -345,10 +366,11 @@ export const AdminPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) => {
 
             <h2 className="text-lg font-black uppercase tracking-tight pt-2">Mechanics</h2>
             {mechanics.map(m => (
-              <div key={m.id} className="bg-card border border-white/10 rounded-2xl p-4 flex items-center justify-between gap-4">
+              <div key={m.id} className="bg-card border border-white/10 rounded-2xl p-4 flex items-center justify-between gap-4 hover:border-torqued-red/40 transition-all cursor-pointer" onClick={() => viewMechanic(m.id)}>
                 <div><p className="font-bold">{m.name}</p><p className="text-xs text-white/40">{m.email} · ★ {m.rating || 0} ({m.review_count || 0})</p></div>
-                <div className="flex items-center gap-3">
+                <div className="flex items-center gap-3" onClick={e => e.stopPropagation()}>
                   <span className={`text-[10px] font-black uppercase px-2 py-1 rounded ${m.subscription_active?'bg-emerald-500/15 text-emerald-400':'bg-white/10 text-white/40'}`}>{m.subscription_active?'Active':'Suspended'}</span>
+                  <Button size="sm" variant="outline" className="text-white border-white/20 text-[10px]" onClick={() => viewMechanic(m.id)}>View</Button>
                   <Button size="sm" variant="outline" className="text-white border-white/20 text-[10px]" onClick={async () => {
                     await fetch('/api/admin/set-subscription', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ key, mechanicId: m.id, active: !m.subscription_active }) });
                     setMechanics(ms => ms.map(x => x.id === m.id ? { ...x, subscription_active: !m.subscription_active } : x));
@@ -407,6 +429,80 @@ export const AdminPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) => {
           </div>
         )}
       </main>
+
+      {/* Mechanic detail modal */}
+      {mechDetail && (
+        <div className="fixed inset-0 z-[120] flex items-center justify-center p-4 bg-black/70 backdrop-blur-sm overflow-y-auto">
+          <div className="w-full max-w-2xl my-8 bg-card border border-white/10 rounded-3xl p-6 space-y-4">
+            {mechDetail.loading ? <p className="text-white/60 text-sm py-8 text-center">Loading…</p> : (() => {
+              const p = mechDetail.profile; const rev = mechDetail.revenue; const bl = mechDetail.billing;
+              return (
+                <>
+                  <div className="flex items-start justify-between">
+                    <div>
+                      <h3 className="text-xl font-black uppercase text-white">{p.name}</h3>
+                      <p className="text-xs text-white/40">{p.email} {p.phone ? `· ${p.phone}` : ''}</p>
+                      <p className="text-xs text-white/40">{p.address || ''}</p>
+                    </div>
+                    <button onClick={() => setMechDetail(null)} className="text-white/40 hover:text-white text-2xl leading-none">×</button>
+                  </div>
+
+                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 text-center">
+                    <div className="bg-white/5 rounded-xl p-3"><p className="text-[9px] uppercase font-black text-white/40">Jobs</p><p className="text-lg font-black text-white">{rev.jobs}</p></div>
+                    <div className="bg-white/5 rounded-xl p-3"><p className="text-[9px] uppercase font-black text-white/40">Gross</p><p className="text-lg font-black text-white">${rev.gross}</p></div>
+                    <div className="bg-white/5 rounded-xl p-3"><p className="text-[9px] uppercase font-black text-white/40">Commission</p><p className="text-lg font-black text-torqued-red">${rev.commission}</p></div>
+                    <div className="bg-white/5 rounded-xl p-3"><p className="text-[9px] uppercase font-black text-white/40">Payout</p><p className="text-lg font-black text-emerald-400">${rev.payout}</p></div>
+                  </div>
+
+                  <div className="bg-white/5 rounded-xl p-3 text-sm flex items-center justify-between flex-wrap gap-2">
+                    <div>
+                      <p className="text-[10px] uppercase font-black text-white/40">Subscription</p>
+                      <p className={`font-bold ${bl.active ? 'text-emerald-400' : 'text-torqued-red'}`}>{(bl.status || 'inactive').toUpperCase()}{bl.nextBilling ? ` · next ${new Date(bl.nextBilling).toLocaleDateString('en-NZ')}` : ''}</p>
+                    </div>
+                    <div className="flex gap-2">
+                      <Button size="sm" variant="outline" className="text-white border-white/20 text-[10px]" onClick={() => resetPassword(p.id)}>Reset password</Button>
+                      <Button size="sm" variant="outline" className="text-white border-white/20 text-[10px]" onClick={async () => {
+                        await fetch('/api/admin/set-subscription', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ key, mechanicId: p.id, active: !p.subscription_active }) });
+                        setMechDetail({ ...mechDetail, profile: { ...p, subscription_active: !p.subscription_active } });
+                        loadAll(key);
+                      }}>{p.subscription_active ? 'Suspend' : 'Reactivate'}</Button>
+                    </div>
+                  </div>
+
+                  {bl.invoices?.length > 0 && (
+                    <div>
+                      <p className="text-[10px] uppercase font-black text-white/40 mb-1">Subscription transactions</p>
+                      <div className="space-y-1 max-h-24 overflow-y-auto">
+                        {bl.invoices.map((inv: any) => (
+                          <div key={inv.id} className="flex justify-between text-xs text-white/60 bg-white/5 rounded px-2 py-1">
+                            <span>{new Date(inv.date).toLocaleDateString('en-NZ')} · ${inv.amount} · {inv.status}</span>
+                            {inv.url && <a href={inv.url} target="_blank" rel="noreferrer" className="text-torqued-red font-bold">Receipt</a>}
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                  <div>
+                    <p className="text-[10px] uppercase font-black text-white/40 mb-1">Jobs through the platform ({mechDetail.jobs.length})</p>
+                    <div className="space-y-1 max-h-48 overflow-y-auto">
+                      {mechDetail.jobs.length === 0 && <p className="text-xs text-white/40 italic">No jobs yet.</p>}
+                      {mechDetail.jobs.map((j: any) => (
+                        <div key={j.id} className="flex justify-between items-center text-xs text-white/60 bg-white/5 rounded px-2 py-1.5">
+                          <span>{(j.date || (j.created_at || '').slice(0, 10))} · {j.vehicle_rego || '—'} · {j.status}</span>
+                          <span className="flex items-center gap-2">${j.quoted_price || j.total_price || 0}
+                            <button onClick={() => { setMechDetail(null); viewBooking(j.id); }} className="text-torqued-red font-bold">Open</button>
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                </>
+              );
+            })()}
+          </div>
+        </div>
+      )}
 
       {/* Booking detail modal */}
       {detail && (

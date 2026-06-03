@@ -1495,6 +1495,83 @@ app.get('/api/admin/booking/:id', async (req, res) => {
   }
 });
 
+// GET /api/admin/mechanic/:id — full mechanic profile, their jobs, revenue & subscription
+app.get('/api/admin/mechanic/:id', async (req, res) => {
+  if (!adminOk(req)) return res.status(401).json({ error: 'Unauthorized' });
+  try {
+    const supabase = getSupabaseAdmin();
+    if (!supabase) return res.status(500).json({ error: 'Database not configured' });
+    const id = req.params.id;
+    const { data: profile } = await supabase.from('profiles').select('*').eq('id', id).single();
+    if (!profile) return res.status(404).json({ error: 'Mechanic not found' });
+    const { data: jobs } = await supabase.from('bookings').select('*').eq('mechanic_id', id).order('created_at', { ascending: false });
+    const all = jobs ?? [];
+    const paid = all.filter((j: any) => j.payment_status === 'confirmed');
+    const gross = paid.reduce((s: number, j: any) => s + (parseFloat(j.total_price) || 0), 0);
+    const refunded = all.reduce((s: number, j: any) => s + (parseFloat(j.refunded_amount) || 0), 0);
+    const revenue = { jobs: all.length, paid: paid.length, gross: Math.round(gross * 100) / 100, commission: Math.round(gross * 4) / 100, payout: Math.round(gross * 96) / 100, refunded: Math.round(refunded * 100) / 100 };
+
+    // Subscription + Stripe invoices
+    let billing: any = { active: !!profile.subscription_active, status: profile.subscription_active ? 'active' : 'inactive', invoices: [] };
+    const stripe = getStripe();
+    if (stripe && profile.stripe_subscription_id) {
+      try {
+        const sub: any = await stripe.subscriptions.retrieve(profile.stripe_subscription_id);
+        billing.status = sub.status; billing.nextBilling = sub.current_period_end ? sub.current_period_end * 1000 : null;
+        const list = await stripe.invoices.list({ customer: sub.customer as string, limit: 12 });
+        billing.invoices = list.data.map((inv: any) => ({ id: inv.id, date: inv.created * 1000, amount: (inv.amount_paid || inv.amount_due || 0) / 100, status: inv.status, url: inv.hosted_invoice_url || inv.invoice_pdf || null }));
+      } catch {}
+    }
+    res.json({ profile, jobs: all, revenue, billing });
+  } catch (err) {
+    console.error('[admin/mechanic]', err);
+    res.status(500).json({ error: 'Could not load mechanic' });
+  }
+});
+
+// POST /api/admin/reset-password — email a password reset to any user (mechanic/customer/admin)
+app.post('/api/admin/reset-password', async (req, res) => {
+  if (!adminOk(req)) return res.status(401).json({ error: 'Unauthorized' });
+  try {
+    const { userId, email: emailIn } = req.body;
+    const supabase = getSupabaseAdmin();
+    if (!supabase) return res.status(500).json({ error: 'Database not configured' });
+    let email = emailIn;
+    if (!email && userId) {
+      const { data: p } = await supabase.from('profiles').select('email').eq('id', userId).single();
+      email = p?.email;
+    }
+    if (!email) return res.status(400).json({ error: 'No email for this user' });
+    const origin = getOrigin(req);
+    const { data: link } = await supabase.auth.admin.generateLink({
+      type: 'recovery', email, options: { redirectTo: `${origin}/mechanic` },
+    });
+    const resetLink = link?.properties?.action_link;
+    if (!resetLink) return res.status(500).json({ error: 'Could not generate reset link' });
+    const transporter = getMailTransporter();
+    if (transporter) {
+      await transporter.sendMail({
+        from: process.env.SMTP_FROM || '"Torqued" <torquedapp.nz@gmail.com>',
+        to: email,
+        subject: 'Reset your Torqued password',
+        html: `<!DOCTYPE html><html><body style="margin:0;padding:0;background:#f4f4f6;font-family:-apple-system,Arial,sans-serif">
+<table width="100%" cellpadding="0" cellspacing="0" style="background:#f4f4f6;padding:32px 8px"><tr><td align="center">
+<table width="100%" cellpadding="0" cellspacing="0" style="max-width:480px;background:#fff;border-radius:20px;overflow:hidden;border:1px solid #e6e6ea">
+<tr><td style="background:#150402;padding:24px 32px;border-bottom:3px solid #FF1800;text-align:center"><img src="${LOGO_URL}" width="200" height="67" style="width:200px;height:67px;border:0"/></td></tr>
+<tr><td style="padding:36px 32px;color:#150402;font-size:15px;line-height:1.6">
+<p style="margin:0 0 16px">A password reset was requested for your Torqued account.</p>
+<p style="margin:0 0 20px"><a href="${resetLink}" style="display:inline-block;background:#FF1800;color:#fff;font-weight:900;text-transform:uppercase;font-size:13px;letter-spacing:1px;text-decoration:none;padding:14px 32px;border-radius:10px">Reset password</a></p>
+<p style="margin:0;color:#555">If you didn't request this, you can ignore this email.</p>
+</td></tr></table></td></tr></table></body></html>`,
+      }).catch(e => console.warn('Reset email failed (non-blocking):', e?.message));
+    }
+    res.json({ success: true, resetLink });
+  } catch (err) {
+    console.error('[admin/reset-password]', err);
+    res.status(500).json({ error: 'Could not send reset' });
+  }
+});
+
 // GET /api/admin/weekly-report — prior Mon–Sun revenue per mechanic (jobs − 4%)
 app.get('/api/admin/weekly-report', async (req, res) => {
   if (!adminOk(req)) return res.status(401).json({ error: 'Unauthorized' });

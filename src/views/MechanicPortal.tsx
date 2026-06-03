@@ -1117,10 +1117,9 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
             <h2 className="text-3xl font-bold tracking-tight">{title}</h2>
             <p className="text-white/40 text-sm mt-1">{subtitle}</p>
           </div>
-          <div className="flex gap-2">
-            <Button variant="outline" size="sm" className="border-white/10 text-white">Filter</Button>
-            <Button variant="outline" size="sm" className="border-white/10 text-white">Sort</Button>
-          </div>
+          {showOnlyDiagnostics && (
+            <Button size="sm" className="bg-torqued-red text-white shrink-0" onClick={() => { setColdForm({ customerName: '', email: '', phone: '', rego: '', make: '', model: '', description: '' }); setShowColdQuote(true); }}>+ New cold quote</Button>
+          )}
         </div>
 
         <div className="space-y-4">
@@ -2208,12 +2207,9 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
 
   const renderJobHistory = () => (
     <div className="space-y-4 pb-12">
-      <div className="flex items-start justify-between gap-3 flex-wrap">
-        <div>
-          <h2 className="text-2xl sm:text-3xl font-black tracking-tight text-foreground">Job History</h2>
-          <p className="text-sm text-muted">Jobs you've accepted, in progress, or completed. View details, edit the quote, or message the customer.</p>
-        </div>
-        <Button size="sm" className="bg-torqued-red text-white shrink-0" onClick={() => { setColdForm({ customerName: '', email: '', phone: '', rego: '', make: '', model: '', description: '' }); setShowColdQuote(true); }}>+ New cold quote</Button>
+      <div>
+        <h2 className="text-2xl sm:text-3xl font-black tracking-tight text-foreground">Job History</h2>
+        <p className="text-sm text-muted">Jobs you've accepted, in progress, or completed. View details, edit the quote, or message the customer.</p>
       </div>
       {pastJobs.length === 0 && (
         <Card className="p-10 text-center text-muted italic bg-card border-border">No accepted jobs yet.</Card>
@@ -2252,39 +2248,6 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
           </Card>
         );
       })}
-
-      {/* Cold quote: create a booking for a customer with no prior Torqued relationship */}
-      {showColdQuote && (
-        <div className="fixed inset-0 z-[120] flex items-center justify-center p-4 bg-black/70 backdrop-blur-sm">
-          <div className="w-full max-w-md bg-card border border-border rounded-3xl p-6 space-y-4 max-h-[90vh] overflow-y-auto">
-            <div>
-              <h3 className="text-xl font-black tracking-tight text-foreground">New cold quote</h3>
-              <p className="text-xs text-muted">Quote a customer who's never used Torqued. We email them the quote; if they pay online, Torqued takes its 4%.</p>
-            </div>
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
-              {([['customerName','Customer name *'],['email','Email *'],['phone','Phone'],['rego','Rego'],['make','Make'],['model','Model']] as const).map(([f,l]) => (
-                <input key={f} value={(coldForm as any)[f]} placeholder={l} onChange={e => setColdForm(c => ({ ...c, [f]: f === 'rego' ? e.target.value.toUpperCase() : e.target.value }))}
-                  className="bg-background border border-border rounded-lg px-3 h-10 text-sm text-foreground" />
-              ))}
-            </div>
-            <textarea value={coldForm.description} onChange={e => setColdForm(c => ({ ...c, description: e.target.value }))} rows={2} placeholder="Work required / notes" className="w-full bg-background border border-border rounded-lg px-3 py-2 text-sm text-foreground resize-none" />
-            <div className="flex gap-2">
-              <Button variant="outline" fullWidth className="text-foreground border-border" onClick={() => setShowColdQuote(false)}>Cancel</Button>
-              <Button fullWidth className="bg-torqued-red text-white" disabled={coldBusy || !coldForm.customerName || !coldForm.email} onClick={async () => {
-                setColdBusy(true);
-                try {
-                  const r = await fetch('/api/mechanic/cold-quote', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ mechanicId: user!.id, ...coldForm }) });
-                  const d = await r.json();
-                  if (!r.ok) { alert(d.error || 'Could not create cold quote.'); return; }
-                  setShowColdQuote(false);
-                  openQuoteEditor({ id: d.bookingId, reg: coldForm.rego, customerName: coldForm.customerName, model: `${coldForm.make} ${coldForm.model}`.trim() || coldForm.rego, services: [] });
-                } catch { alert('Could not create cold quote.'); }
-                finally { setColdBusy(false); }
-              }}>{coldBusy ? 'Creating…' : 'Build quote →'}</Button>
-            </div>
-          </div>
-        </div>
-      )}
     </div>
   );
 
@@ -3106,6 +3069,39 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
       </main>
       {selectedJobId && renderHealthReport()}
       {showProcurement && renderProcurementModal()}
+
+      {/* Cold quote: create a booking for a customer with no prior Torqued relationship */}
+      {showColdQuote && (
+        <div className="fixed inset-0 z-[120] flex items-center justify-center p-4 bg-black/70 backdrop-blur-sm">
+          <div className="w-full max-w-md bg-card border border-border rounded-3xl p-6 space-y-4 max-h-[90vh] overflow-y-auto">
+            <div>
+              <h3 className="text-xl font-black tracking-tight text-foreground">New cold quote</h3>
+              <p className="text-xs text-muted">Quote a customer who's never used Torqued. We email them the quote; if they pay online, Torqued takes its 4%.</p>
+            </div>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+              {([['customerName','Customer name *'],['email','Email *'],['phone','Phone'],['rego','Rego'],['make','Make'],['model','Model']] as const).map(([f,l]) => (
+                <input key={f} value={(coldForm as any)[f]} placeholder={l} onChange={e => setColdForm(c => ({ ...c, [f]: f === 'rego' ? e.target.value.toUpperCase() : e.target.value }))}
+                  className="bg-background border border-border rounded-lg px-3 h-10 text-sm text-foreground" />
+              ))}
+            </div>
+            <textarea value={coldForm.description} onChange={e => setColdForm(c => ({ ...c, description: e.target.value }))} rows={2} placeholder="Work required / notes" className="w-full bg-background border border-border rounded-lg px-3 py-2 text-sm text-foreground resize-none" />
+            <div className="flex gap-2">
+              <Button variant="outline" fullWidth className="text-foreground border-border" onClick={() => setShowColdQuote(false)}>Cancel</Button>
+              <Button fullWidth className="bg-torqued-red text-white" disabled={coldBusy || !coldForm.customerName || !coldForm.email} onClick={async () => {
+                setColdBusy(true);
+                try {
+                  const r = await fetch('/api/mechanic/cold-quote', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ mechanicId: user!.id, ...coldForm }) });
+                  const d = await r.json();
+                  if (!r.ok) { alert(d.error || 'Could not create cold quote.'); return; }
+                  setShowColdQuote(false);
+                  openQuoteEditor({ id: d.bookingId, reg: coldForm.rego, customerName: coldForm.customerName, model: `${coldForm.make} ${coldForm.model}`.trim() || coldForm.rego, services: [] });
+                } catch { alert('Could not create cold quote.'); }
+                finally { setColdBusy(false); }
+              }}>{coldBusy ? 'Creating…' : 'Build quote →'}</Button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Quote Builder */}
       <AnimatePresence>
