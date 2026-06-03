@@ -571,6 +571,50 @@ ${note ? `<p style="color:#555;font-size:13px">${note}</p>` : ''}
   }
 });
 
+// POST /api/mechanic/send-quote-pdf — email a generated quote PDF to the customer
+app.post('/api/mechanic/send-quote-pdf', async (req, res) => {
+  try {
+    const { bookingId, customerName, total, note, pdfBase64 } = req.body;
+    let { email } = req.body;
+    if (!pdfBase64) return res.status(400).json({ error: 'pdfBase64 required' });
+    const supabase = getSupabaseAdmin();
+    let custName = customerName;
+    if (supabase && bookingId) {
+      const { data: b } = await supabase.from('bookings').select('email, customer_name').eq('id', bookingId).single();
+      if (!email) email = b?.email;
+      if (!custName) custName = b?.customer_name;
+      await supabase.from('bookings').update({ quoted_price: total != null ? Number(total) : null, quote_note: note || null }).eq('id', bookingId);
+    }
+    if (!email) return res.status(400).json({ error: 'No customer email on this booking.' });
+    const transporter = getMailTransporter();
+    if (!transporter) return res.status(503).json({ error: 'Email not configured' });
+
+    const html = `<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="color-scheme" content="light dark"></head>
+<body style="margin:0;padding:0;background:#f4f4f6;font-family:-apple-system,Arial,sans-serif">
+<table width="100%" cellpadding="0" cellspacing="0" style="background:#f4f4f6;padding:32px 8px"><tr><td align="center">
+<table width="100%" cellpadding="0" cellspacing="0" style="max-width:480px;background:#ffffff;border-radius:20px;overflow:hidden;border:1px solid #e6e6ea">
+<tr><td style="background:#150402;padding:24px 32px;border-bottom:3px solid #FF1800;text-align:center"><img src="${LOGO_URL}" width="200" height="67" style="width:200px;height:67px;border:0"/></td></tr>
+<tr><td style="padding:36px 32px;color:#150402">
+<h1 style="margin:0 0 6px;font-size:22px;font-weight:900;text-transform:uppercase">Your quote is ready</h1>
+<p style="margin:0 0 16px;font-size:14px;color:#555;line-height:1.5">Hi ${custName || 'there'}, your itemised quote is attached as a PDF.</p>
+<p style="font-size:30px;font-weight:900;color:#FF1800;margin:8px 0">$${Number(total || 0).toFixed(2)}</p>
+<a href="https://torquednz.vercel.app/customer" style="display:inline-block;background:#FF1800;color:#fff;font-weight:900;text-transform:uppercase;font-size:13px;letter-spacing:1px;text-decoration:none;padding:14px 32px;border-radius:10px;margin-top:8px">Book on your own terms with Torqued</a>
+</td></tr></table></td></tr></table></body></html>`;
+
+    await transporter.sendMail({
+      from: process.env.SMTP_FROM || '"Torqued" <torquedapp.nz@gmail.com>',
+      to: email,
+      subject: `Your Torqued quote — $${Number(total || 0).toFixed(2)}`,
+      html,
+      attachments: [{ filename: `Torqued-Quote-${bookingId || 'TQ'}.pdf`, content: Buffer.from(pdfBase64, 'base64'), contentType: 'application/pdf' }],
+    });
+    res.json({ success: true });
+  } catch (err) {
+    console.error('[send-quote-pdf]', err);
+    res.status(500).json({ error: 'Could not send quote' });
+  }
+});
+
 // POST /api/stripe/refund — full or partial refund tied to a booking
 app.post('/api/stripe/refund', async (req, res) => {
   try {

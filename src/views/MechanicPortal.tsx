@@ -1,4 +1,5 @@
 import React, { useState } from 'react';
+import { jsPDF } from 'jspdf';
 import { motion, AnimatePresence } from 'motion/react';
 import { 
   LayoutDashboard, 
@@ -230,6 +231,7 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
   const [qLabourHours, setQLabourHours] = useState(1);
   const [qLabourRate, setQLabourRate] = useState(145);
   const [qDiscount, setQDiscount] = useState(0);
+  const [qOther, setQOther] = useState<{ name: string; amount: number }[]>([]);
   const [qSending, setQSending] = useState(false);
 
   const openQuoteEditor = (job: any) => {
@@ -238,10 +240,64 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
     setQLabourHours(1);
     setQLabourRate(profileData.labourRate || 145);
     setQDiscount(0);
+    setQOther([]);
   };
   const qPartsTotal = qParts.reduce((s, p) => s + (p.qty || 0) * (p.unitPrice || 0), 0);
   const qLabourTotal = (qLabourHours || 0) * (qLabourRate || 0);
-  const qTotal = Math.max(0, qPartsTotal + qLabourTotal - (qDiscount || 0));
+  const qOtherTotal = qOther.reduce((s, o) => s + (o.amount || 0), 0);
+  const qTotal = Math.max(0, qPartsTotal + qLabourTotal + qOtherTotal - (qDiscount || 0));
+
+  const fetchDataUrl = (src: string): Promise<string | null> => new Promise(resolve => {
+    fetch(src).then(r => r.blob()).then(b => { const fr = new FileReader(); fr.onloadend = () => resolve(fr.result as string); fr.onerror = () => resolve(null); fr.readAsDataURL(b); }).catch(() => resolve(null));
+  });
+
+  // Build a branded, itemised quote PDF (logo + QR) and return base64
+  const buildQuotePdf = async (job: any): Promise<string> => {
+    const doc = new jsPDF({ unit: 'mm', format: 'a4' });
+    const logo = await fetchDataUrl('/torqued-logo.png');
+    const qr = await fetchDataUrl('https://api.qrserver.com/v1/create-qr-code/?size=240x240&data=' + encodeURIComponent('https://torquednz.vercel.app/customer'));
+
+    doc.setFillColor(21, 4, 2); doc.rect(0, 0, 210, 40, 'F');
+    doc.setFillColor(255, 24, 0); doc.rect(0, 40, 210, 2, 'F');
+    if (logo) doc.addImage(logo, 'PNG', 15, 11, 52, 17.4);
+    doc.setTextColor(255, 255, 255); doc.setFont('Helvetica', 'bold'); doc.setFontSize(11);
+    doc.text('SERVICE QUOTE', 195, 20, { align: 'right' });
+    doc.setFont('Helvetica', 'normal'); doc.setFontSize(8.5); doc.setTextColor(180, 180, 180);
+    doc.text(`Ref #${(job.id || '').toUpperCase()}`, 195, 27, { align: 'right' });
+    doc.text(new Date().toLocaleDateString('en-NZ', { day: 'numeric', month: 'short', year: 'numeric' }), 195, 32, { align: 'right' });
+
+    doc.setTextColor(21, 4, 2); doc.setFontSize(9.5);
+    doc.setFont('Helvetica', 'bold'); doc.text('WORKSHOP', 15, 54);
+    doc.setFont('Helvetica', 'normal'); doc.text(profileData.name || 'Torqued Workshop', 15, 60);
+    doc.text(profileData.address || '', 15, 65);
+    doc.setFont('Helvetica', 'bold'); doc.text('CUSTOMER / VEHICLE', 115, 54);
+    doc.setFont('Helvetica', 'normal');
+    doc.text(job.customerName || job.model || 'Customer', 115, 60);
+    doc.text(`${job.reg || ''}`, 115, 65);
+
+    let y = 80;
+    doc.setFont('Helvetica', 'bold'); doc.setFontSize(10); doc.setTextColor(255, 24, 0);
+    doc.text('ITEMISED QUOTE', 15, y); doc.setDrawColor(226, 232, 240); doc.line(15, y + 2, 195, y + 2);
+    y += 9; doc.setFontSize(9); doc.setTextColor(21, 4, 2);
+    const row = (label: string, amt: string, bold = false) => { doc.setFont('Helvetica', bold ? 'bold' : 'normal'); doc.text(label, 15, y); doc.text(amt, 195, y, { align: 'right' }); y += 6.5; };
+    qParts.filter(p => p.name).forEach(p => row(`${p.name}  x${p.qty}`, `$${(p.qty * p.unitPrice).toFixed(2)}`));
+    if (qLabourTotal > 0) row(`Labour (${qLabourHours}h @ $${qLabourRate}/hr)`, `$${qLabourTotal.toFixed(2)}`);
+    qOther.filter(o => o.name).forEach(o => row(o.name, `$${o.amount.toFixed(2)}`));
+    if (qDiscount > 0) row('Discount', `-$${qDiscount.toFixed(2)}`);
+    y += 2; doc.setDrawColor(226, 232, 240); doc.line(15, y, 195, y); y += 7;
+    doc.setFontSize(12); doc.setTextColor(255, 24, 0); row('TOTAL (GST incl.)', `$${qTotal.toFixed(2)}`, true);
+
+    // QR + CTA
+    if (qr) doc.addImage(qr, 'PNG', 15, 240, 32, 32);
+    doc.setTextColor(21, 4, 2); doc.setFont('Helvetica', 'bold'); doc.setFontSize(11);
+    doc.text('Book on your own terms with Torqued', 52, 250);
+    doc.setFont('Helvetica', 'normal'); doc.setFontSize(9); doc.setTextColor(100, 100, 100);
+    doc.text('Scan the QR code to accept this quote and book instantly.', 52, 256);
+    doc.setFontSize(7.5); doc.setTextColor(150, 150, 150);
+    doc.text('Quote provided via Torqued — NZ\'s smarter way to get your car sorted. Prices include 15% GST.', 15, 285);
+
+    return doc.output('datauristring').split(',')[1];
+  };
   const [mechResendCooldown, setMechResendCooldown] = useState(0);
   const [mechResendMsg, setMechResendMsg] = useState<string | null>(null);
 
@@ -2683,8 +2739,18 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
               <div className="space-y-2">
                 <div className="flex justify-between items-center">
                   <label className="text-[10px] font-black uppercase tracking-widest text-muted">Parts</label>
-                  <button onClick={() => setQParts([...qParts, { name: '', qty: 1, unitPrice: 0 }])} className="text-[10px] font-bold text-torqued-red flex items-center gap-1"><Plus size={12}/> Add part</button>
+                  <button onClick={() => setQParts([...qParts, { name: '', qty: 1, unitPrice: 0 }])} className="text-[10px] font-bold text-torqued-red flex items-center gap-1"><Plus size={12}/> Add manual part</button>
                 </div>
+                {parts.length > 0 && (
+                  <select onChange={e => {
+                    const inv = parts.find(p => p.id === e.target.value);
+                    if (inv) setQParts([...qParts.filter(p => p.name), { name: inv.name, qty: 1, unitPrice: inv.unitPrice }]);
+                    e.target.value = '';
+                  }} className="w-full bg-background border border-border rounded-lg px-3 h-9 text-xs text-foreground">
+                    <option value="">+ Add from inventory…</option>
+                    {parts.map(p => <option key={p.id} value={p.id}>{p.name} — ${p.unitPrice} ({p.quantity} in stock)</option>)}
+                  </select>
+                )}
                 {qParts.map((p, i) => (
                   <div key={i} className="flex gap-2 items-center">
                     <input value={p.name} onChange={e => { const n=[...qParts]; n[i]={...p,name:e.target.value}; setQParts(n); }} placeholder="Part name" className="flex-1 bg-background border border-border rounded-lg px-3 h-9 text-xs text-foreground" />
@@ -2707,6 +2773,21 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                 </div>
               </div>
 
+              {/* Other costs */}
+              <div className="space-y-2">
+                <div className="flex justify-between items-center">
+                  <label className="text-[10px] font-black uppercase tracking-widest text-muted">Other costs</label>
+                  <button onClick={() => setQOther([...qOther, { name: '', amount: 0 }])} className="text-[10px] font-bold text-torqued-red flex items-center gap-1"><Plus size={12}/> Add cost</button>
+                </div>
+                {qOther.map((o, i) => (
+                  <div key={i} className="flex gap-2 items-center">
+                    <input value={o.name} onChange={e => { const n=[...qOther]; n[i]={...o,name:e.target.value}; setQOther(n); }} placeholder="e.g. Disposal fee, freight" className="flex-1 bg-background border border-border rounded-lg px-3 h-9 text-xs text-foreground" />
+                    <input type="number" value={o.amount||''} onChange={e => { const n=[...qOther]; n[i]={...o,amount:parseFloat(e.target.value)||0}; setQOther(n); }} placeholder="$" className="w-20 bg-background border border-border rounded-lg px-2 h-9 text-xs text-foreground" />
+                    <button onClick={() => setQOther(qOther.filter((_,j)=>j!==i))} className="text-muted hover:text-torqued-red"><Trash2 size={14} /></button>
+                  </div>
+                ))}
+              </div>
+
               {/* Discount */}
               <div className="space-y-1">
                 <label className="text-[10px] font-black uppercase tracking-widest text-muted">Discount ($)</label>
@@ -2717,24 +2798,30 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
               <div className="bg-background/60 border border-border rounded-2xl p-4 space-y-1.5 text-sm">
                 <div className="flex justify-between text-muted"><span>Parts</span><span>${qPartsTotal.toFixed(2)}</span></div>
                 <div className="flex justify-between text-muted"><span>Labour ({qLabourHours}h × ${qLabourRate})</span><span>${qLabourTotal.toFixed(2)}</span></div>
+                {qOtherTotal>0 && <div className="flex justify-between text-muted"><span>Other</span><span>${qOtherTotal.toFixed(2)}</span></div>}
                 {qDiscount>0 && <div className="flex justify-between text-emerald-500"><span>Discount</span><span>-${qDiscount.toFixed(2)}</span></div>}
                 <div className="flex justify-between font-black text-foreground text-lg pt-1.5 border-t border-border"><span>Total (GST incl.)</span><span className="text-torqued-red">${qTotal.toFixed(2)}</span></div>
               </div>
 
               <Button fullWidth disabled={qSending} className="bg-torqued-red text-white" onClick={async () => {
                 setQSending(true);
-                const lines = qParts.filter(p=>p.name).map(p=>`${p.name} x${p.qty} — $${(p.qty*p.unitPrice).toFixed(2)}`);
-                const note = [...lines, `Labour: ${qLabourHours}h × $${qLabourRate} = $${qLabourTotal.toFixed(2)}`, qDiscount>0?`Discount: -$${qDiscount.toFixed(2)}`:''].filter(Boolean).join('\n');
                 try {
-                  const r = await fetch('/api/mechanic/update-quote', {
+                  const pdfBase64 = await buildQuotePdf(quoteJob);
+                  const note = [
+                    ...qParts.filter(p=>p.name).map(p=>`${p.name} x${p.qty} — $${(p.qty*p.unitPrice).toFixed(2)}`),
+                    `Labour: ${qLabourHours}h × $${qLabourRate} = $${qLabourTotal.toFixed(2)}`,
+                    ...qOther.filter(o=>o.name).map(o=>`${o.name} — $${o.amount.toFixed(2)}`),
+                    qDiscount>0?`Discount: -$${qDiscount.toFixed(2)}`:''
+                  ].filter(Boolean).join('\n');
+                  const r = await fetch('/api/mechanic/send-quote-pdf', {
                     method: 'POST', headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ bookingId: quoteJob.id, quotedPrice: qTotal, note }),
+                    body: JSON.stringify({ bookingId: quoteJob.id, total: qTotal, note, customerName: quoteJob.customerName, pdfBase64 }),
                   });
-                  if (r.ok) { alert('Quote sent to the customer.'); setQuoteJob(null); }
-                  else alert('Could not send quote.');
-                } catch { alert('Could not send quote.'); }
+                  if (r.ok) { alert('Quote PDF emailed to the customer.'); setQuoteJob(null); }
+                  else { const d = await r.json(); alert(d.error || 'Could not send quote.'); }
+                } catch (e) { alert('Could not generate/send quote.'); }
                 finally { setQSending(false); }
-              }}>{qSending ? 'Sending…' : `Send Quote — $${qTotal.toFixed(2)}`}</Button>
+              }}>{qSending ? 'Generating & sending…' : `Email Quote PDF — $${qTotal.toFixed(2)}`}</Button>
             </motion.div>
           </div>
         )}
