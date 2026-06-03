@@ -239,12 +239,23 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
 
   const openQuoteEditor = (job: any) => {
     setQuoteJob(job);
-    setQParts([{ name: '', qty: 1, unitPrice: 0 }]);
-    setQLabourHours(1);
-    setQLabourRate(profileData.labourRate || 145);
-    setQDiscount(0);
-    setQOther([]);
-    setQNotes('');
+    // Re-open with the previously saved quote breakdown if there is one
+    const qi = job.quoteItems;
+    if (qi) {
+      setQParts(Array.isArray(qi.parts) && qi.parts.length ? qi.parts : [{ name: '', qty: 1, unitPrice: 0 }]);
+      setQLabourHours(qi.labourHours ?? 1);
+      setQLabourRate(qi.labourRate ?? (profileData.labourRate || 145));
+      setQDiscount(qi.discount ?? 0);
+      setQOther(Array.isArray(qi.other) ? qi.other : []);
+      setQNotes(qi.notes ?? '');
+    } else {
+      setQParts([{ name: '', qty: 1, unitPrice: 0 }]);
+      setQLabourHours(1);
+      setQLabourRate(profileData.labourRate || 145);
+      setQDiscount(0);
+      setQOther([]);
+      setQNotes('');
+    }
   };
   const qPartsTotal = qParts.reduce((s, p) => s + (p.qty || 0) * (p.unitPrice || 0), 0);
   const qLabourTotal = (qLabourHours || 0) * (qLabourRate || 0);
@@ -254,6 +265,42 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
   const fetchDataUrl = (src: string): Promise<string | null> => new Promise(resolve => {
     fetch(src).then(r => r.blob()).then(b => { const fr = new FileReader(); fr.onloadend = () => resolve(fr.result as string); fr.onerror = () => resolve(null); fr.readAsDataURL(b); }).catch(() => resolve(null));
   });
+
+  // Build & download a branded TAX INVOICE for a paid job (from its stored quote_items)
+  const exportInvoice = async (job: any) => {
+    const qi = job.quote_items || {};
+    const parts = Array.isArray(qi.parts) ? qi.parts.filter((p: any) => p.name) : [];
+    const labourTotal = (qi.labourHours || 0) * (qi.labourRate || 0);
+    const otherList = Array.isArray(qi.other) ? qi.other.filter((o: any) => o.name) : [];
+    const total = parseFloat(job.quoted_price ?? job.total_price) || 0;
+    const doc = new jsPDF({ unit: 'mm', format: 'a4' });
+    const logo = await fetchDataUrl('/torqued-logo.png');
+    doc.setFillColor(21, 4, 2); doc.rect(0, 0, 210, 40, 'F');
+    doc.setFillColor(255, 24, 0); doc.rect(0, 40, 210, 2, 'F');
+    if (logo) doc.addImage(logo, 'PNG', 15, 11, 52, 17.4);
+    doc.setTextColor(255, 255, 255); doc.setFont('Helvetica', 'bold'); doc.setFontSize(11);
+    doc.text('TAX INVOICE', 195, 20, { align: 'right' });
+    doc.setFont('Helvetica', 'normal'); doc.setFontSize(8.5); doc.setTextColor(180, 180, 180);
+    doc.text(`Invoice #${job.id}`, 195, 26, { align: 'right' });
+    doc.text(new Date(job.completed_at || job.date || Date.now()).toLocaleDateString('en-NZ'), 195, 31, { align: 'right' });
+
+    let y = 54; doc.setTextColor(21, 4, 2); doc.setFontSize(10); doc.setFont('Helvetica', 'bold');
+    doc.text(`${profileData.name || 'Workshop'}`, 15, y);
+    doc.setFont('Helvetica', 'normal'); doc.setFontSize(9); y += 6;
+    doc.text(`Billed to: ${job.customer_name || 'Customer'}${job.vehicle_rego ? `  ·  ${job.vehicle_rego}` : ''}`, 15, y);
+    y += 10; doc.setFontSize(9);
+    const row = (label: string, amt: string, bold = false) => { doc.setFont('Helvetica', bold ? 'bold' : 'normal'); doc.text(label, 15, y); doc.text(amt, 195, y, { align: 'right' }); y += 6.5; };
+    parts.forEach((p: any) => row(`${p.name}  x${p.qty}`, `$${(p.qty * p.unitPrice).toFixed(2)}`));
+    if (labourTotal > 0) row(`Labour (${qi.labourHours}h @ $${qi.labourRate}/hr)`, `$${labourTotal.toFixed(2)}`);
+    otherList.forEach((o: any) => row(o.name, `$${o.amount.toFixed(2)}`));
+    if (qi.discount > 0) row('Discount', `-$${Number(qi.discount).toFixed(2)}`);
+    y += 2; doc.setDrawColor(226, 232, 240); doc.line(15, y, 195, y); y += 7;
+    doc.setFontSize(12); doc.setTextColor(255, 24, 0); row('TOTAL PAID (GST incl.)', `$${total.toFixed(2)}`, true);
+    doc.setTextColor(16, 185, 129); doc.setFont('Helvetica', 'bold'); doc.setFontSize(10); doc.text('PAID IN FULL', 15, y + 2);
+    doc.setFontSize(7.5); doc.setTextColor(150, 150, 150);
+    doc.text('Invoice issued via Torqued — NZ\'s smarter way to get your car sorted. Prices include 15% GST.', 15, 285);
+    doc.save(`Torqued-Invoice-${job.id}.pdf`);
+  };
 
   // Build a branded, itemised quote PDF (logo + QR) and return base64
   const buildQuotePdf = async (job: any): Promise<string> => {
@@ -410,6 +457,7 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
           partsMatch: 0,
           profit: Math.round((parseFloat(row.total_price) || 0) * 0.65),
           requiredParts: [],
+          quoteItems: row.quote_items || null,
         }));
         setIncomingJobs(prev => {
           const dbIds = new Set(jobs.map((j: any) => j.id));
@@ -465,6 +513,9 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
   const [pastJobs, setPastJobs] = useState<any[]>([]);
   const [jobHistory, setJobHistory] = useState<any[]>([]);
   const [billing, setBilling] = useState<any>(null);
+  const [showColdQuote, setShowColdQuote] = useState(false);
+  const [coldBusy, setColdBusy] = useState(false);
+  const [coldForm, setColdForm] = useState({ customerName: '', email: '', phone: '', rego: '', make: '', model: '', description: '' });
   const [procurementQueue, setProcurementQueue] = useState<ProcurementItem[]>([]);
   const [diagnosticStep, setDiagnosticStep] = useState<'review' | 'inspect' | 'quote' | 'sent'>('review');
   const [diagnosticFindings, setDiagnosticFindings] = useState('');
@@ -2091,9 +2142,12 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
 
   const renderJobHistory = () => (
     <div className="space-y-4 pb-12">
-      <div>
-        <h2 className="text-2xl sm:text-3xl font-black tracking-tight text-foreground">Job History</h2>
-        <p className="text-sm text-muted">Jobs you've accepted, in progress, or completed. View details, edit the quote, or message the customer.</p>
+      <div className="flex items-start justify-between gap-3 flex-wrap">
+        <div>
+          <h2 className="text-2xl sm:text-3xl font-black tracking-tight text-foreground">Job History</h2>
+          <p className="text-sm text-muted">Jobs you've accepted, in progress, or completed. View details, edit the quote, or message the customer.</p>
+        </div>
+        <Button size="sm" className="bg-torqued-red text-white shrink-0" onClick={() => { setColdForm({ customerName: '', email: '', phone: '', rego: '', make: '', model: '', description: '' }); setShowColdQuote(true); }}>+ New cold quote</Button>
       </div>
       {pastJobs.length === 0 && (
         <Card className="p-10 text-center text-muted italic bg-card border-border">No accepted jobs yet.</Card>
@@ -2104,6 +2158,7 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
           model: j.customer_name ? `${j.vehicle_rego} — ${j.customer_name}` : j.vehicle_rego || 'Vehicle',
           services: (j.service_ids || []).map((id: string) => SERVICES.find(s => s.id === id)?.name || id),
           suggestedQuote: parseFloat(j.total_price) || 0,
+          quoteItems: j.quote_items || null,
         };
         return (
           <Card key={j.id} className="p-4 sm:p-5 bg-card border-border space-y-3">
@@ -2123,10 +2178,46 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
               <Button size="sm" variant="outline" className="text-foreground border-border hover:bg-background" onClick={() => openQuoteEditor(jobShape)}>Edit / Build Quote</Button>
               <Button size="sm" variant="outline" className="text-foreground border-border hover:bg-background" onClick={() => messageCustomer(jobShape)}>Message Customer</Button>
               <Button size="sm" variant="outline" className="text-foreground border-border hover:bg-background" onClick={() => recordMileage(jobShape, 'out')}>Check-out km</Button>
+              {j.payment_status === 'confirmed' && (
+                <Button size="sm" variant="outline" className="text-emerald-600 border-border hover:bg-background" onClick={() => exportInvoice(j)}>Export invoice</Button>
+              )}
             </div>
           </Card>
         );
       })}
+
+      {/* Cold quote: create a booking for a customer with no prior Torqued relationship */}
+      {showColdQuote && (
+        <div className="fixed inset-0 z-[120] flex items-center justify-center p-4 bg-black/70 backdrop-blur-sm">
+          <div className="w-full max-w-md bg-card border border-border rounded-3xl p-6 space-y-4 max-h-[90vh] overflow-y-auto">
+            <div>
+              <h3 className="text-xl font-black tracking-tight text-foreground">New cold quote</h3>
+              <p className="text-xs text-muted">Quote a customer who's never used Torqued. We email them the quote; if they pay online, Torqued takes its 4%.</p>
+            </div>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+              {([['customerName','Customer name *'],['email','Email *'],['phone','Phone'],['rego','Rego'],['make','Make'],['model','Model']] as const).map(([f,l]) => (
+                <input key={f} value={(coldForm as any)[f]} placeholder={l} onChange={e => setColdForm(c => ({ ...c, [f]: f === 'rego' ? e.target.value.toUpperCase() : e.target.value }))}
+                  className="bg-background border border-border rounded-lg px-3 h-10 text-sm text-foreground" />
+              ))}
+            </div>
+            <textarea value={coldForm.description} onChange={e => setColdForm(c => ({ ...c, description: e.target.value }))} rows={2} placeholder="Work required / notes" className="w-full bg-background border border-border rounded-lg px-3 py-2 text-sm text-foreground resize-none" />
+            <div className="flex gap-2">
+              <Button variant="outline" fullWidth className="text-foreground border-border" onClick={() => setShowColdQuote(false)}>Cancel</Button>
+              <Button fullWidth className="bg-torqued-red text-white" disabled={coldBusy || !coldForm.customerName || !coldForm.email} onClick={async () => {
+                setColdBusy(true);
+                try {
+                  const r = await fetch('/api/mechanic/cold-quote', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ mechanicId: user!.id, ...coldForm }) });
+                  const d = await r.json();
+                  if (!r.ok) { alert(d.error || 'Could not create cold quote.'); return; }
+                  setShowColdQuote(false);
+                  openQuoteEditor({ id: d.bookingId, reg: coldForm.rego, customerName: coldForm.customerName, model: `${coldForm.make} ${coldForm.model}`.trim() || coldForm.rego, services: [] });
+                } catch { alert('Could not create cold quote.'); }
+                finally { setColdBusy(false); }
+              }}>{coldBusy ? 'Creating…' : 'Build quote →'}</Button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 
@@ -3044,7 +3135,10 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                   ].filter(Boolean).join('\n');
                   const r = await fetch('/api/mechanic/send-quote-pdf', {
                     method: 'POST', headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ bookingId: quoteJob.id, total: qTotal, note, customerName: quoteJob.customerName, pdfBase64 }),
+                    body: JSON.stringify({
+                      bookingId: quoteJob.id, total: qTotal, note, customerName: quoteJob.customerName, pdfBase64,
+                      items: { parts: qParts, labourHours: qLabourHours, labourRate: qLabourRate, other: qOther, discount: qDiscount, notes: qNotes },
+                    }),
                   });
                   if (r.ok) { alert('Quote PDF emailed to the customer.'); setQuoteJob(null); }
                   else { const d = await r.json(); alert(d.error || 'Could not send quote.'); }

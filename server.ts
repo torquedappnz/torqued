@@ -860,6 +860,37 @@ function quoteReadyEmailHtml(custName: string, vehicleLabel: string, mechanicNam
 </td></tr></table></td></tr></table></body></html>`;
 }
 
+// POST /api/mechanic/cold-quote — mechanic creates a booking for a NON-Torqued customer (CRM).
+// Returns a bookingId; the normal quote builder + send-quote-pdf then finishes & emails it.
+app.post('/api/mechanic/cold-quote', async (req, res) => {
+  try {
+    const { mechanicId, customerName, email, phone, rego, make, model, description } = req.body;
+    if (!mechanicId || !email || !customerName) return res.status(400).json({ error: 'mechanicId, customer name and email are required' });
+    const supabase = getSupabaseAdmin();
+    if (!supabase) return res.status(500).json({ error: 'Database not configured' });
+    const plate = rego ? String(rego).toUpperCase().trim() : null;
+
+    // Track the vehicle so history follows the rego (best-effort)
+    if (plate) {
+      await supabase.from('vehicles').upsert({ rego: plate, make: make || 'Unknown', model: model || 'Vehicle' }, { onConflict: 'rego', ignoreDuplicates: true });
+      if (make || model) await supabase.from('vehicles').update({ ...(make ? { make } : {}), ...(model ? { model } : {}) }).eq('rego', plate);
+    }
+
+    const bookingId = 'CQ' + Date.now().toString(36).toUpperCase();
+    const { error } = await supabase.from('bookings').insert({
+      id: bookingId, mechanic_id: mechanicId, vehicle_rego: plate,
+      customer_name: customerName, email, customer_phone: phone || null,
+      service_ids: [], status: 'booked', payment_status: 'pending',
+      description: description || null, is_cold_quote: true, total_price: 0,
+    });
+    if (error) return res.status(500).json({ error: error.message });
+    res.json({ success: true, bookingId });
+  } catch (err) {
+    console.error('[cold-quote]', err);
+    res.status(500).json({ error: 'Could not create cold quote' });
+  }
+});
+
 // POST /api/mechanic/message-customer — mechanic sends a real email to the customer
 app.post('/api/mechanic/message-customer', async (req, res) => {
   try {
@@ -931,12 +962,16 @@ app.post('/api/mechanic/update-quote', async (req, res) => {
 // POST /api/mechanic/send-quote-pdf — email a generated quote PDF to the customer
 app.post('/api/mechanic/send-quote-pdf', async (req, res) => {
   try {
-    const { bookingId, total, note, pdfBase64 } = req.body;
+    const { bookingId, total, note, pdfBase64, items } = req.body;
     let { email } = req.body;
     if (!pdfBase64) return res.status(400).json({ error: 'pdfBase64 required' });
     const supabase = getSupabaseAdmin();
     if (supabase && bookingId) {
-      await supabase.from('bookings').update({ quoted_price: total != null ? Number(total) : null, quote_note: note || null }).eq('id', bookingId);
+      await supabase.from('bookings').update({
+        quoted_price: total != null ? Number(total) : null,
+        quote_note: note || null,
+        quote_items: items ?? null,   // structured breakdown so the editor can be re-opened
+      }).eq('id', bookingId);
     }
     const ctx = await getBookingContext(bookingId);
     if (!email) email = ctx.email;

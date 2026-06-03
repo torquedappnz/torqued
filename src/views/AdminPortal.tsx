@@ -99,6 +99,19 @@ export const AdminPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) => {
     }
   };
 
+  const cancelBooking = async (b: any) => {
+    if (!window.confirm(`Cancel booking ${b.id}${b.vehicle_rego ? ` (${b.vehicle_rego})` : ''}? This updates it system-wide.`)) return;
+    await fetch('/api/admin/update-booking', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ key, id: b.id, fields: { status: 'cancelled' } }),
+    });
+    // Reflect immediately + reload from the system so admin matches everything else
+    setSBookings(bs => bs.map(x => x.id === b.id ? { ...x, status: 'cancelled' } : x));
+    setBookings(bs => bs.map(x => x.id === b.id ? { ...x, status: 'cancelled' } : x));
+    await loadAll(key);
+    if (q) runSearch();
+  };
+
   const runSearch = async () => {
     const r = await fetch(`/api/admin/search?key=${encodeURIComponent(key)}&q=${encodeURIComponent(q)}`).then(r => r.json());
     setSBookings(r.bookings || []); setSPeople(r.people || []);
@@ -224,7 +237,10 @@ export const AdminPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) => {
                   <p className="font-bold">{b.vehicle_rego || '—'} <span className="text-white/30 font-mono text-xs">#{b.id}</span></p>
                   <p className="text-xs text-white/40">{b.customer_name || b.email || '—'} · {b.status} · {b.payment_status} · ${b.total_price || 0}{b.refunded_amount>0?` · refunded $${b.refunded_amount}`:''}</p>
                 </div>
-                <Button size="sm" variant="outline" className="text-white border-white/20 text-[10px]" onClick={() => setEdit({ kind: 'booking', row: { ...b } })}>Edit</Button>
+                <div className="flex gap-2 shrink-0">
+                  <Button size="sm" variant="outline" className="text-white border-white/20 text-[10px]" onClick={() => setEdit({ kind: 'booking', row: { ...b } })}>Edit</Button>
+                  {b.status !== 'cancelled' && <Button size="sm" variant="outline" className="text-torqued-red border-torqued-red/40 text-[10px]" onClick={() => cancelBooking(b)}>Cancel</Button>}
+                </div>
               </div>
             ))}
 
@@ -333,6 +349,7 @@ export const AdminPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) => {
                 <div className="flex items-center gap-3">
                   <span className="font-black text-torqued-red">${b.total_price || 0}</span>
                   <Button size="sm" variant="outline" className="text-white border-white/20 text-[10px]" onClick={() => setEdit({ kind: 'booking', row: { ...b } })}>Edit</Button>
+                  {b.status !== 'cancelled' && <Button size="sm" variant="outline" className="text-torqued-red border-torqued-red/40 text-[10px]" onClick={() => cancelBooking(b)}>Cancel</Button>}
                 </div>
               </div>
             ))}
