@@ -93,19 +93,30 @@ const otpStore = new Map<string, { code: string; expiresAt: number }>();
 const magicStore = new Map<string, { rego: string; expiresAt: number }>();
 
 function generateMagicEmailHtml(rego: string, link: string): string {
-  return `<!DOCTYPE html><html><head><meta charset="utf-8"></head>
-<body style="margin:0;padding:0;background:#0b0201;font-family:-apple-system,Arial,sans-serif">
-<table width="100%" cellpadding="0" cellspacing="0" style="background:#0b0201;padding:32px 8px"><tr><td align="center">
-<table width="100%" cellpadding="0" cellspacing="0" style="max-width:480px;background:#150402;border-radius:20px;overflow:hidden;border:1px solid rgba(255,24,0,.15)">
-<tr><td style="background:#050100;padding:24px 32px;border-bottom:3px solid #FF1800;text-align:center"><img src="${LOGO_URL}" width="200" height="67" style="display:inline-block;width:200px;height:67px;border:0"/></td></tr>
+  return `<!DOCTYPE html><html><head><meta charset="utf-8">
+<meta name="color-scheme" content="light dark"><meta name="supported-color-schemes" content="light dark">
+<style>
+  @media (prefers-color-scheme: dark) {
+    .bg { background:#0b0201 !important; }
+    .card { background:#150402 !important; border-color:rgba(255,24,0,.2) !important; }
+    .head { background:#050100 !important; }
+    .title { color:#ffffff !important; }
+    .muted { color:rgba(255,255,255,.6) !important; }
+    .faint { color:rgba(255,255,255,.4) !important; }
+  }
+</style></head>
+<body class="bg" style="margin:0;padding:0;background:#f4f4f6;font-family:-apple-system,Arial,sans-serif">
+<table width="100%" cellpadding="0" cellspacing="0" class="bg" style="background:#f4f4f6;padding:32px 8px"><tr><td align="center">
+<table width="100%" cellpadding="0" cellspacing="0" class="card" style="max-width:480px;background:#ffffff;border-radius:20px;overflow:hidden;border:1px solid #e6e6ea">
+<tr><td class="head" style="background:#150402;padding:24px 32px;border-bottom:3px solid #FF1800;text-align:center"><img src="${LOGO_URL}" width="200" height="67" style="display:inline-block;width:200px;height:67px;border:0"/></td></tr>
 <tr><td style="padding:40px 32px;text-align:center">
-<span style="display:inline-block;background:rgba(255,24,0,.12);color:#FF1800;font-size:9.5px;font-weight:900;letter-spacing:2px;text-transform:uppercase;padding:6px 14px;border-radius:6px">VEHICLE VERIFICATION</span>
-<h1 style="margin:20px 0 8px;font-size:20px;font-weight:900;color:#fff;text-transform:uppercase">Confirm it's you</h1>
-<p style="margin:0 0 28px;font-size:13px;color:rgba(255,255,255,.55);line-height:1.5">Tap below to securely access the history for <strong style="color:#fff">${rego}</strong>.</p>
+<span style="display:inline-block;background:rgba(255,24,0,.1);color:#FF1800;font-size:9.5px;font-weight:900;letter-spacing:2px;text-transform:uppercase;padding:6px 14px;border-radius:6px">VEHICLE VERIFICATION</span>
+<h1 class="title" style="margin:20px 0 8px;font-size:20px;font-weight:900;color:#150402;text-transform:uppercase">Confirm it's you</h1>
+<p class="muted" style="margin:0 0 28px;font-size:13px;color:#555;line-height:1.5">Tap below to securely access the history for <strong style="color:#FF1800">${rego}</strong>.</p>
 <a href="${link}" style="display:inline-block;background:#FF1800;color:#fff;font-size:13px;font-weight:900;text-transform:uppercase;letter-spacing:1.5px;text-decoration:none;padding:15px 36px;border-radius:12px">Verify &amp; Continue</a>
-<p style="margin:28px 0 0;font-size:11px;color:rgba(255,255,255,.35);line-height:1.5">Link expires in 15 minutes. Or paste:<br/><a href="${link}" style="color:rgba(255,255,255,.5);word-break:break-all">${link}</a></p>
+<p class="faint" style="margin:28px 0 0;font-size:11px;color:#999;line-height:1.5">Link expires in 15 minutes. Or paste:<br/><a href="${link}" style="color:#999;word-break:break-all">${link}</a></p>
 </td></tr>
-<tr><td style="background:#050100;padding:18px 32px;text-align:center"><p style="margin:0;font-size:10px;color:rgba(255,255,255,.3)">Didn't request this? You can ignore this email.</p></td></tr>
+<tr><td class="head" style="background:#150402;padding:18px 32px;text-align:center"><p style="margin:0;font-size:10px;color:rgba(255,255,255,.4)">Didn't request this? You can ignore this email.</p></td></tr>
 </table></td></tr></table></body></html>`;
 }
 
