@@ -397,6 +397,20 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
   // The customer's garage — all vehicles on their account
   const [garageVehicles, setGarageVehicles] = useState<Vehicle[]>([]);
   const [customerOwnerId, setCustomerOwnerId] = useState<string | null>(null);
+  // ── My Garage session gate: verified via passkey or magic link, valid 48h, this browser only ──
+  const SESSION_KEY = 'torqued_customer_session';
+  const SESSION_TTL = 48 * 60 * 60 * 1000;
+  const [customerVerifiedAt, setCustomerVerifiedAt] = useState<number | null>(null);
+  const garageUnlocked = customerVerifiedAt != null && (Date.now() - customerVerifiedAt) < SESSION_TTL;
+  const persistCustomerSession = (s: { ownerId: string | null; email: string; rego: string; vehicles: any[] }) => {
+    const at = Date.now();
+    setCustomerVerifiedAt(at);
+    try { localStorage.setItem(SESSION_KEY, JSON.stringify({ ...s, verifiedAt: at })); } catch {}
+  };
+  const clearCustomerSession = () => {
+    setCustomerVerifiedAt(null); setCustomerOwnerId(null); setCustomerEmail(''); setGarageVehicles([]);
+    try { localStorage.removeItem(SESSION_KEY); } catch {}
+  };
   // Real mechanics from the DB (so bookings route to a real mechanic account)
   const [realMechanics, setRealMechanics] = useState<Mechanic[]>([]);
 
@@ -468,6 +482,25 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
   const [magicFallbackLink, setMagicFallbackLink] = useState<string | null>(null);
   const [magicVerifying, setMagicVerifying] = useState(false);
 
+  // Restore a recent (≤48h) verified session on this browser
+  useEffect(() => {
+    try {
+      const raw = localStorage.getItem(SESSION_KEY);
+      if (!raw) return;
+      const s = JSON.parse(raw);
+      if (s.verifiedAt && (Date.now() - s.verifiedAt) < SESSION_TTL) {
+        setCustomerVerifiedAt(s.verifiedAt);
+        if (s.ownerId) setCustomerOwnerId(s.ownerId);
+        if (s.email) setCustomerEmail(s.email);
+        if (Array.isArray(s.vehicles) && s.vehicles.length) {
+          setGarageVehicles(s.vehicles.map((r: any) => ({ id: r.rego, rego: r.rego, make: r.make, model: r.model, year: r.year, variant: r.variant ?? undefined, mileage: r.mileage ?? 0, thumbnail: r.thumbnail ?? undefined })));
+        }
+      } else {
+        localStorage.removeItem(SESSION_KEY);
+      }
+    } catch {}
+  }, []);
+
   // Verify a magic link on load (?vt=token)
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
@@ -485,6 +518,8 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
           setGarageVehicles(d.vehicles.map((r: any) => ({ id: r.rego, rego: r.rego, make: r.make, model: r.model, year: r.year, variant: r.variant ?? undefined, mileage: r.mileage ?? 0, thumbnail: r.thumbnail ?? undefined })));
         }
         setRego(d.rego);
+        persistCustomerSession({ ownerId: d.ownerId ?? null, email: d.email ?? '', rego: d.rego, vehicles: d.vehicles ?? [] });
+        setView('dashboard');
         await loadVehicleByRego(d.rego);
       })
       .catch(() => setPlateMatchError('Verification failed. Please try again.'))
@@ -492,6 +527,7 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
   }, []);
   // Verify a returning customer with a passkey (Face/Touch ID). Magic link remains the fallback.
   const [passkeyError, setPasskeyError] = useState<string | null>(null);
+  const [passkeyCardState, setPasskeyCardState] = useState<'idle' | 'adding' | 'added' | 'error'>('idle');
   const verifyWithPasskey = async (plate: string) => {
     setPasskeyError(null);
     setMagicVerifying(true);
@@ -503,8 +539,10 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
         setGarageVehicles(r.vehicles.map((v: any) => ({ id: v.rego, rego: v.rego, make: v.make, model: v.model, year: v.year, variant: v.variant ?? undefined, mileage: v.mileage ?? 0, thumbnail: v.thumbnail ?? undefined })));
       }
       setRego((r.rego || plate));
-      await loadVehicleByRego(r.rego || plate);
+      persistCustomerSession({ ownerId: r.ownerId ?? null, email: r.email ?? '', rego: r.rego || plate, vehicles: r.vehicles ?? [] });
       setMagicSentTo(null);
+      setView('dashboard');
+      await loadVehicleByRego(r.rego || plate);
     } catch (e: any) {
       setPasskeyError(e?.message || 'Passkey sign-in failed — use the email link instead.');
     } finally {
@@ -515,9 +553,14 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
   // First booking → offer to create a passkey for faster future logins
   const [pkPrompted, setPkPrompted] = useState(false);
   useEffect(() => {
-    if (step !== 7 || pkPrompted || !passkeysSupported()) return;
+    if (step !== 7) return;
     const plate = (rego || vehicle?.rego || '').toUpperCase();
     if (!plate) return;
+    // Booking + payment proves ownership → grant a 48h garage session
+    if (!garageUnlocked) {
+      persistCustomerSession({ ownerId: customerOwnerId, email: customerEmail, rego: plate, vehicles: garageVehicles });
+    }
+    if (pkPrompted || !passkeysSupported()) return;
     setPkPrompted(true);
     const t = setTimeout(async () => {
       try {
@@ -2869,6 +2912,33 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
   const [isManagingGarage, setIsManagingGarage] = useState(false);
 
   const renderDashboard = () => {
+    // Gate: My Garage requires a verification (passkey or magic link) within the last 48h, on this browser
+    if (!garageUnlocked) {
+      return (
+        <div className="max-w-md mx-auto py-10">
+          <Card className="p-8 space-y-5 bg-card border-border text-center shadow-md">
+            <div className="w-14 h-14 mx-auto rounded-2xl bg-torqued-red/10 border border-torqued-red/20 flex items-center justify-center text-torqued-red"><Lock size={22} /></div>
+            <div className="space-y-1.5">
+              <h3 className="text-2xl font-black tracking-tight">Verify it's you</h3>
+              <p className="text-sm text-muted">For your security, access to My Garage expires after 48 hours and on new devices. Enter your plate to verify with a passkey or a secure email link.</p>
+            </div>
+            <div className="space-y-3">
+              <Input value={rego} onChange={e => setRego(e.target.value.toUpperCase())} placeholder="Number plate (e.g. RAH190)" className="text-center text-lg font-black tracking-widest" />
+              {plateMatchError && <p className="text-xs text-torqued-red font-bold">{plateMatchError}</p>}
+              {passkeysSupported() && (
+                <Button fullWidth className="bg-torqued-red text-white" disabled={!rego || magicVerifying} onClick={() => verifyWithPasskey(rego.toUpperCase().trim())}>
+                  🔑 Verify with Face / Touch ID
+                </Button>
+              )}
+              {passkeyError && <p className="text-xs text-torqued-red font-bold">{passkeyError}</p>}
+              <Button fullWidth variant="outline" disabled={!rego || isSearchingRego} onClick={handleRegoLookup}>
+                Email me a secure link instead
+              </Button>
+            </div>
+          </Card>
+        </div>
+      );
+    }
     return (
       <div className="space-y-12">
         <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-6">
@@ -2892,6 +2962,23 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
             {(userName || 'S').charAt(0).toUpperCase()}
           </div>
         </div>
+
+        {/* Passkey setup for existing customers who don't yet have one */}
+        {passkeysSupported() && passkeyCardState !== 'added' && (
+          <Card className="p-4 bg-torqued-red/5 border-torqued-red/20 flex items-center justify-between gap-4">
+            <div>
+              <p className="text-sm font-bold flex items-center gap-1.5">🔑 Faster, safer sign-in</p>
+              <p className="text-xs text-muted mt-0.5">{passkeyCardState === 'error' ? 'Could not add a passkey — try again.' : 'Add a passkey to open My Garage with Face / Touch ID next time.'}</p>
+            </div>
+            <Button size="sm" className="bg-torqued-red text-white shrink-0" disabled={passkeyCardState === 'adding'} onClick={async () => {
+              const plate = (rego || vehicle?.rego || garageVehicles[0]?.rego || '').toUpperCase();
+              if (!plate) return;
+              setPasskeyCardState('adding');
+              try { await registerPasskey('customer', plate); setPasskeyCardState('added'); }
+              catch { setPasskeyCardState('error'); }
+            }}>{passkeyCardState === 'adding' ? 'Adding…' : 'Add passkey'}</Button>
+          </Card>
+        )}
 
         {/* Manage Garage Modal */}
         <AnimatePresence>

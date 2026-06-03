@@ -257,6 +257,25 @@ app.get('/api/mechanics', async (_req, res) => {
   }
 });
 
+// POST /api/mechanic/update-job-status — persist a job status change (service role)
+app.post('/api/mechanic/update-job-status', async (req, res) => {
+  try {
+    const { bookingId, status } = req.body;
+    const allowed = ['booked', 'in_progress', 'completed', 'declined', 'cancelled', 'pending'];
+    if (!bookingId || !allowed.includes(status)) return res.status(400).json({ error: 'bookingId and a valid status are required' });
+    const supabase = getSupabaseAdmin();
+    if (!supabase) return res.status(500).json({ error: 'Database not configured' });
+    const update: Record<string, any> = { status };
+    if (status === 'completed') { update.completed_at = new Date().toISOString(); }
+    const { error } = await supabase.from('bookings').update(update).eq('id', bookingId);
+    if (error) return res.status(500).json({ error: error.message });
+    res.json({ success: true });
+  } catch (err) {
+    console.error('[mechanic/update-job-status]', err);
+    res.status(500).json({ error: 'Could not update job' });
+  }
+});
+
 // GET /api/mechanic/jobs?mechanicId= — bookings for a mechanic (service role, bypasses RLS)
 app.get('/api/mechanic/jobs', async (req, res) => {
   try {

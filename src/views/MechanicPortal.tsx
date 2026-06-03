@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useMemo } from 'react';
 import { jsPDF } from 'jspdf';
 import { motion, AnimatePresence } from 'motion/react';
 import { 
@@ -374,8 +374,15 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
     fetch(`/api/mechanic/jobs?mechanicId=${user.id}`)
       .then(r => r.json())
       .then(({ jobs: rows }) => {
-        const data = (rows || []).filter((r: any) => !['completed', 'cancelled', 'declined'].includes(r.status));
-        if (!data || data.length === 0) return;
+        const all = rows || [];
+        // Real revenue this week = paid jobs in the last 7 days (net of 4% Torqued commission)
+        const weekAgo = Date.now() - 7 * 864e5;
+        const paidThisWeek = all.filter((r: any) => r.payment_status === 'confirmed' && new Date(r.completed_at || r.created_at).getTime() >= weekAgo);
+        setWeekRevenue(Math.round(paidThisWeek.reduce((s: number, r: any) => s + (parseFloat(r.total_price) || 0) * 0.96, 0)));
+        setPastJobs(all.filter((r: any) => ['completed', 'in_progress'].includes(r.status)));
+        // Incoming queue = jobs still needing the mechanic's action
+        const data = all.filter((r: any) => ['booked', 'pending_payment', 'pending'].includes(r.status));
+        if (!data || data.length === 0) { setIncomingJobs([]); return; }
         const jobs = data.map((row: any) => ({
           id: row.id,
           reg: row.vehicle_rego || '',
@@ -436,9 +443,11 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
   const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
   const [selectedJobId, setSelectedJobId] = useState<string | null>(null);
   const [calendarView, setCalendarView] = useState<'day' | 'week' | 'month'>('week');
-  const [parts, setParts] = useState<InventoryPart[]>(INITIAL_PARTS);
-  const [appointments, setAppointments] = useState(INITIAL_APPOINTMENTS);
-  const [incomingJobs, setIncomingJobs] = useState(INITIAL_JOB_REQUESTS);
+  const [parts, setParts] = useState<InventoryPart[]>([]);
+  const [appointments, setAppointments] = useState<typeof INITIAL_APPOINTMENTS>([]);
+  const [incomingJobs, setIncomingJobs] = useState<typeof INITIAL_JOB_REQUESTS>([]);
+  const [weekRevenue, setWeekRevenue] = useState(0);
+  const [pastJobs, setPastJobs] = useState<any[]>([]);
   const [procurementQueue, setProcurementQueue] = useState<ProcurementItem[]>([]);
   const [diagnosticStep, setDiagnosticStep] = useState<'review' | 'inspect' | 'quote' | 'sent'>('review');
   const [diagnosticFindings, setDiagnosticFindings] = useState('');
@@ -470,10 +479,10 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
     const job = incomingJobs.find(j => j.id === jobId);
     if (!job) return;
 
-    // Remove from incoming
+    // Remove from incoming + persist accepted status (service role — survives refresh)
     setIncomingJobs(incomingJobs.filter(j => j.id !== jobId));
-    supabase.from('bookings').update({ status: 'in_progress' }).eq('id', jobId)
-      .then(({ error }) => { if (error) console.error('Failed to accept job:', error.message); });
+    fetch('/api/mechanic/update-job-status', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ bookingId: jobId, status: 'in_progress' }) })
+      .catch(e => console.error('Failed to accept job:', e));
 
     // Auto-order parts if they are not in stock
     if (job.partsMatch < 100 && job.requiredParts) {
@@ -543,6 +552,16 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
     { id: 'profile', label: 'Profile', icon: User },
   ];
 
+  const weeklyRevenueData = useMemo(() => {
+    const days = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
+    const map: Record<string, number> = {}; days.forEach(d => map[d] = 0);
+    pastJobs.filter(j => j.payment_status === 'confirmed').forEach(j => {
+      const idx = (new Date(j.completed_at || j.created_at).getDay() + 6) % 7;
+      map[days[idx]] += parseFloat(j.total_price) || 0;
+    });
+    return days.map(d => ({ day: d, amount: Math.round(map[d]) }));
+  }, [pastJobs]);
+
   const renderDashboard = () => (
     <div className="space-y-6">
       <div className="grid grid-cols-2 md:grid-cols-4 gap-3 sm:gap-4">
@@ -553,9 +572,9 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
           </div>
         </Card>
         <Card className="p-3 sm:p-4 space-y-1 bg-card border-border">
-          <p className="text-[10px] font-bold uppercase text-muted">Revenue</p>
+          <p className="text-[10px] font-bold uppercase text-muted">Revenue (7d, net)</p>
           <div className="flex items-end gap-2">
-            <h3 className="text-xl sm:text-3xl text-foreground">{formatCurrency(3420)}</h3>
+            <h3 className="text-xl sm:text-3xl text-foreground">{formatCurrency(weekRevenue)}</h3>
           </div>
         </Card>
         <Card className="p-3 sm:p-4 space-y-1 bg-card border-border">
@@ -648,7 +667,7 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
           </div>
           <div className="h-[300px] w-full">
             <ResponsiveContainer width="100%" height="100%">
-              <BarChart data={REVENUE_DATA}>
+              <BarChart data={weeklyRevenueData}>
                 <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="currentColor" className="opacity-10" />
                 <XAxis 
                   dataKey="day" 
@@ -1075,6 +1094,7 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                         body: JSON.stringify({ bookingId: job.id }),
                       });
                       if (r.ok) {
+                        await fetch('/api/mechanic/update-job-status', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ bookingId: job.id, status: 'completed' }) });
                         setIncomingJobs(incomingJobs.filter(j => j.id !== job.id));
                         alert('Job marked complete. A review request has been emailed to the customer.');
                       }
@@ -1089,12 +1109,16 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                       body: JSON.stringify({ bookingId: job.id, amount: amt.trim() ? parseFloat(amt) : undefined }),
                     });
                     const d = await r.json();
-                    alert(d.success ? `Refunded $${d.refunded}.` : (d.error || 'Refund failed.'));
+                    if (d.success) {
+                      await fetch('/api/mechanic/update-job-status', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ bookingId: job.id, status: 'cancelled' }) });
+                      setIncomingJobs(incomingJobs.filter(j => j.id !== job.id));
+                    }
+                    alert(d.success ? `Refunded $${d.refunded}. Booking cancelled.` : (d.error || 'Refund failed.'));
                   }}>Refund</Button>
-                  <Button variant="outline" className="text-muted border-border hover:bg-card" onClick={() => {
+                  <Button variant="outline" className="text-muted border-border hover:bg-card" onClick={async () => {
+                    if (!confirm('Decline this job? It will be removed from your queue.')) return;
+                    await fetch('/api/mechanic/update-job-status', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ bookingId: job.id, status: 'declined' }) });
                     setIncomingJobs(incomingJobs.filter(j => j.id !== job.id));
-                    supabase.from('bookings').update({ status: 'pending' }).eq('id', job.id)
-                      .then(({ error }) => { if (error) console.error('Failed to decline job:', error.message); });
                   }}>Decline</Button>
                 </>
               )}
