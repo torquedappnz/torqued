@@ -552,6 +552,30 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
       .catch(() => setPlateMatchError('Verification failed. Please try again.'))
       .finally(() => setMagicVerifying(false));
   }, []);
+  // QR deep-link → review-and-pay with the mechanic's quote pre-loaded
+  const [quoteReview, setQuoteReview] = useState<any | null>(null);
+  const [quotePaying, setQuotePaying] = useState(false);
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const qid = params.get('quote');
+    if (!qid) return;
+    window.history.replaceState({}, document.title, window.location.pathname);
+    fetch(`/api/quote/${encodeURIComponent(qid)}`).then(r => r.json()).then(d => { if (d && d.id) setQuoteReview(d); }).catch(() => {});
+  }, []);
+  const payQuote = async () => {
+    if (!quoteReview) return;
+    setQuotePaying(true);
+    try {
+      const res = await fetch('/api/stripe/create-payment', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ amount: quoteReview.total, bookingId: quoteReview.id, customerEmail: customerEmail || undefined, description: `Torqued quote ${quoteReview.id}` }),
+      });
+      const session = await res.json();
+      if (session?.url) { window.location.href = session.url; return; }
+      setQuotePaying(false);
+    } catch { setQuotePaying(false); }
+  };
+
   // Verify a returning customer with a passkey (Face/Touch ID). Magic link remains the fallback.
   const [passkeyError, setPasskeyError] = useState<string | null>(null);
   const [passkeyCardState, setPasskeyCardState] = useState<'idle' | 'adding' | 'added' | 'error'>('idle');
@@ -3722,6 +3746,48 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                   {batchSaving ? 'Saving…' : `Save ${parsedBatch.length} record${parsedBatch.length === 1 ? '' : 's'}`}
                 </Button>
               </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
+      {/* Review-and-pay modal (opened from a quote QR / link) */}
+      <AnimatePresence>
+        {quoteReview && (
+          <div className="fixed inset-0 z-[130] flex items-center justify-center p-4 bg-black/70 backdrop-blur-sm">
+            <motion.div
+              initial={{ opacity: 0, scale: 0.96, y: 20 }} animate={{ opacity: 1, scale: 1, y: 0 }} exit={{ opacity: 0, scale: 0.96, y: 20 }}
+              className="w-full max-w-md bg-card border border-border rounded-3xl p-7 space-y-5 shadow-2xl"
+            >
+              <div className="text-center space-y-1">
+                <div className="torqued-badge text-[10px] mx-auto">YOUR QUOTE IS READY</div>
+                <h3 className="text-2xl font-black tracking-tight">{quoteReview.vehicleLabel || quoteReview.rego}</h3>
+                {quoteReview.mechanicName && <p className="text-sm text-muted">Prepared by {quoteReview.mechanicName}</p>}
+              </div>
+
+              <div className="rounded-2xl border border-border bg-background p-4 space-y-2">
+                {(quoteReview.serviceIds || []).map((id: string) => (
+                  <div key={id} className="flex justify-between text-sm">
+                    <span className="font-medium">{SERVICES.find(s => s.id === id)?.name || id}</span>
+                    <span className="text-muted text-xs uppercase font-bold tracking-widest">Included</span>
+                  </div>
+                ))}
+                {quoteReview.note && <p className="text-xs text-muted border-t border-border pt-2 mt-1">{quoteReview.note}</p>}
+                <div className="flex justify-between items-end border-t border-border pt-3 mt-1">
+                  <span className="text-xs font-black uppercase tracking-widest text-muted">Total (GST incl.)</span>
+                  <span className="text-2xl font-black text-torqued-red">${Number(quoteReview.total).toFixed(2)}</span>
+                </div>
+              </div>
+
+              {quoteReview.paymentStatus === 'confirmed' ? (
+                <div className="text-center text-emerald-500 font-bold text-sm">✓ This quote has already been paid.</div>
+              ) : (
+                <Button fullWidth size="lg" className="bg-torqued-red text-white" disabled={quotePaying} onClick={payQuote}>
+                  {quotePaying ? 'Opening secure checkout…' : 'Review & pay securely'}
+                </Button>
+              )}
+              <p className="text-[11px] text-muted text-center">Flexible payment options (incl. Afterpay, Klarna) at checkout.</p>
+              <button onClick={() => setQuoteReview(null)} className="w-full text-xs text-muted hover:text-foreground">Close</button>
             </motion.div>
           </div>
         )}

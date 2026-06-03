@@ -233,6 +233,7 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
   const [qLabourRate, setQLabourRate] = useState(145);
   const [qDiscount, setQDiscount] = useState(0);
   const [qOther, setQOther] = useState<{ name: string; amount: number }[]>([]);
+  const [qNotes, setQNotes] = useState('');
   const [qSending, setQSending] = useState(false);
 
   const openQuoteEditor = (job: any) => {
@@ -256,7 +257,9 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
   const buildQuotePdf = async (job: any): Promise<string> => {
     const doc = new jsPDF({ unit: 'mm', format: 'a4' });
     const logo = await fetchDataUrl('/torqued-logo.png');
-    const qr = await fetchDataUrl('https://api.qrserver.com/v1/create-qr-code/?size=240x240&data=' + encodeURIComponent('https://torquednz.vercel.app/customer'));
+    // QR deep-links straight to this quote's review-and-pay screen (quote pre-loaded)
+    const quoteUrl = `https://torquednz.vercel.app/customer?quote=${encodeURIComponent(job.id)}`;
+    const qr = await fetchDataUrl('https://api.qrserver.com/v1/create-qr-code/?size=240x240&data=' + encodeURIComponent(quoteUrl));
 
     doc.setFillColor(21, 4, 2); doc.rect(0, 0, 210, 40, 'F');
     doc.setFillColor(255, 24, 0); doc.rect(0, 40, 210, 2, 'F');
@@ -287,6 +290,13 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
     if (qDiscount > 0) row('Discount', `-$${qDiscount.toFixed(2)}`);
     y += 2; doc.setDrawColor(226, 232, 240); doc.line(15, y, 195, y); y += 7;
     doc.setFontSize(12); doc.setTextColor(255, 24, 0); row('TOTAL (GST incl.)', `$${qTotal.toFixed(2)}`, true);
+
+    // Notes
+    if (qNotes.trim()) {
+      y += 4; doc.setFont('Helvetica', 'bold'); doc.setFontSize(9); doc.setTextColor(21, 4, 2); doc.text('Notes', 15, y);
+      y += 5; doc.setFont('Helvetica', 'normal'); doc.setFontSize(8.5); doc.setTextColor(80, 80, 80);
+      doc.splitTextToSize(qNotes.trim(), 180).forEach((line: string) => { doc.text(line, 15, y); y += 4.5; });
+    }
 
     // QR + CTA
     if (qr) doc.addImage(qr, 'PNG', 15, 240, 32, 32);
@@ -2861,6 +2871,12 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                 <input type="number" value={qDiscount||''} onChange={e=>setQDiscount(parseFloat(e.target.value)||0)} className="w-full bg-background border border-border rounded-lg px-3 h-10 text-sm text-foreground" />
               </div>
 
+              {/* Notes (free text for the customer) */}
+              <div className="space-y-1">
+                <label className="text-[10px] font-black uppercase tracking-widest text-muted">Notes for the customer</label>
+                <textarea value={qNotes} onChange={e=>setQNotes(e.target.value)} rows={3} placeholder="E.g. Found worn front pads; recommend replacing rear discs within 6 months." className="w-full bg-background border border-border rounded-lg px-3 py-2 text-sm text-foreground resize-none" />
+              </div>
+
               {/* Totals */}
               <div className="bg-background/60 border border-border rounded-2xl p-4 space-y-1.5 text-sm">
                 <div className="flex justify-between text-muted"><span>Parts</span><span>${qPartsTotal.toFixed(2)}</span></div>
@@ -2878,7 +2894,8 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                     ...qParts.filter(p=>p.name).map(p=>`${p.name} x${p.qty} — $${(p.qty*p.unitPrice).toFixed(2)}`),
                     `Labour: ${qLabourHours}h × $${qLabourRate} = $${qLabourTotal.toFixed(2)}`,
                     ...qOther.filter(o=>o.name).map(o=>`${o.name} — $${o.amount.toFixed(2)}`),
-                    qDiscount>0?`Discount: -$${qDiscount.toFixed(2)}`:''
+                    qDiscount>0?`Discount: -$${qDiscount.toFixed(2)}`:'',
+                    qNotes.trim()?`\nNotes: ${qNotes.trim()}`:''
                   ].filter(Boolean).join('\n');
                   const r = await fetch('/api/mechanic/send-quote-pdf', {
                     method: 'POST', headers: { 'Content-Type': 'application/json' },

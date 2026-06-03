@@ -23,6 +23,7 @@ create table if not exists public.vehicle_specs (
 );
 
 alter table public.vehicle_specs enable row level security;
+drop policy if exists "Vehicle specs publicly readable" on public.vehicle_specs;
 create policy "Vehicle specs publicly readable"
   on public.vehicle_specs for select using (true);
 

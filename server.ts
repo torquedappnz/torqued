@@ -276,6 +276,27 @@ app.post('/api/mechanic/update-job-status', async (req, res) => {
   }
 });
 
+// GET /api/quote/:bookingId — full quote detail for the review-and-pay screen (QR deep-link target)
+app.get('/api/quote/:bookingId', async (req, res) => {
+  try {
+    const supabase = getSupabaseAdmin();
+    if (!supabase) return res.status(500).json({ error: 'Database not configured' });
+    const { data: b } = await supabase.from('bookings').select('*').eq('id', req.params.bookingId).single();
+    if (!b) return res.status(404).json({ error: 'Quote not found' });
+    const ctx = await getBookingContext(b.id);
+    res.json({
+      id: b.id, rego: b.vehicle_rego, vehicleLabel: ctx.vehicleLabel, customerName: ctx.custName,
+      mechanicName: ctx.mechanicName, serviceIds: b.service_ids || [],
+      quotedPrice: b.quoted_price != null ? Number(b.quoted_price) : null,
+      total: b.quoted_price != null ? Number(b.quoted_price) : (Number(b.total_price) || 0),
+      note: b.quote_note || '', status: b.status, paymentStatus: b.payment_status, date: b.date,
+    });
+  } catch (err) {
+    console.error('[quote]', err);
+    res.status(500).json({ error: 'Could not load quote' });
+  }
+});
+
 // GET /api/customer/bookings — all bookings for a customer (by ownerId and/or rego list). Single source of truth.
 app.get('/api/customer/bookings', async (req, res) => {
   try {
@@ -744,6 +765,44 @@ app.post('/api/mechanic/email-trial', async (req, res) => {
   }
 });
 
+// Resolve customer name, car label ("VW Golf GTE (RAH190)") and mechanic name for a booking
+async function getBookingContext(bookingId: string) {
+  const ctx = { custName: '', email: '', rego: '', vehicleLabel: '', mechanicName: '' };
+  const supabase = getSupabaseAdmin();
+  if (!supabase || !bookingId) return ctx;
+  const { data: b } = await supabase.from('bookings').select('email, customer_name, vehicle_rego, mechanic_id').eq('id', bookingId).single();
+  if (!b) return ctx;
+  ctx.custName = b.customer_name || ''; ctx.email = b.email || ''; ctx.rego = b.vehicle_rego || '';
+  if (b.vehicle_rego) {
+    const { data: v } = await supabase.from('vehicles').select('make, model').eq('rego', b.vehicle_rego).single();
+    ctx.vehicleLabel = v?.make ? `${v.make} ${v.model} (${b.vehicle_rego})` : `(${b.vehicle_rego})`;
+  }
+  if (b.mechanic_id) {
+    const { data: m } = await supabase.from('profiles').select('name').eq('id', b.mechanic_id).single();
+    ctx.mechanicName = m?.name || '';
+  }
+  return ctx;
+}
+
+// "Your quote is ready" email — exact approved copy, NO dollar amount (amounts live online + in the PDF only)
+function quoteReadyEmailHtml(custName: string, vehicleLabel: string, mechanicName: string, bookingId: string): string {
+  const car = vehicleLabel || 'your vehicle';
+  const mech = mechanicName ? ` from ${mechanicName}` : '';
+  const link = `https://torquednz.vercel.app/customer?quote=${encodeURIComponent(bookingId)}`;
+  return `<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="color-scheme" content="light"></head>
+<body style="margin:0;padding:0;background:#f4f4f6;font-family:-apple-system,Arial,sans-serif">
+<table width="100%" cellpadding="0" cellspacing="0" style="background:#f4f4f6;padding:32px 8px"><tr><td align="center">
+<table width="100%" cellpadding="0" cellspacing="0" style="max-width:480px;background:#ffffff;border-radius:20px;overflow:hidden;border:1px solid #e6e6ea">
+<tr><td style="background:#150402;padding:24px 32px;border-bottom:3px solid #FF1800;text-align:center"><img src="${LOGO_URL}" width="200" height="67" style="width:200px;height:67px;border:0"/></td></tr>
+<tr><td style="padding:36px 32px;color:#150402;font-size:15px;line-height:1.6">
+<p style="margin:0 0 16px">Dear ${custName || 'Customer'},</p>
+<p style="margin:0 0 16px">Thanks for booking with Torqued. Your quote for your ${car}${mech} is ready.</p>
+<p style="margin:0 0 24px">We have a wide range of flexible payment options to suit your budget.</p>
+<a href="${link}" style="display:inline-block;background:#FF1800;color:#fff;font-weight:900;text-transform:uppercase;font-size:13px;letter-spacing:1px;text-decoration:none;padding:14px 32px;border-radius:10px">View your quote</a>
+<p style="margin:28px 0 0;color:#555">Kind regards,<br/>the Torqued team</p>
+</td></tr></table></td></tr></table></body></html>`;
+}
+
 // POST /api/mechanic/update-quote — mechanic edits a booking's quote (price + note)
 app.post('/api/mechanic/update-quote', async (req, res) => {
   try {
@@ -757,20 +816,16 @@ app.post('/api/mechanic/update-quote', async (req, res) => {
       quote_note: note || null,
     }).eq('id', bookingId);
 
-    // Email the customer their updated quote
-    const { data: b } = await supabase.from('bookings').select('email, vehicle_rego').eq('id', bookingId).single();
+    // Email the customer their quote — by name + car, NO amount in the email
+    const ctx = await getBookingContext(bookingId);
     const transporter = getMailTransporter();
-    if (b?.email && transporter && quotedPrice != null) {
-      const html = `<div style="font-family:-apple-system,Arial,sans-serif;max-width:480px;margin:auto;background:#fff;border-radius:16px;overflow:hidden;border:1px solid #eee">
-<div style="background:#150402;padding:24px;text-align:center"><img src="${LOGO_URL}" width="180" style="height:auto"/></div>
-<div style="padding:32px;color:#150402">
-<h2 style="margin:0 0 8px">Your updated quote</h2>
-<p style="color:#555;font-size:14px">Your workshop has prepared a quote for booking <strong>#${bookingId}</strong>${b.vehicle_rego ? ` (${b.vehicle_rego})` : ''}.</p>
-<p style="font-size:30px;font-weight:900;color:#FF1800;margin:16px 0">$${Number(quotedPrice).toFixed(2)}</p>
-${note ? `<p style="color:#555;font-size:13px">${note}</p>` : ''}
-<a href="https://torquednz.vercel.app/customer" style="display:inline-block;background:#FF1800;color:#fff;font-weight:900;text-transform:uppercase;font-size:13px;letter-spacing:1px;text-decoration:none;padding:14px 32px;border-radius:10px;margin-top:12px">View & Book</a>
-</div></div>`;
-      await transporter.sendMail({ from: process.env.SMTP_FROM || '"Torqued" <torquedapp.nz@gmail.com>', to: b.email, subject: `Your Torqued quote: $${Number(quotedPrice).toFixed(2)}`, html }).catch(()=>{});
+    if (ctx.email && transporter && quotedPrice != null) {
+      await transporter.sendMail({
+        from: process.env.SMTP_FROM || '"Torqued" <torquedapp.nz@gmail.com>',
+        to: ctx.email,
+        subject: `Your Torqued quote for your ${ctx.vehicleLabel || 'vehicle'} is ready`,
+        html: quoteReadyEmailHtml(ctx.custName, ctx.vehicleLabel, ctx.mechanicName, bookingId),
+      }).catch(()=>{});
     }
     res.json({ success: true });
   } catch (err) {
@@ -782,37 +837,26 @@ ${note ? `<p style="color:#555;font-size:13px">${note}</p>` : ''}
 // POST /api/mechanic/send-quote-pdf — email a generated quote PDF to the customer
 app.post('/api/mechanic/send-quote-pdf', async (req, res) => {
   try {
-    const { bookingId, customerName, total, note, pdfBase64 } = req.body;
+    const { bookingId, total, note, pdfBase64 } = req.body;
     let { email } = req.body;
     if (!pdfBase64) return res.status(400).json({ error: 'pdfBase64 required' });
     const supabase = getSupabaseAdmin();
-    let custName = customerName;
     if (supabase && bookingId) {
-      const { data: b } = await supabase.from('bookings').select('email, customer_name').eq('id', bookingId).single();
-      if (!email) email = b?.email;
-      if (!custName) custName = b?.customer_name;
       await supabase.from('bookings').update({ quoted_price: total != null ? Number(total) : null, quote_note: note || null }).eq('id', bookingId);
     }
+    const ctx = await getBookingContext(bookingId);
+    if (!email) email = ctx.email;
     if (!email) return res.status(400).json({ error: 'No customer email on this booking.' });
     const transporter = getMailTransporter();
     if (!transporter) return res.status(503).json({ error: 'Email not configured' });
 
-    const html = `<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="color-scheme" content="light dark"></head>
-<body style="margin:0;padding:0;background:#f4f4f6;font-family:-apple-system,Arial,sans-serif">
-<table width="100%" cellpadding="0" cellspacing="0" style="background:#f4f4f6;padding:32px 8px"><tr><td align="center">
-<table width="100%" cellpadding="0" cellspacing="0" style="max-width:480px;background:#ffffff;border-radius:20px;overflow:hidden;border:1px solid #e6e6ea">
-<tr><td style="background:#150402;padding:24px 32px;border-bottom:3px solid #FF1800;text-align:center"><img src="${LOGO_URL}" width="200" height="67" style="width:200px;height:67px;border:0"/></td></tr>
-<tr><td style="padding:36px 32px;color:#150402">
-<h1 style="margin:0 0 6px;font-size:22px;font-weight:900;text-transform:uppercase">Your quote is ready</h1>
-<p style="margin:0 0 16px;font-size:14px;color:#555;line-height:1.5">Hi ${custName || 'there'}, your itemised quote is attached as a PDF.</p>
-<p style="font-size:30px;font-weight:900;color:#FF1800;margin:8px 0">$${Number(total || 0).toFixed(2)}</p>
-<a href="https://torquednz.vercel.app/customer" style="display:inline-block;background:#FF1800;color:#fff;font-weight:900;text-transform:uppercase;font-size:13px;letter-spacing:1px;text-decoration:none;padding:14px 32px;border-radius:10px;margin-top:8px">Book on your own terms with Torqued</a>
-</td></tr></table></td></tr></table></body></html>`;
+    // Approved copy, addressed by name + car, NO amount in the email (amounts in the attached PDF + online)
+    const html = quoteReadyEmailHtml(ctx.custName, ctx.vehicleLabel, ctx.mechanicName, bookingId || '');
 
     await transporter.sendMail({
       from: process.env.SMTP_FROM || '"Torqued" <torquedapp.nz@gmail.com>',
       to: email,
-      subject: `Your Torqued quote — $${Number(total || 0).toFixed(2)}`,
+      subject: `Your Torqued quote for your ${ctx.vehicleLabel || 'vehicle'} is ready`,
       html,
       attachments: [{ filename: `Torqued-Quote-${bookingId || 'TQ'}.pdf`, content: Buffer.from(pdfBase64, 'base64'), contentType: 'application/pdf' }],
     });
@@ -2137,10 +2181,10 @@ function generateBookingEmailHtml(data: any): string {
                 ${discountHtml}
                 <tr>
                   <td style="padding: 16px 0; font-family: -apple-system, Arial, sans-serif; font-size: 13.5px; font-weight: bold; color: #150402; text-transform: uppercase;">
-                    Total Price Today (GST incl.)
+                    Payment
                   </td>
-                  <td style="padding: 16px 0; text-align: right; font-family: monospace; font-size: 21px; font-weight: 900; color: #150402;">
-                    $${finalPrice.toFixed(2)}
+                  <td style="padding: 16px 0; text-align: right; font-family: -apple-system, Arial, sans-serif; font-size: 13.5px; font-weight: 900; color: #150402; text-transform: uppercase;">
+                    ${paymentOption === 'deposit' ? 'Deposit paid' : 'Paid in full'}
                   </td>
                 </tr>
                 <tr>
@@ -2148,9 +2192,7 @@ function generateBookingEmailHtml(data: any): string {
                     <div style="background-color: #150402; color: #ffffff; padding: 6px 12px; border-radius: 8px; font-family: -apple-system, Arial, sans-serif; font-size: 9px; font-weight: bold; text-transform: uppercase; letter-spacing: 1px; display: inline-block; vertical-align: middle;">
                       GATEWAY: ${paymentMethod}
                     </div>
-                    ${paymentOption === 'deposit' ? `
-                      <span style="display:inline-block; margin-left:8px; font-size:11px; font-weight:bold; color:#FF1800; vertical-align: middle;">(Paid $${parseFloat(depositPaid || '0').toFixed(2)} Deposit Today)</span>
-                    ` : ''}
+                    <span style="display:inline-block; margin-left:8px; font-size:11px; color:rgba(21,4,2,0.5); vertical-align: middle;">Full breakdown in your portal &amp; invoice.</span>
                   </td>
                 </tr>
               </table>
