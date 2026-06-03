@@ -2365,13 +2365,9 @@ app.post('/api/email/confirm-booking', async (req, res) => {
           html: dropoffHtml
         });
 
-        // Dispatch 12-Month Service Reminder
-        await transporter.sendMail({
-          from: fromAddress,
-          to: recipientEmail,
-          subject: `🔧 Performance Service Advisory: Scheduled Maintenance for ${data.vehicle}`,
-          html: serviceReminderHtml
-        });
+        // NOTE: the 12-month service reminder is intentionally NOT sent here.
+        // Scheduled reminders should only fire when actually due (future cron),
+        // not on booking/registration.
 
         sentRealEmail = true;
         console.log(`Live confirmation HTML emails securely delivered to client ${recipientEmail} and partner ${mechanicSafeEmail}`);

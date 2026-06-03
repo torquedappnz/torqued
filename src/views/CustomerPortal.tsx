@@ -2954,7 +2954,16 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                       <p className="text-[10px] text-muted mt-1 uppercase font-bold tracking-widest">{job.paymentMethod}</p>
                     </div>
                   </div>
-                  
+
+                  {job.serviceIds.includes('diag_inspection') && (
+                    <div className="p-4 bg-torqued-red/5 border border-torqued-red/15 rounded-2xl flex items-start gap-3">
+                      <Info size={16} className="text-torqued-red mt-0.5 shrink-0" />
+                      <p className="text-xs text-foreground/80 leading-relaxed">
+                        <span className="font-bold">Diagnostic Inspection booked.</span> We'll let you know once the mechanic has diagnosed your vehicle, and you'll be able to review and accept your quote right here.
+                      </p>
+                    </div>
+                  )}
+
                   <div className="space-y-3">
                     <div className="flex justify-between text-[10px] font-bold uppercase text-muted">
                       <span>Booked</span>
@@ -3003,42 +3012,68 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
             )}
           </section>
 
-          <section className="space-y-6">
-            <h3 className="text-2xl font-bold tracking-tight">Maintenance Schedule</h3>
-            <Card className="overflow-hidden bg-card border-border shadow-md">
-              <table className="w-full text-left">
-                <thead className="bg-background text-[10px] font-bold uppercase text-muted">
-                  <tr>
-                    <th className="px-6 py-4 tracking-widest">Item</th>
-                    <th className="px-6 py-4 tracking-widest">Due</th>
-                    <th className="px-6 py-4 text-right tracking-widest">Est. Cost</th>
-                  </tr>
-                </thead>
-                <tbody className="text-sm">
-                  {userServiceItems.map(item => (
-                    <tr key={item.id} className="border-b border-border hover:bg-background/50 transition-colors">
-                      <td className="px-6 py-5 font-bold">{item.name}</td>
-                      <td className="px-6 py-5 text-muted">
-                        {item.lastDoneDate ? 'May 2026' : item.intervalMileage ? `${item.intervalMileage} km` : 'TBD'}
-                      </td>
-                      <td className="px-6 py-5 text-right font-bold">
-                        {item.name === 'Timing Belt' ? (
-                          <span className="text-torqued-red tracking-tight">$950</span>
-                        ) : item.name === 'WOF Inspection' ? (
-                          <span className="text-emerald-500">$65</span>
-                        ) : (
-                          <span className="text-muted/40">TBD</span>
-                        )}
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-              <div className="p-4 bg-torqued-red/5 text-[10px] text-torqued-red font-black uppercase tracking-widest text-center border-t border-torqued-red/10">
-                Auto-assisted schedule based on {vehicle?.model || MOCK_VEHICLE.model} data
-              </div>
-            </Card>
-          </section>
+          {(() => {
+            // Map a maintenance item to a bookable service id
+            const itemToService = (name: string): string | null => {
+              const n = name.toLowerCase();
+              if (n.includes('wof')) return 'wof';
+              if (n.includes('timing') || n.includes('cambelt')) return 'timing';
+              if (n.includes('oil')) return 'oil';
+              if (n.includes('brake')) return 'brakes_front_pads';
+              if (n.includes('spark')) return 'spark_plugs';
+              if (n.includes('battery')) return 'battery';
+              if (n.includes('transmission') || n.includes('dsg') || n.includes('dct')) return 'transmission';
+              return null;
+            };
+            // Only show items that are upcoming/not recently completed
+            const dueItems = userServiceItems.filter(it => {
+              if (!it.lastDoneDate) return true;
+              const months = it.intervalMonths || 12;
+              const last = new Date(it.lastDoneDate).getTime();
+              return Date.now() - last > (months - 2) * 30 * 864e5; // due within ~2 months
+            });
+            const costRange = (sid: string | null) => {
+              if (!sid) return null;
+              const base = priceFor(sid);
+              if (!base) return null;
+              const high = Math.round(base * 1.3 / 5) * 5;
+              return `$${base} – $${high}`;
+            };
+            return (
+              <section className="space-y-6">
+                <h3 className="text-2xl font-bold tracking-tight">Maintenance Schedule</h3>
+                <p className="text-sm text-muted -mt-3">Upcoming or due services for your {vehicle?.make} {vehicle?.model}. Tap one to get a quote and book.</p>
+                <div className="space-y-3">
+                  {dueItems.length === 0 && <Card className="p-8 text-center text-muted italic bg-card border-border">You're all up to date — no services due soon. 🎉</Card>}
+                  {dueItems.map(item => {
+                    const sid = itemToService(item.name);
+                    const range = costRange(sid);
+                    return (
+                      <Card key={item.id} onClick={() => {
+                        if (!sid) return;
+                        setSelectedServices([sid]); setQuotePath('service'); setView('quote'); setStep(3);
+                      }} className={cn("p-4 flex items-center justify-between gap-4 bg-card border-border transition-all", sid ? "cursor-pointer hover:border-torqued-red/40 active:scale-[0.99]" : "")}>
+                        <div className="flex items-center gap-3">
+                          <div className="w-9 h-9 rounded-lg bg-torqued-red/10 flex items-center justify-center text-torqued-red"><Wrench size={16} /></div>
+                          <div>
+                            <p className="font-bold text-sm">{item.name}</p>
+                            <p className="text-[11px] text-muted">{item.intervalMileage ? `Due at ${item.intervalMileage.toLocaleString()} km` : 'Due soon'}</p>
+                          </div>
+                        </div>
+                        <div className="text-right">
+                          <p className="font-black text-torqued-red text-sm">{range || 'Get quote'}</p>
+                          {sid && <p className="text-[10px] text-muted uppercase font-bold tracking-widest flex items-center gap-1 justify-end">Book <ChevronRight size={11} /></p>}
+                        </div>
+                      </Card>
+                    );
+                  })}
+                </div>
+                <div className="p-3 bg-torqued-red/5 text-[10px] text-torqued-red font-black uppercase tracking-widest text-center rounded-xl border border-torqued-red/10">
+                  Estimates based on {vehicle?.make} {vehicle?.model} data · final price confirmed by your chosen workshop
+                </div>
+              </section>
+            );
+          })()}
         </div>
       </div>
     );
