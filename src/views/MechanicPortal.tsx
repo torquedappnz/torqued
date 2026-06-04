@@ -25,6 +25,7 @@ import {
   Award,
   PenSquare,
   History,
+  MessageCircle,
   Trash2,
   Plus,
   Wrench,
@@ -235,6 +236,37 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
   const [qDiscount, setQDiscount] = useState(0);
   const [qOther, setQOther] = useState<{ name: string; amount: number }[]>([]);
   const [qNotes, setQNotes] = useState('');
+  const [partsToOrder, setPartsToOrder] = useState<{ id: string; name: string; qty: number; forRego?: string }[]>(() => {
+    try { return JSON.parse(localStorage.getItem('torqued_parts_to_order') || '[]'); } catch { return []; }
+  });
+  const savePartsToOrder = (list: typeof partsToOrder) => {
+    setPartsToOrder(list);
+    try { localStorage.setItem('torqued_parts_to_order', JSON.stringify(list)); } catch {}
+  };
+  // Match a needed part name against current inventory; returns stock qty (or 0)
+  const stockFor = (name: string) => {
+    if (!name?.trim()) return null;
+    const hit = parts.find(p => p.name.trim().toLowerCase() === name.trim().toLowerCase());
+    return hit ? hit.quantity : 0;
+  };
+  const [partLookupBusy, setPartLookupBusy] = useState<number | null>(null);
+  const aiLookupPart = async (i: number) => {
+    const p = qParts[i]; if (!p.name.trim()) { alert('Type a part name first.'); return; }
+    setPartLookupBusy(i);
+    try {
+      const r = await fetch('/api/ai/parts-lookup', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ query: p.name, make: quoteJob?.model }),
+      });
+      const d = await r.json();
+      if (!r.ok) { alert(d.error || 'Lookup failed.'); return; }
+      const n = [...qParts];
+      n[i] = { ...p, name: d.oemNumber ? `${d.name} (${d.oemNumber})` : (d.name || p.name), unitPrice: d.estPriceNZD || p.unitPrice };
+      setQParts(n);
+      if (d.suppliers?.length) alert(`${d.name}\nEst. $${d.estPriceNZD ?? '—'} NZD\nSuppliers: ${d.suppliers.join(', ')}${d.notes ? `\n\n${d.notes}` : ''}`);
+    } catch { alert('Lookup failed.'); }
+    finally { setPartLookupBusy(null); }
+  };
   const [qSending, setQSending] = useState(false);
 
   const openQuoteEditor = (job: any) => {
@@ -555,6 +587,26 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
   const [pastJobs, setPastJobs] = useState<any[]>([]);
   const [jobHistory, setJobHistory] = useState<any[]>([]);
   const [billing, setBilling] = useState<any>(null);
+  const [chatMessages, setChatMessages] = useState<{ role: 'user' | 'assistant'; content: string }[]>([]);
+  const [chatInput, setChatInput] = useState('');
+  const [chatBusy, setChatBusy] = useState(false);
+  const sendChat = async () => {
+    const text = chatInput.trim();
+    if (!text || chatBusy) return;
+    const next = [...chatMessages, { role: 'user' as const, content: text }];
+    setChatMessages(next); setChatInput(''); setChatBusy(true);
+    try {
+      const r = await fetch('/api/ai/mechanic-assistant', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ messages: next, vehicle: quoteJob?.model || undefined }),
+      });
+      const d = await r.json();
+      setChatMessages(m => [...m, { role: 'assistant', content: r.ok ? d.reply : (d.error || 'Assistant unavailable.') }]);
+    } catch {
+      setChatMessages(m => [...m, { role: 'assistant', content: 'Could not reach the assistant.' }]);
+    } finally { setChatBusy(false); }
+  };
+
   const [showColdQuote, setShowColdQuote] = useState(false);
   const [coldBusy, setColdBusy] = useState(false);
   const [coldForm, setColdForm] = useState({ customerName: '', email: '', phone: '', rego: '', make: '', model: '', description: '' });
@@ -707,6 +759,7 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
     { id: 'jobs', label: 'Incoming Jobs', icon: Inbox, badge: pendingJobsCount > 0 ? pendingJobsCount : undefined },
     { id: 'manual-quotes', label: 'Manual Quotes', icon: PenSquare, badge: manualQuotesCount > 0 ? manualQuotesCount : undefined },
     { id: 'history', label: 'Job History', icon: History },
+    { id: 'assistant', label: 'Assistant', icon: MessageCircle },
     { id: 'calendar', label: 'Calendar', icon: CalendarIcon },
     { id: 'parts', label: 'Parts', icon: Package },
     { id: 'payments', label: 'Payments', icon: CreditCard },
@@ -1032,6 +1085,30 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
           </div>
         </Card>
       </div>
+
+      {partsToOrder.length > 0 && (
+        <Card className="p-5 bg-card border-torqued-red/20 space-y-3">
+          <div className="flex items-center gap-2">
+            <AlertCircle size={18} className="text-torqued-red" />
+            <h3 className="text-base font-black text-foreground">Parts to order ({partsToOrder.length})</h3>
+          </div>
+          <p className="text-xs text-muted">Parts flagged from quotes that you don't have in stock (e.g. cambelt kits). Order these before the job.</p>
+          <div className="space-y-2">
+            {partsToOrder.map(po => (
+              <div key={po.id} className="flex items-center justify-between bg-background border border-border rounded-xl p-3 text-sm">
+                <div>
+                  <p className="font-bold text-foreground">{po.name} <span className="text-muted font-normal">× {po.qty}</span></p>
+                  {po.forRego && <p className="text-[10px] text-muted uppercase tracking-widest">For {po.forRego}</p>}
+                </div>
+                <div className="flex gap-2">
+                  <button onClick={() => { setIsAddingPart(true); setNewPart({ name: po.name, quantity: po.qty, unitPrice: 0 }); savePartsToOrder(partsToOrder.filter(x => x.id !== po.id)); }} className="text-[10px] font-bold text-torqued-red underline">Received → add to stock</button>
+                  <button onClick={() => savePartsToOrder(partsToOrder.filter(x => x.id !== po.id))} className="text-muted hover:text-torqued-red"><X size={14} /></button>
+                </div>
+              </div>
+            ))}
+          </div>
+        </Card>
+      )}
 
       <Card className="overflow-hidden bg-card border-border">
         {parts.length === 0 && <p className="p-8 text-center text-muted italic text-sm">No parts in your inventory yet. Add one above.</p>}
@@ -2320,12 +2397,43 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
     );
   };
 
+  const renderAssistant = () => {
+    const suggestions = ['Oil capacity & grade for a 2017 VW Golf GTE?', 'Front brake caliper bolt torque for a Toyota Hilux?', 'Cambelt interval for a 2015 Mazda CX-5 diesel?'];
+    return (
+      <div className="flex flex-col h-[calc(100vh-160px)] max-w-3xl">
+        <div>
+          <h2 className="text-2xl sm:text-3xl font-black tracking-tight text-foreground">Mechanic Assistant</h2>
+          <p className="text-sm text-muted">Quick generalist data — oil capacities, fluid types, torque specs, intervals. Always confirm exact figures against the OEM manual.</p>
+        </div>
+        <div className="flex-1 overflow-y-auto space-y-3 py-4">
+          {chatMessages.length === 0 && (
+            <div className="space-y-2">
+              {suggestions.map(s => (
+                <button key={s} onClick={() => setChatInput(s)} className="block w-full text-left text-sm p-3 rounded-xl bg-card border border-border text-muted hover:border-torqued-red/40 hover:text-foreground transition-all">{s}</button>
+              ))}
+            </div>
+          )}
+          {chatMessages.map((m, i) => (
+            <div key={i} className={cn('max-w-[85%] p-3 rounded-2xl text-sm whitespace-pre-wrap', m.role === 'user' ? 'ml-auto bg-torqued-red text-white' : 'bg-card border border-border text-foreground')}>{m.content}</div>
+          ))}
+          {chatBusy && <div className="bg-card border border-border text-muted text-sm p-3 rounded-2xl w-fit">Thinking…</div>}
+        </div>
+        <div className="flex gap-2 pt-2 border-t border-border">
+          <input value={chatInput} onChange={e => setChatInput(e.target.value)} onKeyDown={e => { if (e.key === 'Enter') sendChat(); }}
+            placeholder="Ask a question…" className="flex-1 bg-card border border-border rounded-xl px-4 h-12 text-sm text-foreground focus:outline-none focus:border-torqued-red" />
+          <Button className="bg-torqued-red text-white" disabled={chatBusy || !chatInput.trim()} onClick={sendChat}>Send</Button>
+        </div>
+      </div>
+    );
+  };
+
   const renderContent = () => {
     switch (activeTab) {
       case 'dashboard': return renderDashboard();
       case 'jobs': return renderIncomingJobs();
       case 'manual-quotes': return renderIncomingJobs(true);
       case 'history': return renderJobHistory();
+      case 'assistant': return renderAssistant();
       case 'payments': return renderPayments();
       case 'parts': return renderParts();
       case 'profile': return renderProfile();
@@ -3135,14 +3243,30 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                     {parts.map(p => <option key={p.id} value={p.id}>{p.name} — ${p.unitPrice} ({p.quantity} in stock)</option>)}
                   </select>
                 )}
-                {qParts.map((p, i) => (
-                  <div key={i} className="flex gap-2 items-center">
-                    <input value={p.name} onChange={e => { const n=[...qParts]; n[i]={...p,name:e.target.value}; setQParts(n); }} placeholder="Part name" className="flex-1 bg-background border border-border rounded-lg px-3 h-9 text-xs text-foreground" />
-                    <input type="number" value={p.qty||''} onChange={e => { const n=[...qParts]; n[i]={...p,qty:parseInt(e.target.value)||0}; setQParts(n); }} placeholder="Qty" className="w-14 bg-background border border-border rounded-lg px-2 h-9 text-xs text-foreground" />
-                    <input type="number" value={p.unitPrice||''} onChange={e => { const n=[...qParts]; n[i]={...p,unitPrice:parseFloat(e.target.value)||0}; setQParts(n); }} placeholder="$ ea" className="w-20 bg-background border border-border rounded-lg px-2 h-9 text-xs text-foreground" />
-                    <button onClick={() => setQParts(qParts.filter((_,j)=>j!==i))} className="text-muted hover:text-torqued-red"><Trash2 size={14} /></button>
+                {qParts.map((p, i) => {
+                  const stk = stockFor(p.name);
+                  const needed = p.qty || 0;
+                  const inStock = stk != null && stk >= needed && needed > 0;
+                  return (
+                  <div key={i} className="space-y-1">
+                    <div className="flex gap-2 items-center">
+                      <input value={p.name} onChange={e => { const n=[...qParts]; n[i]={...p,name:e.target.value}; setQParts(n); }} placeholder="Part name" className="flex-1 bg-background border border-border rounded-lg px-3 h-9 text-xs text-foreground" />
+                      <input type="number" value={p.qty||''} onChange={e => { const n=[...qParts]; n[i]={...p,qty:parseInt(e.target.value)||0}; setQParts(n); }} placeholder="Qty" className="w-12 bg-background border border-border rounded-lg px-2 h-9 text-xs text-foreground" />
+                      <input type="number" value={p.unitPrice||''} onChange={e => { const n=[...qParts]; n[i]={...p,unitPrice:parseFloat(e.target.value)||0}; setQParts(n); }} placeholder="$ ea" className="w-16 bg-background border border-border rounded-lg px-2 h-9 text-xs text-foreground" />
+                      <button onClick={() => aiLookupPart(i)} disabled={partLookupBusy===i} title="AI lookup (NZ suppliers)" className="text-torqued-red hover:opacity-70 text-[10px] font-black">{partLookupBusy===i?'…':'AI'}</button>
+                      <button onClick={() => setQParts(qParts.filter((_,j)=>j!==i))} className="text-muted hover:text-torqued-red"><Trash2 size={14} /></button>
+                    </div>
+                    {p.name.trim() && (
+                      <div className="flex items-center gap-2 pl-1">
+                        {inStock
+                          ? <span className="text-[9px] font-black uppercase tracking-widest text-emerald-500">✓ In stock ({stk})</span>
+                          : <><span className="text-[9px] font-black uppercase tracking-widest text-amber-500">To order{stk ? ` (only ${stk} in stock)` : ''}</span>
+                              <button onClick={() => savePartsToOrder([...partsToOrder, { id: Math.random().toString(36).slice(2), name: p.name, qty: needed || 1, forRego: quoteJob?.reg }])} className="text-[9px] font-bold text-torqued-red underline">+ add to order list</button></>}
+                      </div>
+                    )}
                   </div>
-                ))}
+                  );
+                })}
               </div>
 
               {/* Labour */}

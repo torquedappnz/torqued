@@ -150,6 +150,34 @@ export const VehicleTimelineAnalysis: React.FC<VehicleTimelineAnalysisProps> = (
   const [hoveredPoint, setHoveredPoint] = useState<TimelinePoint | null>(null);
   const [activeTab, setActiveTab] = useState<'mileage' | 'cost'>('mileage');
 
+  // Live AI insights from the vehicle's REAL mileage + service history
+  const [insights, setInsights] = useState<{ title: string; detail: string; severity: string }[] | null>(null);
+  const [insightsLoading, setInsightsLoading] = useState(false);
+  useEffect(() => {
+    if (!rego) return;
+    setInsights(null); setInsightsLoading(true);
+    (async () => {
+      try {
+        const [vRes, hRes] = await Promise.all([
+          fetch(`/api/vehicles/${encodeURIComponent(rego)}`).then(r => r.ok ? r.json() : null).catch(() => null),
+          fetch(`/api/history/${encodeURIComponent(rego)}`).then(r => r.ok ? r.json() : { imported: [], jobs: [] }).catch(() => ({ imported: [], jobs: [] })),
+        ]);
+        const history = [
+          ...(hRes.imported || []).map((h: any) => ({ date: h.service_date, work: h.work_done, mileage: h.mileage })),
+          ...(hRes.jobs || []).filter((j: any) => j.status === 'completed').map((j: any) => ({ date: j.completed_at || j.date, work: (j.service_ids || []).join(', ') })),
+        ];
+        const r = await fetch('/api/ai/health-insights', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ rego, make: vRes?.make, model: vRes?.model, year: vRes?.year, mileage: vRes?.mileage, history }),
+        });
+        const d = await r.json();
+        setInsights(r.ok && Array.isArray(d.insights) ? d.insights : []);
+      } catch { setInsights([]); }
+      finally { setInsightsLoading(false); }
+    })();
+  }, [rego]);
+
+  const knownDemo = !!VEHICLE_DATASETS[selectedRego];
   const selectedVehicle = VEHICLE_DATASETS[selectedRego] || VEHICLE_DATASETS.RAH190;
   
   // Calculate handy statistics dynamically
@@ -284,12 +312,46 @@ export const VehicleTimelineAnalysis: React.FC<VehicleTimelineAnalysisProps> = (
     return null;
   };
 
+  const sevStyle = (s: string) => s === 'overdue' ? 'border-red-500/30 bg-red-500/5 text-red-500'
+    : s === 'due' ? 'border-amber-500/30 bg-amber-500/5 text-amber-500'
+    : s === 'good' ? 'border-emerald-500/30 bg-emerald-500/5 text-emerald-500'
+    : 'border-border bg-background text-muted';
+
   return (
     <Card className="p-5 md:p-6 space-y-6 bg-card border border-border relative overflow-hidden flex flex-col justify-between">
       {/* Visual background details */}
       <div className="absolute top-0 right-0 p-8 opacity-5">
         <Activity size={180} />
       </div>
+
+      {/* Live AI insights from real mileage + service history */}
+      {rego && (
+        <div className="relative z-10 space-y-2">
+          <div className="flex items-center gap-2">
+            <Sparkles size={16} className="text-torqued-red" />
+            <h4 className="text-sm font-black uppercase tracking-widest text-foreground">AI Health Insights</h4>
+          </div>
+          {insightsLoading && <p className="text-xs text-muted">Analysing service history…</p>}
+          {!insightsLoading && insights && insights.length === 0 && <p className="text-xs text-muted">Not enough data yet — log services to build insights.</p>}
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+            {(insights || []).map((ins, i) => (
+              <div key={i} className={cn('p-3 rounded-xl border', sevStyle(ins.severity))}>
+                <p className="text-xs font-black uppercase tracking-wide">{ins.title}</p>
+                <p className="text-xs text-foreground/80 mt-0.5">{ins.detail}</p>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {!knownDemo && (
+        <div className="relative z-10 p-4 rounded-xl border border-dashed border-border text-center text-xs text-muted">
+          The full service timeline chart builds automatically as jobs are logged for this vehicle through Torqued.
+        </div>
+      )}
+
+      {knownDemo && <>
+      {/* Visual background details */}
 
       {/* Header Panel */}
       <div className="relative z-10 flex flex-col md:flex-row md:items-center justify-between gap-4">
@@ -635,6 +697,7 @@ export const VehicleTimelineAnalysis: React.FC<VehicleTimelineAnalysisProps> = (
           </div>
         </div>
       </div>
+      </>}
     </Card>
   );
 };
