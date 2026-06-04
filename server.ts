@@ -393,6 +393,38 @@ app.get('/api/history/:rego', async (req, res) => {
   }
 });
 
+// GET /api/mechanic/customers?mechanicId= — customers who've interacted with this mechanic
+// (cold-quoted, cold-added, or booked at least once). Deduped by email/phone.
+app.get('/api/mechanic/customers', async (req, res) => {
+  try {
+    const mechanicId = req.query.mechanicId as string;
+    if (!mechanicId) return res.status(400).json({ error: 'mechanicId required' });
+    const supabase = getSupabaseAdmin();
+    if (!supabase) return res.json({ customers: [] });
+    const { data } = await supabase.from('bookings')
+      .select('customer_name, email, customer_phone, phone, vehicle_rego, created_at')
+      .eq('mechanic_id', mechanicId).order('created_at', { ascending: false });
+    const map = new Map<string, any>();
+    (data ?? []).forEach((b: any) => {
+      const key = (b.email || b.customer_phone || b.phone || b.customer_name || '').toLowerCase().trim();
+      if (!key) return;
+      const existing = map.get(key);
+      const regos = new Set(existing?.regos || []); if (b.vehicle_rego) regos.add(b.vehicle_rego);
+      map.set(key, {
+        name: existing?.name || b.customer_name || '',
+        email: existing?.email || b.email || '',
+        phone: existing?.phone || b.customer_phone || b.phone || '',
+        regos: [...regos],
+        lastSeen: existing?.lastSeen || b.created_at,
+      });
+    });
+    res.json({ customers: [...map.values()] });
+  } catch (err) {
+    console.error('[mechanic/customers]', err);
+    res.json({ customers: [] });
+  }
+});
+
 // GET /api/mechanic/jobs?mechanicId= — bookings for a mechanic (service role, bypasses RLS)
 app.get('/api/mechanic/jobs', async (req, res) => {
   try {
@@ -824,7 +856,7 @@ app.post('/api/mechanic/email-trial', async (req, res) => {
 
 // Resolve customer name, car label ("VW Golf GTE (RAH190)") and mechanic name for a booking
 async function getBookingContext(bookingId: string) {
-  const ctx = { custName: '', email: '', rego: '', vehicleLabel: '', mechanicName: '' };
+  const ctx = { custName: '', email: '', rego: '', vehicleLabel: '', mechanicName: '', mechanicEmail: '' };
   const supabase = getSupabaseAdmin();
   if (!supabase || !bookingId) return ctx;
   const { data: b } = await supabase.from('bookings').select('email, customer_name, vehicle_rego, mechanic_id').eq('id', bookingId).single();
@@ -835,8 +867,9 @@ async function getBookingContext(bookingId: string) {
     ctx.vehicleLabel = v?.make ? `${v.make} ${v.model} (${b.vehicle_rego})` : `(${b.vehicle_rego})`;
   }
   if (b.mechanic_id) {
-    const { data: m } = await supabase.from('profiles').select('name').eq('id', b.mechanic_id).single();
+    const { data: m } = await supabase.from('profiles').select('name, email').eq('id', b.mechanic_id).single();
     ctx.mechanicName = m?.name || '';
+    ctx.mechanicEmail = m?.email || '';
   }
   return ctx;
 }
@@ -914,9 +947,10 @@ app.post('/api/mechanic/message-customer', async (req, res) => {
 <p style="margin:0;color:#555">Reply to this email to respond directly.</p>
 <p style="margin:24px 0 0;color:#555">Kind regards,<br/>${ctx.mechanicName || 'Your workshop'} via Torqued</p>
 </td></tr></table></td></tr></table></body></html>`;
+    // Reply routes to the mechanic if they have an email on file; otherwise a no-reply address
     await transporter.sendMail({
       from: process.env.SMTP_FROM || '"Torqued" <torquedapp.nz@gmail.com>',
-      replyTo: 'torqued.nz@icloud.com',
+      replyTo: ctx.mechanicEmail || 'do-not-reply@torqued.nz',
       to: ctx.email,
       subject: `Message about your ${ctx.vehicleLabel || 'vehicle'} — Torqued`,
       html,

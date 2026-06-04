@@ -351,8 +351,9 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
     doc.setFillColor(21, 4, 2); doc.rect(0, 0, 210, 40, 'F');
     doc.setFillColor(255, 24, 0); doc.rect(0, 40, 210, 2, 'F');
     if (logo) doc.addImage(logo, 'PNG', 15, 11, 52, 17.4);
+    const isPaid = job.payment_status === 'confirmed';
     doc.setTextColor(255, 255, 255); doc.setFont('Helvetica', 'bold'); doc.setFontSize(11);
-    doc.text('TAX INVOICE', 195, 20, { align: 'right' });
+    doc.text(isPaid ? 'TAX INVOICE' : 'QUOTE', 195, 20, { align: 'right' });
     doc.setFont('Helvetica', 'normal'); doc.setFontSize(8.5); doc.setTextColor(180, 180, 180);
     doc.text(`Invoice #${job.id}`, 195, 26, { align: 'right' });
     doc.text(new Date(job.completed_at || job.date || Date.now()).toLocaleDateString('en-NZ'), 195, 31, { align: 'right' });
@@ -368,11 +369,11 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
     otherList.forEach((o: any) => row(o.name, `$${o.amount.toFixed(2)}`));
     if (qi.discount > 0) row('Discount', `-$${Number(qi.discount).toFixed(2)}`);
     y += 2; doc.setDrawColor(226, 232, 240); doc.line(15, y, 195, y); y += 7;
-    doc.setFontSize(12); doc.setTextColor(255, 24, 0); row('TOTAL PAID (GST incl.)', `$${total.toFixed(2)}`, true);
-    doc.setTextColor(16, 185, 129); doc.setFont('Helvetica', 'bold'); doc.setFontSize(10); doc.text('PAID IN FULL', 15, y + 2);
+    doc.setFontSize(12); doc.setTextColor(255, 24, 0); row(isPaid ? 'TOTAL PAID (GST incl.)' : 'TOTAL (GST incl.)', `$${total.toFixed(2)}`, true);
+    if (isPaid) { doc.setTextColor(16, 185, 129); doc.setFont('Helvetica', 'bold'); doc.setFontSize(10); doc.text('PAID IN FULL', 15, y + 2); }
     doc.setFontSize(7.5); doc.setTextColor(150, 150, 150);
-    doc.text('Invoice issued via Torqued — NZ\'s smarter way to get your car sorted. Prices include 15% GST.', 15, 285);
-    doc.save(`Torqued-Invoice-${job.id}.pdf`);
+    doc.text(`${isPaid ? 'Invoice' : 'Quote'} issued via Torqued — NZ's smarter way to get your car sorted. Prices include 15% GST.`, 15, 285);
+    doc.save(`Torqued-${isPaid ? 'Invoice' : 'Quote'}-${job.id}.pdf`);
   };
 
   // Build a branded, itemised quote PDF (logo + QR) and return base64
@@ -504,6 +505,8 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
 
     // Subscription status + payment history
     fetch(`/api/mechanic/billing?mechanicId=${user.id}`).then(r => r.json()).then(setBilling).catch(() => {});
+    // Customers who've interacted with this workshop
+    fetch(`/api/mechanic/customers?mechanicId=${user.id}`).then(r => r.json()).then(d => setCustomers(d.customers || [])).catch(() => {});
 
     // Incoming jobs from bookings assigned to this mechanic (service role — bypasses RLS)
     fetch(`/api/mechanic/jobs?mechanicId=${user.id}`)
@@ -577,6 +580,7 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
   const [searchQuery, setSearchQuery] = useState('');
   const [isSubscriptionLoading, setIsSubscriptionLoading] = useState(false);
   const [activeTab, setActiveTab ] = useState('dashboard');
+  const [jobsSubtab, setJobsSubtab] = useState<'accept' | 'today' | 'upcoming' | 'history'>('accept');
   const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
   const [selectedJobId, setSelectedJobId] = useState<string | null>(null);
   const [calendarView, setCalendarView] = useState<'day' | 'week' | 'month'>('week');
@@ -587,6 +591,8 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
   const [pastJobs, setPastJobs] = useState<any[]>([]);
   const [jobHistory, setJobHistory] = useState<any[]>([]);
   const [billing, setBilling] = useState<any>(null);
+  const [customers, setCustomers] = useState<any[]>([]);
+  const [custSearch, setCustSearch] = useState('');
   const [chatMessages, setChatMessages] = useState<{ role: 'user' | 'assistant'; content: string }[]>([]);
   const [chatInput, setChatInput] = useState('');
   const [chatBusy, setChatBusy] = useState(false);
@@ -756,9 +762,9 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
 
   const sidebarItems = [
     { id: 'dashboard', label: 'Dashboard', icon: LayoutDashboard },
-    { id: 'jobs', label: 'Incoming Jobs', icon: Inbox, badge: pendingJobsCount > 0 ? pendingJobsCount : undefined },
+    { id: 'jobs', label: 'My Jobs', icon: Inbox, badge: pendingJobsCount > 0 ? pendingJobsCount : undefined },
     { id: 'manual-quotes', label: 'Manual Quotes', icon: PenSquare, badge: manualQuotesCount > 0 ? manualQuotesCount : undefined },
-    { id: 'history', label: 'Job History', icon: History },
+    { id: 'customers', label: 'Customers', icon: User },
     { id: 'assistant', label: 'Assistant', icon: MessageCircle },
     { id: 'calendar', label: 'Calendar', icon: CalendarIcon },
     { id: 'parts', label: 'Parts', icon: Package },
@@ -2282,16 +2288,12 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
     );
   };
 
-  const renderJobHistory = () => (
-    <div className="space-y-4 pb-12">
-      <div>
-        <h2 className="text-2xl sm:text-3xl font-black tracking-tight text-foreground">Job History</h2>
-        <p className="text-sm text-muted">Jobs you've accepted, in progress, or completed. View details, edit the quote, or message the customer.</p>
-      </div>
-      {pastJobs.length === 0 && (
-        <Card className="p-10 text-center text-muted italic bg-card border-border">No accepted jobs yet.</Card>
+  const renderJobList = (list: any[], emptyMsg = 'No jobs here yet.') => (
+    <div className="space-y-4">
+      {list.length === 0 && (
+        <Card className="p-10 text-center text-muted italic bg-card border-border">{emptyMsg}</Card>
       )}
-      {pastJobs.map((j: any) => {
+      {list.map((j: any) => {
         const jobShape = {
           id: j.id, reg: j.vehicle_rego || '', customerName: j.customer_name,
           model: j.customer_name ? `${j.vehicle_rego} — ${j.customer_name}` : j.vehicle_rego || 'Vehicle',
@@ -2318,13 +2320,69 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
               <Button size="sm" variant="outline" className="text-foreground border-border hover:bg-background" onClick={() => openQuoteEditor(jobShape)}>Edit / Build Quote</Button>
               <Button size="sm" variant="outline" className="text-foreground border-border hover:bg-background" onClick={() => messageCustomer(jobShape)}>Message Customer</Button>
               <Button size="sm" variant="outline" className="text-foreground border-border hover:bg-background" onClick={() => recordMileage(jobShape, 'out')}>Check-out km</Button>
-              {j.payment_status === 'confirmed' && (
-                <Button size="sm" variant="outline" className="text-emerald-600 border-border hover:bg-background" onClick={() => exportInvoice(j)}>Export invoice</Button>
-              )}
+              <Button size="sm" variant="outline" className="text-emerald-600 border-border hover:bg-background" onClick={() => exportInvoice(j)}>{j.payment_status === 'confirmed' ? 'Export invoice' : 'Download PDF'}</Button>
             </div>
           </Card>
         );
       })}
+    </div>
+  );
+
+  const renderMyJobs = () => {
+    const isToday = (d?: string) => d && new Date(d).toDateString() === new Date().toDateString();
+    const accepted = pastJobs.filter((j: any) => j.status === 'in_progress');
+    const todayJobs = accepted.filter((j: any) => isToday(j.date));
+    const upcoming = accepted.filter((j: any) => j.date && new Date(j.date).getTime() > Date.now() && !isToday(j.date));
+    const history = pastJobs.filter((j: any) => j.status === 'completed' || j.is_cold_quote);
+    const subtabs = [
+      { id: 'accept' as const, label: 'To accept', n: incomingJobs.length },
+      { id: 'today' as const, label: 'Today', n: todayJobs.length },
+      { id: 'upcoming' as const, label: 'Upcoming', n: upcoming.length },
+      { id: 'history' as const, label: 'History', n: history.length },
+    ];
+    return (
+      <div className="space-y-5 pb-12">
+        <h2 className="text-2xl sm:text-3xl font-black tracking-tight text-foreground">My Jobs</h2>
+        <div className="flex gap-2 flex-wrap">
+          {subtabs.map(s => (
+            <button key={s.id} onClick={() => setJobsSubtab(s.id)}
+              className={cn('px-4 h-9 rounded-xl text-xs font-black uppercase tracking-wider transition-all', jobsSubtab === s.id ? 'bg-torqued-red text-white' : 'bg-card border border-border text-muted hover:text-foreground')}>
+              {s.label}{s.n ? ` (${s.n})` : ''}
+            </button>
+          ))}
+        </div>
+        {jobsSubtab === 'accept' && renderIncomingJobs()}
+        {jobsSubtab === 'today' && renderJobList(todayJobs, 'No jobs scheduled for today.')}
+        {jobsSubtab === 'upcoming' && renderJobList(upcoming, 'No upcoming jobs.')}
+        {jobsSubtab === 'history' && renderJobList(history, 'No completed jobs yet.')}
+      </div>
+    );
+  };
+
+  const renderCustomers = () => (
+    <div className="space-y-4 pb-12 max-w-3xl">
+      <div>
+        <h2 className="text-2xl sm:text-3xl font-black tracking-tight text-foreground">Customers</h2>
+        <p className="text-sm text-muted">Customers who've booked, been cold-quoted, or added by your workshop.</p>
+      </div>
+      <input value={custSearch} onChange={e => setCustSearch(e.target.value)} placeholder="Search name, email, phone or rego…"
+        className="w-full bg-card border border-border rounded-xl px-4 h-11 text-sm text-foreground focus:outline-none focus:border-torqued-red" />
+      {customers.length === 0 && <Card className="p-10 text-center text-muted italic bg-card border-border">No customers yet.</Card>}
+      {customers.filter(c => {
+        const q = custSearch.toLowerCase().trim(); if (!q) return true;
+        return [c.name, c.email, c.phone, ...(c.regos || [])].join(' ').toLowerCase().includes(q);
+      }).map((c, i) => (
+        <Card key={i} className="p-4 bg-card border-border flex items-center justify-between gap-3">
+          <div>
+            <p className="font-bold text-foreground">{c.name || '—'}</p>
+            <p className="text-xs text-muted">{c.email || ''}{c.phone ? ` · ${c.phone}` : ''}{c.regos?.length ? ` · ${c.regos.join(', ')}` : ''}</p>
+          </div>
+          <Button size="sm" variant="outline" className="text-foreground border-border" onClick={() => {
+            setColdForm({ customerName: c.name || '', email: c.email || '', phone: c.phone || '', rego: c.regos?.[0] || '', make: '', model: '', description: '' });
+            setShowColdQuote(true);
+          }}>New quote</Button>
+        </Card>
+      ))}
     </div>
   );
 
@@ -2430,9 +2488,9 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
   const renderContent = () => {
     switch (activeTab) {
       case 'dashboard': return renderDashboard();
-      case 'jobs': return renderIncomingJobs();
+      case 'jobs': return renderMyJobs();
       case 'manual-quotes': return renderIncomingJobs(true);
-      case 'history': return renderJobHistory();
+      case 'customers': return renderCustomers();
       case 'assistant': return renderAssistant();
       case 'payments': return renderPayments();
       case 'parts': return renderParts();
@@ -3183,12 +3241,36 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
         <div className="fixed inset-0 z-[120] flex items-center justify-center p-4 bg-black/70 backdrop-blur-sm">
           <div className="w-full max-w-md bg-card border border-border rounded-3xl p-6 space-y-4 max-h-[90vh] overflow-y-auto">
             <div>
-              <h3 className="text-xl font-black tracking-tight text-foreground">New cold quote</h3>
-              <p className="text-xs text-muted">Quote a customer who's never used Torqued. We email them the quote; if they pay online, Torqued takes its 4%.</p>
+              <h3 className="text-xl font-black tracking-tight text-foreground">New quote</h3>
+              <p className="text-xs text-muted">Search an existing customer, or add a new one. We email them the quote; if they pay online, Torqued takes its 4%.</p>
             </div>
+
+            {/* Search existing customers (name / phone / rego) */}
+            <div className="space-y-1">
+              <input value={custSearch} onChange={e => setCustSearch(e.target.value)} placeholder="Search existing customer by name, phone or rego…"
+                className="w-full bg-background border border-border rounded-lg px-3 h-10 text-sm text-foreground" />
+              {custSearch.trim() && (
+                <div className="max-h-32 overflow-y-auto rounded-lg border border-border divide-y divide-border">
+                  {customers.filter(c => [c.name, c.email, c.phone, ...(c.regos || [])].join(' ').toLowerCase().includes(custSearch.toLowerCase().trim())).slice(0, 6).map((c, i) => (
+                    <button key={i} onClick={() => { setColdForm(f => ({ ...f, customerName: c.name || '', email: c.email || '', phone: c.phone || '', rego: c.regos?.[0] || f.rego })); setCustSearch(''); }}
+                      className="block w-full text-left px-3 py-2 text-xs hover:bg-card">
+                      <span className="font-bold text-foreground">{c.name || c.email}</span> <span className="text-muted">{c.phone || ''} {c.regos?.length ? `· ${c.regos.join(', ')}` : ''}</span>
+                    </button>
+                  ))}
+                  {customers.filter(c => [c.name, c.email, c.phone, ...(c.regos || [])].join(' ').toLowerCase().includes(custSearch.toLowerCase().trim())).length === 0 && <p className="px-3 py-2 text-xs text-muted italic">No match — fill the fields below to add a new customer.</p>}
+                </div>
+              )}
+            </div>
+
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
               {([['customerName','Customer name *'],['email','Email *'],['phone','Phone'],['rego','Rego'],['make','Make'],['model','Model']] as const).map(([f,l]) => (
-                <input key={f} value={(coldForm as any)[f]} placeholder={l} onChange={e => setColdForm(c => ({ ...c, [f]: f === 'rego' ? e.target.value.toUpperCase() : e.target.value }))}
+                <input key={f} value={(coldForm as any)[f]} placeholder={l}
+                  onChange={e => setColdForm(c => ({ ...c, [f]: f === 'rego' ? e.target.value.toUpperCase() : e.target.value }))}
+                  onBlur={f === 'rego' ? async () => {
+                    const plate = coldForm.rego.trim().toUpperCase();
+                    if (!plate) return;
+                    try { const v = await fetch(`/api/vehicles/${encodeURIComponent(plate)}`).then(r => r.ok ? r.json() : null); if (v) setColdForm(c => ({ ...c, make: c.make || v.make || '', model: c.model || v.model || '' })); } catch {}
+                  } : undefined}
                   className="bg-background border border-border rounded-lg px-3 h-10 text-sm text-foreground" />
               ))}
             </div>
