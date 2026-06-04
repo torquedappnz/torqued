@@ -676,6 +676,99 @@ app.get('/api/customer/verify-link', async (req, res) => {
   }
 });
 
+// Hash a code with the shared secret (so the DB never stores the raw code)
+function hashOtp(code: string): string {
+  return crypto.createHash('sha256').update(`${code}:${MAGIC_SECRET}`).digest('hex');
+}
+
+// POST /api/customer/send-code — iOS app: email a 6-digit code (by rego or email). Serverless-safe (DB-backed).
+app.post('/api/customer/send-code', async (req, res) => {
+  try {
+    const supabase = getSupabaseAdmin();
+    if (!supabase) return res.status(500).json({ error: 'Database not configured' });
+    let rego = req.body.rego ? String(req.body.rego).toUpperCase().trim() : '';
+    const emailIn = req.body.email ? String(req.body.email).trim().toLowerCase() : '';
+    let ownerEmail: string | null = null;
+
+    if (rego) {
+      const { data: v } = await supabase.from('vehicles').select('owner_id').eq('rego', rego).single();
+      if (v?.owner_id) {
+        const { data: p } = await supabase.from('profiles').select('email').eq('id', v.owner_id).single();
+        ownerEmail = p?.email ?? null;
+      }
+    } else if (emailIn) {
+      const { data: p } = await supabase.from('profiles').select('id, email').ilike('email', emailIn).maybeSingle();
+      if (p) {
+        ownerEmail = p.email;
+        const { data: veh } = await supabase.from('vehicles').select('rego').eq('owner_id', p.id).limit(1).maybeSingle();
+        rego = veh?.rego ?? '';
+      }
+    }
+    if (!rego || !ownerEmail) return res.status(404).json({ error: 'No Torqued account found for that detail.' });
+
+    const code = crypto.randomInt(100000, 999999).toString();
+    await supabase.from('customer_otps').upsert({
+      rego, code_hash: hashOtp(code), email: ownerEmail,
+      expires_at: new Date(Date.now() + 10 * 60 * 1000).toISOString(), attempts: 0,
+    }, { onConflict: 'rego' });
+
+    const transporter = getMailTransporter();
+    if (transporter) {
+      await transporter.sendMail({
+        from: process.env.SMTP_FROM || '"Torqued" <torquedapp.nz@gmail.com>',
+        to: ownerEmail, subject: `${code} is your Torqued verification code`,
+        html: generateOtpEmailHtml(rego, code),
+      }).catch(e => console.warn('OTP email failed:', e?.message));
+    }
+    res.json({ sent: true, rego, maskedEmail: maskEmail(ownerEmail) });
+  } catch (err) {
+    console.error('[send-code]', err);
+    res.status(500).json({ error: 'Could not send code' });
+  }
+});
+
+// POST /api/customer/verify-code — validate the 6-digit code, return the customer's garage
+app.post('/api/customer/verify-code', async (req, res) => {
+  try {
+    const rego = String(req.body.rego || '').toUpperCase().trim();
+    const code = String(req.body.code || '').trim();
+    if (!rego || !code) return res.status(400).json({ error: 'rego and code are required' });
+    const supabase = getSupabaseAdmin();
+    if (!supabase) return res.status(500).json({ error: 'Database not configured' });
+
+    const { data: otp } = await supabase.from('customer_otps').select('*').eq('rego', rego).single();
+    if (!otp) return res.status(400).json({ error: 'No code was sent for this plate. Request a new one.' });
+    if (new Date(otp.expires_at).getTime() < Date.now()) {
+      await supabase.from('customer_otps').delete().eq('rego', rego);
+      return res.status(400).json({ error: 'Code expired. Request a new one.' });
+    }
+    if ((otp.attempts ?? 0) >= 5) {
+      await supabase.from('customer_otps').delete().eq('rego', rego);
+      return res.status(429).json({ error: 'Too many attempts. Request a new code.' });
+    }
+    if (otp.code_hash !== hashOtp(code)) {
+      await supabase.from('customer_otps').update({ attempts: (otp.attempts ?? 0) + 1 }).eq('rego', rego);
+      return res.status(401).json({ error: 'Incorrect code. Try again.' });
+    }
+    await supabase.from('customer_otps').delete().eq('rego', rego);
+
+    const { data: vehicle } = await supabase.from('vehicles').select('owner_id').eq('rego', rego).single();
+    let email: string | null = null, ownerId: string | null = null, vehicles: any[] = [];
+    if (vehicle?.owner_id) {
+      ownerId = vehicle.owner_id;
+      const { data: profile } = await supabase.from('profiles').select('email').eq('id', ownerId).single();
+      email = profile?.email ?? null;
+      const { data: rows } = await supabase.from('vehicles')
+        .select('rego, make, model, year, variant, mileage, thumbnail').eq('owner_id', ownerId);
+      vehicles = rows ?? [];
+    }
+    res.json({ success: true, rego, email, ownerId, vehicles });
+  } catch (err) {
+    console.error('[verify-code]', err);
+    res.status(500).json({ error: 'Verification failed' });
+  }
+});
+
 // POST /api/customer/register — creates a new customer account from plate details
 app.post('/api/customer/register', async (req, res) => {
   try {
