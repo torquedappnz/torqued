@@ -615,7 +615,7 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
 
   const [showColdQuote, setShowColdQuote] = useState(false);
   const [coldBusy, setColdBusy] = useState(false);
-  const [coldForm, setColdForm] = useState({ customerName: '', email: '', phone: '', rego: '', make: '', model: '', description: '' });
+  const [coldForm, setColdForm] = useState({ customerName: '', email: '', phone: '', rego: '', make: '', model: '', description: '', date: '' });
   const [procurementQueue, setProcurementQueue] = useState<ProcurementItem[]>([]);
   const [diagnosticStep, setDiagnosticStep] = useState<'review' | 'inspect' | 'quote' | 'sent'>('review');
   const [diagnosticFindings, setDiagnosticFindings] = useState('');
@@ -674,8 +674,16 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ mileage: km, phase, bookingId: job.id }),
       });
-      if (r.ok) alert(`Recorded ${km.toLocaleString()} km. Updated system-wide for ${reg}.`);
-      else alert('Could not save mileage.');
+      if (!r.ok) { alert('Could not save mileage.'); return; }
+      // Check-OUT completes the job: mark complete + send the review request to the customer
+      if (phase === 'out') {
+        await fetch('/api/mechanic/update-job-status', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ bookingId: job.id, status: 'completed' }) });
+        await fetch('/api/reviews/request', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ bookingId: job.id }) }).catch(() => {});
+        setIncomingJobs(prev => prev.filter(j => j.id !== job.id));
+        alert(`Checked out at ${km.toLocaleString()} km. Job completed and a review request was emailed to the customer.`);
+      } else {
+        alert(`Checked in at ${km.toLocaleString()} km. Updated system-wide for ${reg}.`);
+      }
     } catch { alert('Could not save mileage.'); }
   };
 
@@ -1201,7 +1209,7 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
             <p className="text-white/40 text-sm mt-1">{subtitle}</p>
           </div>
           {showOnlyDiagnostics && (
-            <Button size="sm" className="bg-torqued-red text-white shrink-0" onClick={() => { setColdForm({ customerName: '', email: '', phone: '', rego: '', make: '', model: '', description: '' }); setShowColdQuote(true); }}>+ New cold quote</Button>
+            <Button size="sm" className="bg-torqued-red text-white shrink-0" onClick={() => { setColdForm({ customerName: '', email: '', phone: '', rego: '', make: '', model: '', description: '', date: '' }); setShowColdQuote(true); }}>+ New cold quote</Button>
           )}
         </div>
 
@@ -2378,7 +2386,7 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
             <p className="text-xs text-muted">{c.email || ''}{c.phone ? ` · ${c.phone}` : ''}{c.regos?.length ? ` · ${c.regos.join(', ')}` : ''}</p>
           </div>
           <Button size="sm" variant="outline" className="text-foreground border-border" onClick={() => {
-            setColdForm({ customerName: c.name || '', email: c.email || '', phone: c.phone || '', rego: c.regos?.[0] || '', make: '', model: '', description: '' });
+            setColdForm({ customerName: c.name || '', email: c.email || '', phone: c.phone || '', rego: c.regos?.[0] || '', make: '', model: '', description: '', date: '' });
             setShowColdQuote(true);
           }}>New quote</Button>
         </Card>
@@ -3275,6 +3283,10 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
               ))}
             </div>
             <textarea value={coldForm.description} onChange={e => setColdForm(c => ({ ...c, description: e.target.value }))} rows={2} placeholder="Work required / notes" className="w-full bg-background border border-border rounded-lg px-3 py-2 text-sm text-foreground resize-none" />
+            <div className="space-y-1">
+              <label className="text-[10px] font-black uppercase tracking-widest text-muted">Proposed date (optional — customer can confirm)</label>
+              <input type="date" value={coldForm.date} onChange={e => setColdForm(c => ({ ...c, date: e.target.value }))} className="w-full bg-background border border-border rounded-lg px-3 h-10 text-sm text-foreground" />
+            </div>
             <div className="flex gap-2">
               <Button variant="outline" fullWidth className="text-foreground border-border" onClick={() => setShowColdQuote(false)}>Cancel</Button>
               <Button fullWidth className="bg-torqued-red text-white" disabled={coldBusy || !coldForm.customerName || !coldForm.email} onClick={async () => {

@@ -897,7 +897,7 @@ function quoteReadyEmailHtml(custName: string, vehicleLabel: string, mechanicNam
 // Returns a bookingId; the normal quote builder + send-quote-pdf then finishes & emails it.
 app.post('/api/mechanic/cold-quote', async (req, res) => {
   try {
-    const { mechanicId, customerName, email, phone, rego, make, model, description } = req.body;
+    const { mechanicId, customerName, email, phone, rego, make, model, description, date } = req.body;
     if (!mechanicId || !email || !customerName) return res.status(400).json({ error: 'mechanicId, customer name and email are required' });
     const supabase = getSupabaseAdmin();
     if (!supabase) return res.status(500).json({ error: 'Database not configured' });
@@ -914,6 +914,7 @@ app.post('/api/mechanic/cold-quote', async (req, res) => {
       id: bookingId, mechanic_id: mechanicId, vehicle_rego: plate,
       customer_name: customerName, email, customer_phone: phone || null,
       service_ids: [], status: 'booked', payment_status: 'pending',
+      date: date || null,
       description: description || null, is_cold_quote: true, total_price: 0,
     });
     if (error) return res.status(500).json({ error: error.message });
