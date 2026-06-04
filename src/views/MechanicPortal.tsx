@@ -3396,7 +3396,9 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                         {inStock
                           ? <span className="text-[9px] font-black uppercase tracking-widest text-emerald-500">✓ In stock ({stk})</span>
                           : <><span className="text-[9px] font-black uppercase tracking-widest text-amber-500">To order{stk ? ` (only ${stk} in stock)` : ''}</span>
-                              <button onClick={() => savePartsToOrder([...partsToOrder, { id: Math.random().toString(36).slice(2), name: p.name, qty: needed || 1, forRego: quoteJob?.reg }])} className="text-[9px] font-bold text-torqued-red underline">+ add to order list</button></>}
+                              {partsToOrder.some(po => po.name.trim().toLowerCase() === p.name.trim().toLowerCase())
+                                ? <span className="text-[9px] font-black uppercase tracking-widest text-emerald-500 flex items-center gap-0.5"><CheckCircle2 size={11} /> Added to order list</span>
+                                : <button onClick={() => savePartsToOrder([...partsToOrder, { id: Math.random().toString(36).slice(2), name: p.name, qty: needed || 1, forRego: quoteJob?.reg }])} className="text-[9px] font-bold text-torqued-red underline">+ add to order list</button>}</>}
                       </div>
                     )}
                   </div>
