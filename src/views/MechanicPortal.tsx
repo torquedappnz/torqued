@@ -580,7 +580,7 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
   const [searchQuery, setSearchQuery] = useState('');
   const [isSubscriptionLoading, setIsSubscriptionLoading] = useState(false);
   const [activeTab, setActiveTab ] = useState('dashboard');
-  const [jobsSubtab, setJobsSubtab] = useState<'accept' | 'today' | 'upcoming' | 'history'>('accept');
+  const [jobsSubtab, setJobsSubtab] = useState<'accept' | 'today' | 'upcoming' | 'history' | 'cold'>('accept');
   const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
   const [selectedJobId, setSelectedJobId] = useState<string | null>(null);
   const [calendarView, setCalendarView] = useState<'day' | 'week' | 'month'>('week');
@@ -1226,7 +1226,10 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
             <p className="text-white/40 text-sm mt-1">{subtitle}</p>
           </div>
           {showOnlyDiagnostics && (
-            <Button size="sm" className="bg-torqued-red text-white shrink-0" onClick={() => { setColdForm({ customerName: '', email: '', phone: '', rego: '', make: '', model: '', description: '', date: '' }); setShowColdQuote(true); }}>+ New cold quote</Button>
+            <div className="flex gap-2 shrink-0">
+              <Button size="sm" variant="outline" className="text-foreground border-border" onClick={() => { setActiveTab('jobs'); setJobsSubtab('cold'); }}>View cold quotes</Button>
+              <Button size="sm" className="bg-torqued-red text-white" onClick={() => { setColdForm({ customerName: '', email: '', phone: '', rego: '', make: '', model: '', description: '', date: '' }); setShowColdQuote(true); }}>+ New cold quote</Button>
+            </div>
           )}
         </div>
 
@@ -2372,12 +2375,14 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
     const accepted = pastJobs.filter((j: any) => j.status === 'in_progress');
     const todayJobs = accepted.filter((j: any) => isToday(j.date));
     const upcoming = accepted.filter((j: any) => j.date && new Date(j.date).getTime() > Date.now() && !isToday(j.date));
-    const history = pastJobs.filter((j: any) => j.status === 'completed' || j.is_cold_quote);
+    const coldQuotes = pastJobs.filter((j: any) => j.is_cold_quote);
+    const history = pastJobs.filter((j: any) => j.status === 'completed');
     const subtabs = [
       { id: 'accept' as const, label: 'To accept', n: incomingJobs.length },
       { id: 'today' as const, label: 'Today', n: todayJobs.length },
       { id: 'upcoming' as const, label: 'Upcoming', n: upcoming.length },
       { id: 'history' as const, label: 'History', n: history.length },
+      { id: 'cold' as const, label: 'Cold quotes', n: coldQuotes.length },
     ];
     return (
       <div className="space-y-5 pb-12">
@@ -2394,6 +2399,7 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
         {jobsSubtab === 'today' && renderJobList(todayJobs, 'No jobs scheduled for today.')}
         {jobsSubtab === 'upcoming' && renderJobList(upcoming, 'No upcoming jobs.')}
         {jobsSubtab === 'history' && renderJobList(history, 'No completed jobs yet.')}
+        {jobsSubtab === 'cold' && renderJobList(coldQuotes, 'No cold quotes written yet.')}
       </div>
     );
   };
