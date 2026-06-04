@@ -109,7 +109,7 @@ function readMagicToken(token: string): { rego: string } | null {
   } catch { return null; }
 }
 
-function generateMagicEmailHtml(rego: string, link: string): string {
+function generateMagicEmailHtml(rego: string, link: string, appLink?: string): string {
   return `<!DOCTYPE html><html><head><meta charset="utf-8">
 <meta name="color-scheme" content="light dark"><meta name="supported-color-schemes" content="light dark">
 <style>
@@ -131,6 +131,7 @@ function generateMagicEmailHtml(rego: string, link: string): string {
 <h1 class="title" style="margin:20px 0 8px;font-size:20px;font-weight:900;color:#150402;text-transform:uppercase">Confirm it's you</h1>
 <p class="muted" style="margin:0 0 28px;font-size:13px;color:#555;line-height:1.5">Tap below to securely access the history for <strong style="color:#FF1800">${rego}</strong>.</p>
 <a href="${link}" style="display:inline-block;background:#FF1800;color:#fff;font-size:13px;font-weight:900;text-transform:uppercase;letter-spacing:1.5px;text-decoration:none;padding:15px 36px;border-radius:12px">Verify &amp; Continue</a>
+${appLink ? `<p style="margin:14px 0 0"><a href="${appLink}" style="display:inline-block;color:#FF1800;font-size:12px;font-weight:700;text-decoration:none">📱 Open in the Torqued app</a></p>` : ''}
 <p class="faint" style="margin:28px 0 0;font-size:11px;color:#999;line-height:1.5">Link expires in 15 minutes. Or paste:<br/><a href="${link}" style="color:#999;word-break:break-all">${link}</a></p>
 </td></tr>
 <tr><td class="head" style="background:#150402;padding:18px 32px;text-align:center"><p style="margin:0;font-size:10px;color:rgba(255,255,255,.4)">Didn't request this? You can ignore this email.</p></td></tr>
@@ -141,6 +142,7 @@ function generateMagicEmailHtml(rego: string, link: string): string {
 async function sendMagicLink(rego: string, email: string, origin: string) {
   const token = makeMagicToken(rego);
   const link = `${origin}/customer?vt=${token}`;
+  const appLink = `torqued://verify?vt=${token}`;   // opens the iOS app if installed
   let delivered = false;
   const transporter = getMailTransporter();
   if (transporter) {
@@ -149,7 +151,7 @@ async function sendMagicLink(rego: string, email: string, origin: string) {
         from: process.env.SMTP_FROM || '"Torqued" <torquedapp.nz@gmail.com>',
         to: email,
         subject: `Verify your vehicle on Torqued`,
-        html: generateMagicEmailHtml(rego, link),
+        html: generateMagicEmailHtml(rego, link, appLink),
       });
       delivered = true;
     } catch (e) { console.warn('[magic] send failed:', (e as Error)?.message); }
