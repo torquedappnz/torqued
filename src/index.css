@@ -16,10 +16,10 @@
 }
 
 :root {
-  --bg-color: #ffffff;
+  --bg-color: #f1f2f5;            /* light grey page so white cards read as clean frosted glass */
   --fg-color: #150402;
-  --card-bg: rgba(21, 4, 2, 0.03);
-  --border-color: rgba(21, 4, 2, 0.1);
+  --card-bg: rgba(255, 255, 255, 0.85);  /* tinted white glass, not grey */
+  --border-color: rgba(21, 4, 2, 0.08);
   --muted-color: rgba(21, 4, 2, 0.6);
 }
 
@@ -71,7 +71,7 @@
   background: var(--card-bg);
   backdrop-filter: blur(20px);
   border: 1px solid var(--border-color);
-  box-shadow: 0 8px 32px 0 rgba(0, 0, 0, 0.2);
+  box-shadow: 0 8px 32px 0 rgba(21, 4, 2, 0.08);
 }
 
 .dark .liquid-glass {
