@@ -2383,9 +2383,12 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
 
   const renderCustomers = () => (
     <div className="space-y-4 pb-12 max-w-3xl">
-      <div>
-        <h2 className="text-2xl sm:text-3xl font-black tracking-tight text-foreground">Customers</h2>
-        <p className="text-sm text-muted">Customers who've booked, been cold-quoted, or added by your workshop.</p>
+      <div className="flex items-start justify-between gap-3 flex-wrap">
+        <div>
+          <h2 className="text-2xl sm:text-3xl font-black tracking-tight text-foreground">Customers</h2>
+          <p className="text-sm text-muted">Customers who've booked, been cold-quoted, or added by your workshop.</p>
+        </div>
+        <Button size="sm" className="bg-torqued-red text-white shrink-0" onClick={() => { setColdForm({ customerName: '', email: '', phone: '', rego: '', make: '', model: '', description: '', date: '' }); setShowColdQuote(true); }}>+ Add new customer</Button>
       </div>
       <input value={custSearch} onChange={e => setCustSearch(e.target.value)} placeholder="Search name, email, phone or rego…"
         className="w-full bg-card border border-border rounded-xl px-4 h-11 text-sm text-foreground focus:outline-none focus:border-torqued-red" />
