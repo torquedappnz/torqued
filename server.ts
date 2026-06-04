@@ -989,6 +989,87 @@ async function getBookingContext(bookingId: string) {
   return ctx;
 }
 
+// Insert an in-app notification (resolves owner/rego from the booking when needed).
+async function notify(opts: { bookingId?: string; rego?: string; ownerId?: string | null; type: string; title: string; body?: string }) {
+  try {
+    const supabase = getSupabaseAdmin();
+    if (!supabase) return;
+    let rego = opts.rego, ownerId = opts.ownerId ?? null;
+    if (opts.bookingId && (!rego || !ownerId)) {
+      const { data: b } = await supabase.from('bookings').select('vehicle_rego, customer_id').eq('id', opts.bookingId).single();
+      rego = rego || b?.vehicle_rego || undefined;
+      ownerId = ownerId || b?.customer_id || null;
+    }
+    if (!ownerId && rego) {
+      const { data: v } = await supabase.from('vehicles').select('owner_id').eq('rego', rego).single();
+      ownerId = v?.owner_id ?? null;
+    }
+    await supabase.from('notifications').insert({
+      owner_id: ownerId, rego: rego || null, type: opts.type,
+      title: opts.title, body: opts.body || null, booking_id: opts.bookingId || null,
+    });
+  } catch (e) { console.warn('[notify]', (e as Error).message); }
+}
+
+// GET /api/customer/notifications — feed for a customer (by owner and/or rego list)
+app.get('/api/customer/notifications', async (req, res) => {
+  try {
+    const ownerId = req.query.ownerId as string | undefined;
+    const regos = (req.query.regos as string | undefined)?.split(',').map(r => r.toUpperCase().trim()).filter(Boolean);
+    const supabase = getSupabaseAdmin();
+    if (!supabase || (!ownerId && !(regos && regos.length))) return res.json({ notifications: [] });
+    let q = supabase.from('notifications').select('*').order('created_at', { ascending: false }).limit(50);
+    if (ownerId && regos && regos.length) q = q.or(`owner_id.eq.${ownerId},rego.in.(${regos.join(',')})`);
+    else if (ownerId) q = q.eq('owner_id', ownerId);
+    else if (regos) q = q.in('rego', regos);
+    const { data } = await q;
+    res.json({ notifications: data ?? [] });
+  } catch (err) {
+    console.error('[notifications]', err);
+    res.json({ notifications: [] });
+  }
+});
+
+// POST /api/customer/notifications/read — mark one (or all for an owner) read
+app.post('/api/customer/notifications/read', async (req, res) => {
+  try {
+    const { id, ownerId } = req.body;
+    const supabase = getSupabaseAdmin();
+    if (!supabase) return res.status(500).json({ error: 'Database not configured' });
+    if (id) await supabase.from('notifications').update({ read: true }).eq('id', id);
+    else if (ownerId) await supabase.from('notifications').update({ read: true }).eq('owner_id', ownerId);
+    res.json({ success: true });
+  } catch (err) {
+    console.error('[notifications/read]', err);
+    res.status(500).json({ error: 'Could not update' });
+  }
+});
+
+// POST /api/customer/reply — customer replies to a mechanic message (emails the mechanic)
+app.post('/api/customer/reply', async (req, res) => {
+  try {
+    const { bookingId, message } = req.body;
+    if (!bookingId || !message?.trim()) return res.status(400).json({ error: 'bookingId and message required' });
+    const ctx = await getBookingContext(bookingId);
+    if (!ctx.mechanicEmail) return res.status(400).json({ error: 'No mechanic email on this job.' });
+    const transporter = getMailTransporter();
+    if (transporter) {
+      const safe = String(message).replace(/</g, '&lt;').replace(/\n/g, '<br/>');
+      await transporter.sendMail({
+        from: process.env.SMTP_FROM || '"Torqued" <torquedapp.nz@gmail.com>',
+        replyTo: ctx.email || undefined,
+        to: ctx.mechanicEmail,
+        subject: `Reply from ${ctx.custName || 'your customer'} · ${ctx.vehicleLabel || ''}`,
+        html: `<div style="font-family:-apple-system,Arial,sans-serif"><p>${ctx.custName || 'The customer'} replied regarding ${ctx.vehicleLabel || 'their vehicle'}:</p><blockquote style="border-left:3px solid #FF1800;padding-left:12px;color:#333">${safe}</blockquote></div>`,
+      }).catch(e => console.warn('reply email failed:', e?.message));
+    }
+    res.json({ success: true });
+  } catch (err) {
+    console.error('[customer/reply]', err);
+    res.status(500).json({ error: 'Could not send reply' });
+  }
+});
+
 // "Your quote is ready" email — exact approved copy, NO dollar amount (amounts live online + in the PDF only)
 function quoteReadyEmailHtml(custName: string, vehicleLabel: string, mechanicName: string, bookingId: string): string {
   const car = vehicleLabel || 'your vehicle';
@@ -1071,6 +1152,7 @@ app.post('/api/mechanic/message-customer', async (req, res) => {
       subject: `Message about your ${ctx.vehicleLabel || 'vehicle'} — Torqued`,
       html,
     });
+    await notify({ bookingId, type: 'message', title: `Message from ${ctx.mechanicName || 'your workshop'}`, body: message });
     res.json({ success: true });
   } catch (err) {
     console.error('[message-customer]', err);
@@ -1102,6 +1184,8 @@ app.post('/api/mechanic/update-quote', async (req, res) => {
         html: quoteReadyEmailHtml(ctx.custName, ctx.vehicleLabel, ctx.mechanicName, bookingId),
       }).catch(()=>{});
     }
+    if (quotedPrice != null) await notify({ bookingId, type: 'quote_ready', title: 'Your quote is ready',
+      body: `Your quote for your ${ctx.vehicleLabel || 'vehicle'} is ready to review and pay.` });
     res.json({ success: true });
   } catch (err) {
     console.error('[update-quote]', err);
@@ -1139,6 +1223,8 @@ app.post('/api/mechanic/send-quote-pdf', async (req, res) => {
       html,
       attachments: [{ filename: `Torqued-Quote-${bookingId || 'TQ'}.pdf`, content: Buffer.from(pdfBase64, 'base64'), contentType: 'application/pdf' }],
     });
+    await notify({ bookingId, type: 'quote_ready', title: 'Your quote is ready',
+      body: `Your quote for your ${ctx.vehicleLabel || 'vehicle'}${ctx.mechanicName ? ` from ${ctx.mechanicName}` : ''} is ready to review and pay.` });
     res.json({ success: true });
   } catch (err) {
     console.error('[send-quote-pdf]', err);
@@ -1258,6 +1344,8 @@ app.post('/api/reviews/request', async (req, res) => {
 </div></div>`;
       await transporter.sendMail({ from: process.env.SMTP_FROM || '"Torqued" <torquedapp.nz@gmail.com>', to, subject: 'How was your Torqued service?', html }).catch(()=>{});
     }
+    await notify({ bookingId, rego: booking.vehicle_rego, ownerId: booking.customer_id, type: 'review_reminder',
+      title: 'How was your service?', body: 'Tap to leave a quick verified review of your recent service.' });
     res.json({ success: true });
   } catch (err) {
     console.error('[reviews/request]', err);
