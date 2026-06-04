@@ -629,6 +629,26 @@ app.post('/api/customer/check-plate', async (req, res) => {
   }
 });
 
+// POST /api/customer/login-email — existing customer logs in by email; emails a magic link
+app.post('/api/customer/login-email', async (req, res) => {
+  try {
+    const email = String(req.body.email || '').trim().toLowerCase();
+    if (!email) return res.status(400).json({ error: 'Email required' });
+    const supabase = getSupabaseAdmin();
+    if (!supabase) return res.status(500).json({ error: 'Database not configured' });
+    // Find the customer + one of their vehicles (the magic token is keyed to a rego)
+    const { data: profile } = await supabase.from('profiles').select('id, email').ilike('email', email).maybeSingle();
+    if (!profile) return res.status(404).json({ error: "No Torqued account found for that email." });
+    const { data: veh } = await supabase.from('vehicles').select('rego').eq('owner_id', profile.id).limit(1).maybeSingle();
+    if (!veh?.rego) return res.status(404).json({ error: 'No vehicle linked to that account yet.' });
+    const { delivered, fallbackLink } = await sendMagicLink(veh.rego, profile.email, getOrigin(req));
+    res.json({ sent: true, maskedEmail: maskEmail(profile.email), ...(delivered ? {} : { fallbackLink }) });
+  } catch (err) {
+    console.error('[login-email]', err);
+    res.status(500).json({ error: 'Could not send link' });
+  }
+});
+
 // GET /api/customer/verify-link?token= — validate a magic link, return the customer's garage
 app.get('/api/customer/verify-link', async (req, res) => {
   try {
@@ -684,7 +704,7 @@ app.post('/api/customer/register', async (req, res) => {
         .single();
 
       if (existing) {
-        await supabase.from('vehicles').update({ owner_id: existing.id }).eq('rego', formattedRego);
+        await supabase.from('vehicles').upsert({ rego: formattedRego, owner_id: existing.id }, { onConflict: 'rego' });
         const r = await sendMagicLink(formattedRego, email, getOrigin(req));
         return res.json({ success: true, maskedEmail: maskEmail(email), magicSent: true, ...(r.delivered ? {} : { fallbackLink: r.fallbackLink }) });
       }
@@ -702,8 +722,8 @@ app.post('/api/customer/register', async (req, res) => {
       role: 'customer',
     }, { onConflict: 'id' });
 
-    // Link vehicle to this customer
-    await supabase.from('vehicles').update({ owner_id: userId }).eq('rego', formattedRego);
+    // Link vehicle to this customer (create the row if this plate is brand-new)
+    await supabase.from('vehicles').upsert({ rego: formattedRego, owner_id: userId }, { onConflict: 'rego' });
 
     // Email a magic verification link
     const magic = await sendMagicLink(formattedRego, email, getOrigin(req));
