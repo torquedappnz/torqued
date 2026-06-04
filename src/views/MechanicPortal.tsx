@@ -596,9 +596,26 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
   const [chatMessages, setChatMessages] = useState<{ role: 'user' | 'assistant'; content: string }[]>([]);
   const [chatInput, setChatInput] = useState('');
   const [chatBusy, setChatBusy] = useState(false);
+  const addPartToOrder = (name: string, qty = 1, forRego?: string) => {
+    const clean = name.trim(); if (!clean) return;
+    savePartsToOrder([...partsToOrder, { id: Math.random().toString(36).slice(2), name: clean, qty, forRego }]);
+  };
+
   const sendChat = async () => {
     const text = chatInput.trim();
     if (!text || chatBusy) return;
+    // Command: "order: <part> [xN]" adds straight to the parts-to-order list (no AI call)
+    const orderCmd = text.match(/^(?:order|add to order(?: list)?)\s*[:\-]?\s*(.+)/i);
+    if (orderCmd) {
+      const raw = orderCmd[1].trim();
+      const qm = raw.match(/\s*x\s*(\d+)\s*$/i);
+      const qty = qm ? parseInt(qm[1], 10) : 1;
+      const partName = raw.replace(/\s*x\s*\d+\s*$/i, '').trim();
+      addPartToOrder(partName, qty, quoteJob?.reg);
+      setChatMessages(m => [...m, { role: 'user', content: text }, { role: 'assistant', content: `✓ Added "${partName}"${qty > 1 ? ` ×${qty}` : ''} to your Parts-to-order list (see the Parts page).` }]);
+      setChatInput('');
+      return;
+    }
     const next = [...chatMessages, { role: 'user' as const, content: text }];
     setChatMessages(next); setChatInput(''); setChatBusy(true);
     try {
@@ -2487,6 +2504,7 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
         <div>
           <h2 className="text-2xl sm:text-3xl font-black tracking-tight text-foreground">Mechanic Assistant</h2>
           <p className="text-sm text-muted">Quick generalist data — oil capacities, fluid types, torque specs, intervals. Always confirm exact figures against the OEM manual.</p>
+          <p className="text-[11px] text-torqued-red font-bold mt-1">Tip: type "order: cambelt kit x1" to add a part straight to your Parts-to-order list.</p>
         </div>
         <div className="flex-1 overflow-y-auto space-y-3 py-4">
           {chatMessages.length === 0 && (
@@ -2497,7 +2515,13 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
             </div>
           )}
           {chatMessages.map((m, i) => (
-            <div key={i} className={cn('max-w-[85%] p-3 rounded-2xl text-sm whitespace-pre-wrap', m.role === 'user' ? 'ml-auto bg-torqued-red text-white' : 'bg-card border border-border text-foreground')}>{m.content}</div>
+            <div key={i} className={cn('max-w-[85%] space-y-1', m.role === 'user' ? 'ml-auto' : '')}>
+              <div className={cn('p-3 rounded-2xl text-sm whitespace-pre-wrap', m.role === 'user' ? 'bg-torqued-red text-white' : 'bg-card border border-border text-foreground')}>{m.content}</div>
+              {m.role === 'assistant' && !m.content.startsWith('✓ Added') && (
+                <button onClick={() => { const part = prompt('Add which part to your order list?'); if (part?.trim()) { addPartToOrder(part, 1, quoteJob?.reg); setChatMessages(cm => [...cm, { role: 'assistant', content: `✓ Added "${part.trim()}" to your Parts-to-order list.` }]); } }}
+                  className="text-[10px] font-bold text-torqued-red hover:underline">+ add a part to order list</button>
+              )}
+            </div>
           ))}
           {chatBusy && <div className="bg-card border border-border text-muted text-sm p-3 rounded-2xl w-fit">Thinking…</div>}
         </div>
