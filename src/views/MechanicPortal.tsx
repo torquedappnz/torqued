@@ -782,8 +782,9 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
     if (error) console.error('Failed to save profile:', error.message);
   };
 
-  const manualQuotesCount = incomingJobs.filter(j => j.services.includes('Diagnostic Inspection') && j.status === 'Booked via Torqued').length;
-  const pendingJobsCount = incomingJobs.filter(j => j.status !== 'Booked via Torqued' && j.status !== 'Quote Sent').length;
+  const isDiagnosticJob = (j: any) => j.services?.includes('Diagnostic Inspection');
+  const manualQuotesCount = incomingJobs.filter(isDiagnosticJob).length;
+  const pendingJobsCount = incomingJobs.filter(j => !isDiagnosticJob(j)).length;
 
   const sidebarItems = [
     { id: 'dashboard', label: 'Dashboard', icon: LayoutDashboard },
@@ -1211,9 +1212,9 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
   );
 
   const renderIncomingJobs = (showOnlyDiagnostics = false) => {
-    const displayJobs = showOnlyDiagnostics 
-      ? incomingJobs.filter(j => j.services.includes('Diagnostic Inspection') && j.status === 'Booked via Torqued')
-      : incomingJobs.filter(j => j.status !== 'Booked via Torqued' && !j.services.includes('Diagnostic Inspection'));
+    const displayJobs = showOnlyDiagnostics
+      ? incomingJobs.filter(isDiagnosticJob)
+      : incomingJobs.filter(j => !isDiagnosticJob(j));
 
     const title = showOnlyDiagnostics ? 'Manual Quoting Queue' : 'Incoming Job Requests';
     const subtitle = showOnlyDiagnostics ? 'Jobs requiring physical diagnostic before final quote' : 'Standard service and repair requests';
@@ -1353,8 +1354,10 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
             <div className="flex gap-3 pt-4 border-t border-border">
               {showOnlyDiagnostics ? (
                 <>
-                  <Button className="flex-1 bg-torqued-red text-white" onClick={() => setSelectedJobId(job.id)}>Write Quote / Begin Diagnostic</Button>
-                  <Button variant="outline" className="flex-1 border-border text-foreground hover:bg-card" onClick={() => messageCustomer(job)}>Message Customer</Button>
+                  <Button className="flex-1 bg-torqued-red text-white" onClick={() => openQuoteEditor(job)}>Write Manual Quote</Button>
+                  <Button variant="outline" className="border-border text-foreground hover:bg-card" onClick={() => setSelectedJobId(job.id)}>Diagnostic Report</Button>
+                  <Button variant="outline" className="border-border text-foreground hover:bg-card" onClick={() => recordMileage(job, 'in')}>Check-in km</Button>
+                  <Button variant="outline" className="border-border text-foreground hover:bg-card" onClick={() => messageCustomer(job)}>Message</Button>
                 </>
               ) : (
                 <>
