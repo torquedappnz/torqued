@@ -5,6 +5,12 @@ import { authPasskey, registerPasskey, passkeysSupported } from '../lib/passkey'
 
 // Admin back-office is always the dark theme; force the CSS vars so it's never washed out in app light mode.
 const ADMIN_DARK = {
+  // Override the Tailwind color tokens directly (the intermediate vars are inlined at build)
+  '--color-background': '#150402',
+  '--color-foreground': '#ffffff',
+  '--color-card': 'rgba(255,255,255,0.06)',
+  '--color-border': 'rgba(255,255,255,0.12)',
+  '--color-muted': 'rgba(255,255,255,0.6)',
   '--bg-color': '#150402',
   '--fg-color': '#ffffff',
   '--card-bg': 'rgba(255,255,255,0.06)',
