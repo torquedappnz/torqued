@@ -1873,6 +1873,77 @@ async function callOpenAI(content: any, jsonMode = false): Promise<string> {
   return data.choices?.[0]?.message?.content ?? '';
 }
 
+// Chat-style OpenAI call (system + multi-turn). Cheap: gpt-4o-mini, capped tokens.
+async function callOpenAIChat(messages: any[], maxTokens = 500, jsonMode = false): Promise<string> {
+  const apiKey = process.env.OPENAI_API_KEY;
+  if (!apiKey) throw new Error('OPENAI_API_KEY not configured');
+  const body: any = { model: 'gpt-4o-mini', messages, max_tokens: maxTokens, temperature: 0.3 };
+  if (jsonMode) body.response_format = { type: 'json_object' };
+  const r = await fetch('https://api.openai.com/v1/chat/completions', {
+    method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` },
+    body: JSON.stringify(body),
+  });
+  const data = await r.json();
+  if (!r.ok) throw new Error(data?.error?.message || 'OpenAI request failed');
+  return data.choices?.[0]?.message?.content ?? '';
+}
+
+// POST /api/ai/mechanic-assistant — generalist mechanic data chat (oil capacities, specs, etc.)
+app.post('/api/ai/mechanic-assistant', async (req, res) => {
+  try {
+    const { messages, vehicle } = req.body;
+    if (!Array.isArray(messages) || messages.length === 0) return res.status(400).json({ error: 'messages required' });
+    if (!process.env.OPENAI_API_KEY) return res.status(503).json({ error: 'AI assistant not configured (add OpenAI credit).' });
+    const sys = {
+      role: 'system',
+      content: `You are the Torqued Mechanic Assistant for New Zealand automotive workshops. Answer concisely and practically: oil capacities & grades, fluid types, torque specs, service intervals, common faults, part fitments. Use NZ-relevant info and metric units. ${vehicle ? `The mechanic is currently working on: ${vehicle}. ` : ''}When giving exact figures (oil capacity, torque), state they should be confirmed against the OEM service manual for that exact variant. Keep answers under ~120 words unless asked for detail. Never invent part numbers you are unsure of.`,
+    };
+    const reply = await callOpenAIChat([sys, ...messages.slice(-8)], 500);
+    res.json({ reply: reply.trim() });
+  } catch (err: any) {
+    console.error('[ai/mechanic-assistant]', err);
+    res.status(500).json({ error: err?.message || 'Assistant failed' });
+  }
+});
+
+// POST /api/ai/health-insights — live vehicle health insights from real mileage + history
+app.post('/api/ai/health-insights', async (req, res) => {
+  try {
+    const { rego, make, model, year, mileage, history } = req.body;
+    if (!process.env.OPENAI_API_KEY) return res.status(503).json({ error: 'AI not configured (add OpenAI credit).' });
+    const prompt = `You are an NZ vehicle maintenance analyst. Vehicle: ${year || ''} ${make || ''} ${model || ''} (${rego || ''}), odometer ${mileage || 'unknown'} km.
+Service history (most recent first): ${JSON.stringify((history || []).slice(0, 20))}.
+Return ONLY JSON: {"insights":[{"title":"short label","detail":"1 sentence, NZ-specific, practical","severity":"good|due|overdue|info"}]}.
+Give 3-5 insights based on typical service intervals for THIS make/model and what the history shows is missing or due soon. Don't invent past services. If history is empty, base it on mileage + typical intervals.`;
+    const text = await callOpenAIChat([{ role: 'user', content: prompt }], 600, true);
+    let parsed: any = {};
+    try { parsed = JSON.parse(text); } catch { return res.status(422).json({ error: 'Could not parse insights' }); }
+    res.json({ insights: Array.isArray(parsed.insights) ? parsed.insights : [] });
+  } catch (err: any) {
+    console.error('[ai/health-insights]', err);
+    res.status(500).json({ error: err?.message || 'Insights failed' });
+  }
+});
+
+// POST /api/ai/parts-lookup — AI-assisted NZ parts lookup (name, OEM #, price, suppliers)
+app.post('/api/ai/parts-lookup', async (req, res) => {
+  try {
+    const { query, make, model, year } = req.body;
+    if (!query?.trim()) return res.status(400).json({ error: 'query required' });
+    if (!process.env.OPENAI_API_KEY) return res.status(503).json({ error: 'AI not configured (add OpenAI credit).' });
+    const prompt = `You are an NZ auto parts assistant. The mechanic needs: "${query}" for a ${year || ''} ${make || ''} ${model || ''}.
+Return ONLY JSON: {"name":"clear part name","oemNumber":"OEM/part number or empty if unsure","estPriceNZD":number_or_null,"suppliers":["NZ suppliers likely to stock it, e.g. Repco, Supercheap Auto, BNT, Partmaster, Appco"],"notes":"short fitment note"}.
+Only include an OEM number if you are reasonably confident; otherwise empty string. Price is a rough NZ retail estimate.`;
+    const text = await callOpenAIChat([{ role: 'user', content: prompt }], 350, true);
+    let parsed: any = {};
+    try { parsed = JSON.parse(text); } catch { return res.status(422).json({ error: 'Could not parse result' }); }
+    res.json(parsed);
+  } catch (err: any) {
+    console.error('[ai/parts-lookup]', err);
+    res.status(500).json({ error: err?.message || 'Lookup failed' });
+  }
+});
+
 // POST /api/ai/fault-code — translates a diagnostic fault code via OpenAI
 app.post('/api/ai/fault-code', async (req, res) => {
   try {
