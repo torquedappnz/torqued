@@ -3,6 +3,15 @@ import { Logo } from '../components/Logo';
 import { Button } from '../components/Button';
 import { authPasskey, registerPasskey, passkeysSupported } from '../lib/passkey';
 
+// Admin back-office is always the dark theme; force the CSS vars so it's never washed out in app light mode.
+const ADMIN_DARK = {
+  '--bg-color': '#150402',
+  '--fg-color': '#ffffff',
+  '--card-bg': 'rgba(255,255,255,0.06)',
+  '--border-color': 'rgba(255,255,255,0.12)',
+  '--muted-color': 'rgba(255,255,255,0.6)',
+} as React.CSSProperties;
+
 export const AdminPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) => {
   const [key, setKey] = useState('');               // admin session token
   const [authed, setAuthed] = useState(false);
@@ -165,7 +174,7 @@ export const AdminPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) => {
   // ── Password setup screen ──
   if (setupToken && !setupDone) {
     return (
-      <div className="dark min-h-screen bg-torqued-dark text-white flex items-center justify-center p-4">
+      <div style={ADMIN_DARK} className="dark min-h-screen bg-torqued-dark text-white flex items-center justify-center p-4">
         <div className="w-full max-w-sm bg-card border border-white/10 rounded-3xl p-8 space-y-5">
           <Logo variant="light" />
           <h1 className="text-2xl font-black uppercase tracking-tight">Create admin password</h1>
@@ -187,7 +196,7 @@ export const AdminPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) => {
   // ── Login screen ──
   if (!authed) {
     return (
-      <div className="dark min-h-screen bg-torqued-dark text-white flex items-center justify-center p-4">
+      <div style={ADMIN_DARK} className="dark min-h-screen bg-torqued-dark text-white flex items-center justify-center p-4">
         <div className="w-full max-w-sm bg-card border border-white/10 rounded-3xl p-8 space-y-4">
           <Logo variant="light" />
           <h1 className="text-2xl font-black uppercase tracking-tight">Admin Back-Office</h1>
@@ -219,7 +228,7 @@ export const AdminPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) => {
   const fld = "w-full bg-white/5 border border-white/10 rounded-lg px-3 h-10 text-sm text-white";
 
   return (
-    <div className="dark min-h-screen bg-torqued-dark text-white">
+    <div style={ADMIN_DARK} className="dark min-h-screen bg-torqued-dark text-white">
       <nav className="p-4 md:px-8 flex justify-between items-center border-b border-white/10">
         <div className="flex items-center gap-3"><Logo variant="light" /><span className="text-xs font-black uppercase tracking-widest text-white/40">Admin</span></div>
         {onBack && <Button size="sm" variant="outline" className="text-white border-white/20" onClick={onBack}>Exit</Button>}

@@ -2177,72 +2177,12 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                       {diagnosticStep === 'quote' && (
                         <div className="space-y-6">
                           <div className="space-y-2">
-                            <h4 className="font-bold text-foreground">Generate Repair Quote</h4>
-                            <p className="text-xs text-muted">Based on your findings, suggest a fixed price for the high-value repair.</p>
+                            <h4 className="font-bold text-foreground">Build the repair quote</h4>
+                            <p className="text-xs text-muted">Write the quote from scratch — add parts (with stock matching &amp; AI lookup), labour, other costs and notes, then email it. Same builder used for cold quotes.</p>
                           </div>
-                          
-                          <div className="p-4 bg-torqued-red/5 rounded-xl border border-torqued-red/10 space-y-4">
-                             <div className="flex justify-between items-center">
-                                <span className="text-sm font-bold text-foreground">Recommended Repair</span>
-                                <span className="text-[10px] bg-card px-2 py-1 rounded border border-border font-bold text-torqued-red">MAJOR JOB</span>
-                             </div>
-                             <p className="text-xs font-medium text-foreground">{job.reg === 'RAH190' ? 'DQ400e Hybrid Mechatronics Unit Replacement' : 'Front Rotors & Pads replacement'}</p>
-                             
-                             <div className="space-y-2 pt-2 border-t border-border">
-                                <div className="flex justify-between text-[10px] font-bold text-muted uppercase">
-                                   <span>{job.reg === 'RAH190' ? 'Component / Labour' : 'Part'}</span>
-                                   <span>Price</span>
-                                </div>
-                                {job.reg === 'RAH190' ? (
-                                  <>
-                                    <div className="flex justify-between text-xs text-foreground">
-                                       <span>Mechatronics Unit (DQ400e)</span>
-                                       <span className="font-bold">$5,297.00</span>
-                                    </div>
-                                    <div className="flex justify-between text-xs text-foreground">
-                                       <span>Import Fees & Freight</span>
-                                       <span className="font-bold">$1,100.00</span>
-                                    </div>
-                                    <div className="flex justify-between text-xs text-foreground">
-                                       <span>Labour (4.0 hrs Specialized)</span>
-                                       <span className="font-bold">$600.00</span>
-                                    </div>
-                                  </>
-                                ) : (
-                                  <div className="flex justify-between text-xs text-foreground">
-                                     <span>Brake Pads & Rotors (OEM)</span>
-                                     <span className="font-bold">$580.00</span>
-                                  </div>
-                                )}
-                             </div>
-
-                             <div className="flex flex-col sm:flex-row items-center gap-4 pt-2 border-t border-border">
-                                <div className="relative flex-1 w-full">
-                                  <span className="absolute left-3 top-1/2 -translate-y-1/2 font-bold opacity-40">$</span>
-                                  <input 
-                                    value={job.id === 'req1' ? "6997" : customQuotePrice}
-                                    onChange={(e) => setCustomQuotePrice(e.target.value)}
-                                    className="w-full bg-background border border-border rounded-lg pl-7 pr-4 py-2 font-bold outline-none focus:border-torqued-red text-foreground" 
-                                  />
-                                </div>
-                                <span className="text-xs font-bold text-emerald-600 inline-flex items-center gap-1">
-                                  <CheckCircle2 size={12} /> Fair Market
-                                </span>
-                             </div>
-                          </div>
-
-                          <div className="pt-4 space-y-3">
-                            <Button 
-                              fullWidth 
-                              className="bg-torqued-red shadow-lg shadow-torqued-red/20" 
-                              onClick={() => {
-                                setIncomingJobs(prev => prev.map(j => 
-                                  j.id === job.id ? { ...j, status: 'Quote Sent' } : j
-                                ));
-                                setDiagnosticStep('sent');
-                              }}
-                            >
-                              Send Quote to Customer via Torqued Email
+                          <div className="pt-2 space-y-3">
+                            <Button fullWidth className="bg-torqued-red shadow-lg shadow-torqued-red/20" onClick={() => { setSelectedJobId(null); setDiagnosticStep('review'); openQuoteEditor(job); }}>
+                              Open quote builder →
                             </Button>
                             <Button variant="ghost" className="w-full text-[10px] uppercase font-black tracking-widest text-muted hover:text-foreground border border-transparent" onClick={() => setDiagnosticStep('inspect')}>Back to Findings</Button>
                           </div>
