@@ -222,7 +222,7 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
 
   // Service packages
   const [packages, setPackages] = useState<any[]>([]);
-  const [newPkg, setNewPkg] = useState({ name: '', price: '', durationMin: '60', description: '' });
+  const [newPkg, setNewPkg] = useState({ name: '', price: '', durationMin: '60', description: '', oilLitres: '', oilCostPerL: '' });
   useEffect(() => {
     if (!user) return;
     fetch(`/api/mechanic/packages?mechanicId=${user.id}`).then(r => r.json()).then(d => setPackages(d.packages || [])).catch(() => {});
@@ -1618,10 +1618,24 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
             <Input placeholder="Price $" type="number" value={newPkg.price} onChange={e => setNewPkg({ ...newPkg, price: e.target.value })} className="bg-background text-foreground" />
             <Input placeholder="Mins" type="number" value={newPkg.durationMin} onChange={e => setNewPkg({ ...newPkg, durationMin: e.target.value })} className="bg-background text-foreground" />
           </div>
+          {/* Oil pricing sync: refill capacity × oil cost → adds to package price */}
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 items-center">
+            <Input placeholder="Oil refill (L)" type="number" value={newPkg.oilLitres} onChange={e => setNewPkg({ ...newPkg, oilLitres: e.target.value })} className="bg-background text-foreground" />
+            <Input placeholder="Oil $/L" type="number" value={newPkg.oilCostPerL} onChange={e => setNewPkg({ ...newPkg, oilCostPerL: e.target.value })} className="bg-background text-foreground" />
+            {(() => {
+              const oilCost = (parseFloat(newPkg.oilLitres) || 0) * (parseFloat(newPkg.oilCostPerL) || 0);
+              return (
+                <div className="col-span-2 flex items-center gap-2">
+                  <span className="text-xs text-muted">Oil cost: <span className="font-bold text-foreground">${oilCost.toFixed(2)}</span></span>
+                  {oilCost > 0 && <button onClick={() => setNewPkg(p => ({ ...p, price: String((parseFloat(p.price) || 0) + oilCost) }))} className="text-[10px] font-bold text-torqued-red underline">+ add to price</button>}
+                </div>
+              );
+            })()}
+          </div>
           <Button className="bg-torqued-red text-white" disabled={!newPkg.name || !newPkg.price} onClick={async () => {
             const r = await fetch('/api/mechanic/packages', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ mechanicId: user!.id, name: newPkg.name, price: parseFloat(newPkg.price), durationMin: parseInt(newPkg.durationMin) || 60, description: newPkg.description }) });
             const d = await r.json();
-            if (d.package) { setPackages([...packages, d.package]); setNewPkg({ name: '', price: '', durationMin: '60', description: '' }); }
+            if (d.package) { setPackages([...packages, d.package]); setNewPkg({ name: '', price: '', durationMin: '60', description: '', oilLitres: '', oilCostPerL: '' }); }
           }}><Plus size={14} className="mr-1" /> Add Package</Button>
         </Card>
       </div>
