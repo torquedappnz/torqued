@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
-import { Search, MapPin, ChevronRight, Info, Lock, CheckCircle2, Star, Calendar, CreditCard, Car, History, Wrench, AlertTriangle, Plus, Edit2, ArrowLeft, Clock, Sun, Moon, Monitor, Download, Ticket, Mail, Send, Smartphone } from 'lucide-react';
+import { Search, MapPin, ChevronRight, Info, Lock, CheckCircle2, Star, Calendar, CreditCard, Car, History, Wrench, AlertTriangle, Plus, Edit2, ArrowLeft, Clock, Sun, Moon, Monitor, Download, Ticket, Mail, Send, Smartphone, X, Upload, Sparkles, Camera } from 'lucide-react';
 import { jsPDF } from 'jspdf';
 import { Logo } from '../components/Logo';
 import { Button } from '../components/Button';
@@ -446,6 +446,47 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
   // Consumer location for distance-based mechanic search (Google/device location services)
   const [customerCoords, setCustomerCoords] = useState<{ lat: number; lng: number } | null>(null);
   const [locationAsked, setLocationAsked] = useState(false);
+
+  // ── Customer AI assistant (diagnostic + maintenance chat) ──
+  const [chatOpen, setChatOpen] = useState(false);
+  const [chatMessages, setChatMessages] = useState<{ role: 'user' | 'assistant'; text: string; image?: string }[]>([]);
+  const [chatInput, setChatInput] = useState('');
+  const [chatBusy, setChatBusy] = useState(false);
+  const [chatPhoto, setChatPhoto] = useState<string | null>(null);
+  const chatStarters = [
+    'When are my spark plugs due?',
+    'Grinding noise when I brake — what is it?',
+    'My car is overdue a service, what do I need?',
+    'A warning light is on — is it safe to drive?',
+  ];
+  const sendChat = async (text: string, photo?: string | null) => {
+    const t = text.trim();
+    const img = photo ?? chatPhoto;
+    if (!t && !img || chatBusy) return;
+    const userMsg: { role: 'user'; text: string; image?: string } = { role: 'user', text: t || 'What can you see in this photo?' };
+    if (img) userMsg.image = img;
+    const next = [...chatMessages, userMsg];
+    setChatMessages(next);
+    setChatInput('');
+    setChatPhoto(null);
+    setChatBusy(true);
+    try {
+      const res = await fetch('/api/ai/customer-assistant', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          messages: next.map(m => ({ role: m.role, content: m.text, ...(m.image ? { image: m.image } : {}) })),
+          ownerId: customerOwnerId, rego: vehicle?.rego,
+          lat: customerCoords?.lat, lng: customerCoords?.lng,
+        }),
+      });
+      const d = await res.json();
+      setChatMessages(m => [...m, { role: 'assistant', text: res.ok ? (d.reply || 'Sorry, I could not answer that.') : (d.error || 'Assistant unavailable.') }]);
+    } catch {
+      setChatMessages(m => [...m, { role: 'assistant', text: 'The assistant is unavailable right now. Please try again.' }]);
+    } finally {
+      setChatBusy(false);
+    }
+  };
   const requestLocation = () => {
     setLocationAsked(true);
     if (!navigator.geolocation) return;
@@ -1053,6 +1094,143 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
     setView('quote');
   };
 
+  // ── Active-job cancellation + reschedule (uses the shared backend policy/refund engine) ──
+  const [jobDetail, setJobDetail] = useState<Record<string, any>>({});   // bookingId → detail
+  const [jobBusy, setJobBusy] = useState<string | null>(null);
+  const [reschedJob, setReschedJob] = useState<string | null>(null);
+  const [reschedDate, setReschedDate] = useState('');
+  const [reschedTime, setReschedTime] = useState('09:00');
+  const RESCHED_SLOTS = ['08:00', '09:00', '10:00', '11:00', '13:00', '14:00'];
+
+  const loadJobDetail = async (job: Job) => {
+    try {
+      const r = await fetch(`/api/booking/${job.id}/detail`);
+      const d = await r.json();
+      if (r.ok) setJobDetail(prev => ({ ...prev, [job.id]: d }));
+      return r.ok ? d : null;
+    } catch { return null; }
+  };
+
+  const cancelJob = async (job: Job) => {
+    setJobBusy(job.id);
+    try {
+      const d = jobDetail[job.id] || await loadJobDetail(job);
+      const c = d?.cancellation;
+      const policyMsg = c
+        ? (c.fullRefund
+            ? `You're cancelling with enough notice (policy: ${c.requiredHours}h of open time, excluding weekends/public holidays).\n\nYou'll receive a FULL refund${c.paid ? ` of $${c.refundAmount.toFixed(2)}` : ''}.`
+            : `This is short notice — less than ${c.requiredHours}h of open time before drop-off.\n\nPer ${d?.mechanic?.name || 'the workshop'}'s policy you'll be refunded ${c.refundPct}%${c.paid ? ` ($${c.refundAmount.toFixed(2)})` : ''}.`)
+        : 'Cancel this booking?';
+      if (!window.confirm(`${policyMsg}\n\nConfirm cancellation?`)) { setJobBusy(null); return; }
+      const res = await fetch('/api/customer/request-cancellation', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ bookingId: job.id }),
+      });
+      const out = await res.json();
+      if (!res.ok) { alert(out.error || 'Could not cancel.'); setJobBusy(null); return; }
+      setActiveJobs(prev => prev.filter(j => j.id !== job.id));
+      alert(out.fullRefund ? `Cancelled — full refund issued${out.refundAmount ? ` ($${out.refundAmount.toFixed(2)})` : ''}.`
+                           : `Cancelled — ${out.refundPct}% refund issued${out.refundAmount ? ` ($${out.refundAmount.toFixed(2)})` : ''}.`);
+    } finally { setJobBusy(null); }
+  };
+
+  const saveReschedule = async (job: Job) => {
+    if (!reschedDate) return;
+    setJobBusy(job.id);
+    try {
+      const iso = new Date(`${reschedDate}T${reschedTime}:00`).toISOString();
+      const res = await fetch('/api/customer/reschedule', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ bookingId: job.id, date: iso }),
+      });
+      const out = await res.json();
+      if (!res.ok) { alert(out.error || 'Could not reschedule.'); return; }
+      setActiveJobs(prev => prev.map(j => j.id === job.id ? { ...j, date: iso } : j));
+      setReschedJob(null);
+    } finally { setJobBusy(null); }
+  };
+
+  // Preload booking detail (itemised quote + policy) for each active job.
+  useEffect(() => {
+    activeJobs.forEach(j => { if (!jobDetail[j.id]) loadJobDetail(j); });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeJobs]);
+
+  // AI-summarised headlines for service-history work (OpenAI here; the iOS app uses on-device Apple AI).
+  const [histSummaries, setHistSummaries] = useState<Record<string, string>>({});
+
+  // Vehicle photos
+  const [vehiclePhotos, setVehiclePhotos] = useState<{ id: string; photo_url: string; comment: string; uploaded_by: string; created_at: string }[]>([]);
+  const [photoComment, setPhotoComment] = useState('');
+  const [photoUploading, setPhotoUploading] = useState(false);
+
+  useEffect(() => {
+    const rego = vehicle?.rego;
+    if (!rego || !garageUnlocked) return;
+    fetch(`/api/vehicle-photos/${rego}`).then(r => r.json()).then(d => setVehiclePhotos(d.photos || [])).catch(() => {});
+  }, [vehicle?.rego, garageUnlocked]);
+
+  const uploadPhoto = async (file: File) => {
+    const rego = vehicle?.rego;
+    if (!rego || !file) return;
+    setPhotoUploading(true);
+    try {
+      const base64 = await new Promise<string>((res, rej) => {
+        const reader = new FileReader(); reader.onload = () => res(reader.result as string); reader.onerror = rej; reader.readAsDataURL(file);
+      });
+      const r = await fetch('/api/vehicle-photos', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ rego, imageBase64: base64, comment: photoComment, uploadedBy: 'customer' }),
+      });
+      const d = await r.json();
+      if (d.photo) { setVehiclePhotos(p => [d.photo, ...p]); setPhotoComment(''); }
+    } finally { setPhotoUploading(false); }
+  };
+
+  // Load the FULL service history (imported receipts + completed Torqued jobs) for the active vehicle —
+  // same source as the iOS app and mechanic side, so the web My Garage now shows it too.
+  useEffect(() => {
+    const rego = vehicle?.rego;
+    if (!rego) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const r = await fetch(`/api/history/${rego}`);
+        const d = await r.json();
+        if (cancelled || !r.ok) return;
+        const imported = (d.imported || []).map((h: any) => ({
+          date: h.service_date || '', service: h.work_done || 'Service', provider: h.provider || 'Customer record',
+          mileage: h.mileage != null ? String(h.mileage) : '', price: h.price || '', notes: h.notes || '',
+        }));
+        const jobs = (d.jobs || []).filter((j: any) => j.status === 'completed').map((j: any) => ({
+          date: j.completed_at || j.date || '',
+          service: (j.service_ids || []).map((id: string) => SERVICES.find(s => s.id === id)?.name || id).join(', ') || 'Torqued service',
+          provider: 'Torqued', mileage: j.mileage_out != null ? String(j.mileage_out) : '', price: '', notes: '',
+        }));
+        if (imported.length || jobs.length) setManualHistory([...imported, ...jobs]);
+      } catch {}
+    })();
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [vehicle?.rego]);
+
+  // Summarise long work descriptions into a short headline ("Cambelt & Water Pump Replaced, Oil & Filter Service").
+  useEffect(() => {
+    manualHistory.forEach(async (h) => {
+      const key = h.service;
+      if (!key || key.length < 40 || histSummaries[key]) return;
+      try {
+        const r = await fetch('/api/ai/summarize', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ text: key, style: 'title' }),
+        });
+        const d = await r.json();
+        if (r.ok && d.summary) setHistSummaries(prev => ({ ...prev, [key]: d.summary }));
+      } catch {}
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [manualHistory]);
+
   // Simulate/Perform Rego Lookup
   const handleReceiptUpload = async (file: File | null) => {
     if (!file) return;
@@ -1347,7 +1525,7 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
       date: selectedDate,
       totalPrice: finalCalculatedPrice,
       depositPaid: undefined,
-      description: selectedServices.includes('diag_inspection') ? (diagnosticComment || undefined) : (faultCode || undefined),
+      description: diagnosticComment?.trim() || faultCode || undefined,
     };
 
     if (isImmediatePayment) {
@@ -2002,15 +2180,32 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                   </div>
                 )}
                 <div className="space-y-2">
-                  <label className="text-xs font-bold uppercase tracking-wider text-white/50">Additional Notes</label>
-                  <textarea 
-                    className="w-full bg-white/5 border border-white/10 rounded-xl px-4 py-3 outline-none focus:bg-white/10 focus:border-torqued-red/30 transition-all min-h-[100px] text-white"
-                    placeholder="Anything else we should know?"
+                  <label className="text-xs font-bold uppercase tracking-wider text-white/50">
+                    {selectedServices.includes('diag_inspection') ? 'Describe your concern *' : 'Additional Notes'}
+                  </label>
+                  <textarea
+                    value={diagnosticComment}
+                    onChange={e => setDiagnosticComment(e.target.value)}
+                    className={cn(
+                      "w-full bg-white/5 border rounded-xl px-4 py-3 outline-none focus:bg-white/10 transition-all min-h-[100px] text-white",
+                      selectedServices.includes('diag_inspection') && !diagnosticComment.trim()
+                        ? "border-torqued-red/60 focus:border-torqued-red"
+                        : "border-white/10 focus:border-torqued-red/30"
+                    )}
+                    placeholder={selectedServices.includes('diag_inspection')
+                      ? `Describe your concern about your ${[vehicle?.make, vehicle?.model].filter(Boolean).join(' ') || 'vehicle'} here`
+                      : 'Anything else we should know?'}
                   />
+                  {selectedServices.includes('diag_inspection') && !diagnosticComment.trim() && (
+                    <p className="text-[10px] text-torqued-red">Required for diagnostic bookings — your mechanic reviews this before the inspection.</p>
+                  )}
                 </div>
                 <div className="flex gap-4">
                   <Button variant="outline" onClick={() => setQuotePath(null)}>Back</Button>
-                  <Button className="flex-1 bg-torqued-red" onClick={() => setStep(3)} disabled={selectedServices.length === 0}>Continue →</Button>
+                  <Button className="flex-1 bg-torqued-red" onClick={() => setStep(3)}
+                    disabled={selectedServices.length === 0 || (selectedServices.includes('diag_inspection') && !diagnosticComment.trim())}>
+                    Continue →
+                  </Button>
                 </div>
               </div>
             ) : (
@@ -3145,51 +3340,7 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
           <section className="space-y-6">
             <div className="flex justify-between items-center">
               <h3 className="text-2xl font-bold tracking-tight">My Vehicles</h3>
-              <Button 
-                variant="outline" 
-                size="sm" 
-                className="text-torqued-red border-torqued-red/20 hover:bg-torqued-red/5"
-                onClick={() => setIsAddingServiceItem(true)}
-              >
-                <Plus size={16} className="mr-1" /> Add Item
-              </Button>
             </div>
-
-            {isAddingServiceItem && (
-              <Card className="p-6 border-torqued-red/20 bg-torqued-red/5 space-y-4">
-                <h4 className="text-sm font-bold uppercase text-muted">Add Maintenance Item</h4>
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                  <Input 
-                    placeholder="Item Name (e.g. Spark Plugs)" 
-                    value={newServiceItemName}
-                    onChange={(e) => setNewServiceItemName(e.target.value)}
-                    className="bg-card border-border"
-                  />
-                  <Input 
-                    placeholder="Interval (km)" 
-                    type="number"
-                    value={newServiceItemMileage}
-                    onChange={(e) => setNewServiceItemMileage(e.target.value)}
-                    className="bg-card border-border"
-                  />
-                </div>
-                <div className="flex gap-2">
-                  <Button size="sm" onClick={() => {
-                    if (newServiceItemName) {
-                      setUserServiceItems(prev => [...prev, {
-                        id: Math.random().toString(36).substr(2, 9),
-                        name: newServiceItemName,
-                        intervalMileage: parseInt(newServiceItemMileage) || undefined
-                      }]);
-                      setNewServiceItemName('');
-                      setNewServiceItemMileage('');
-                      setIsAddingServiceItem(false);
-                    }
-                  }} className="bg-torqued-red">Add Item</Button>
-                  <Button variant="ghost" size="sm" onClick={() => setIsAddingServiceItem(false)}>Cancel</Button>
-                </div>
-              </Card>
-            )}
 
             {vehicle && (
               <div className="flex items-center gap-2 text-sm">
@@ -3262,32 +3413,88 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
           </section>
 
               <section className="space-y-6">
-                <h3 className="text-2xl font-bold tracking-tight">Service History</h3>
+                <div className="flex justify-between items-center gap-3">
+                  <h3 className="text-2xl font-bold tracking-tight">Service History</h3>
+                  <div className="flex gap-2">
+                    <input id="history-upload-input" type="file" accept="image/*,application/pdf" multiple className="hidden"
+                      onChange={(e) => { handleMultiUpload(Array.from(e.target.files || [])); e.target.value = ''; }} />
+                    <Button variant="outline" size="sm"
+                      className="text-torqued-red border-torqued-red/20 hover:bg-torqued-red/5"
+                      onClick={() => document.getElementById('history-upload-input')?.click()}>
+                      <Upload size={16} className="mr-1" /> Upload (AI)
+                    </Button>
+                    <Button variant="outline" size="sm"
+                      className="text-foreground border-border hover:bg-background"
+                      onClick={() => setShowHistoryEntry(true)}>
+                      <Plus size={16} className="mr-1" /> Add
+                    </Button>
+                  </div>
+                </div>
                 <div className="space-y-3">
                   {manualHistory.length === 0 && (
-                    <Card className="p-6 bg-card border-border text-center text-sm text-muted italic">No service history yet for this vehicle. Upload past receipts above to build it.</Card>
+                    <Card className="p-6 bg-card border-border text-center text-sm text-muted italic">No service history yet for this vehicle. Tap “Upload (AI)” to scan a receipt or “Add” to enter one.</Card>
                   )}
-                  {manualHistory.map((history, idx) => (
-                    <Card key={idx} className="p-4 bg-card border-border flex items-center justify-between group hover:border-torqued-red/30 transition-all">
-                      <div className="flex items-center gap-4">
-                        <div className="w-10 h-10 bg-background rounded-xl flex items-center justify-center border border-border group-hover:bg-torqued-red/10 group-hover:border-torqued-red/20 transition-all">
-                          <Clock size={16} className="text-muted group-hover:text-torqued-red transition-all" />
+                  {manualHistory.map((history, idx) => {
+                    const headline = histSummaries[history.service] || history.service;
+                    return (
+                    <Card key={idx} className="p-4 bg-card border-border group hover:border-torqued-red/30 transition-all">
+                      <div className="flex items-start justify-between gap-4">
+                        <div className="flex items-start gap-4 min-w-0">
+                          <div className="w-10 h-10 shrink-0 bg-background rounded-xl flex items-center justify-center border border-border group-hover:bg-torqued-red/10 group-hover:border-torqued-red/20 transition-all">
+                            <Clock size={16} className="text-muted group-hover:text-torqued-red transition-all" />
+                          </div>
+                          <div className="min-w-0">
+                            <h4 className="text-sm font-bold">{headline}</h4>
+                            <p className="text-[10px] text-muted uppercase font-black tracking-widest">{history.date}{history.provider ? ` • ${history.provider}` : ''}</p>
+                            {history.notes && <p className="text-xs text-muted mt-1 leading-snug">{history.notes}</p>}
+                          </div>
                         </div>
-                        <div>
-                          <h4 className="text-sm font-bold">{history.service}</h4>
-                          <p className="text-[10px] text-muted uppercase font-black tracking-widest">{history.date} • {history.provider}</p>
-                        </div>
-                      </div>
-                      <div className="text-right">
-                        <p className="text-xs font-mono text-muted">{history.mileage} KM</p>
-                        <div className="flex items-center gap-1 justify-end mt-0.5">
-                          <div className="w-1.5 h-1.5 bg-emerald-500 rounded-full shadow-[0_0_8px_rgba(16,185,129,0.5)]" />
-                          <span className="text-[8px] font-bold text-emerald-400 uppercase">Verified</span>
+                        <div className="text-right shrink-0">
+                          {history.mileage && <p className="text-xs font-mono text-muted">{Number(history.mileage).toLocaleString()} KM</p>}
+                          {history.price && <p className="text-xs font-bold text-torqued-red mt-0.5">{String(history.price).startsWith('$') ? history.price : `$${history.price}`}</p>}
+                          <div className="flex items-center gap-1 justify-end mt-0.5">
+                            <div className="w-1.5 h-1.5 bg-emerald-500 rounded-full shadow-[0_0_8px_rgba(16,185,129,0.5)]" />
+                            <span className="text-[8px] font-bold text-emerald-400 uppercase">Verified</span>
+                          </div>
                         </div>
                       </div>
                     </Card>
-                  ))}
+                    );
+                  })}
                 </div>
+              </section>
+
+              {/* Vehicle Photos */}
+              <section className="space-y-4">
+                <div className="flex items-center justify-between">
+                  <h3 className="text-lg font-bold tracking-tight">Vehicle Photos</h3>
+                  <label className="cursor-pointer">
+                    <span className="text-xs font-bold text-torqued-red border border-torqued-red/30 rounded-lg px-3 py-1.5 hover:bg-torqued-red/5 flex items-center gap-1">
+                      <Upload size={12} /> {photoUploading ? 'Uploading…' : 'Upload Photo'}
+                    </span>
+                    <input type="file" accept="image/*" className="hidden" disabled={photoUploading}
+                      onChange={e => { const f = e.target.files?.[0]; if (f) uploadPhoto(f); e.target.value = ''; }} />
+                  </label>
+                </div>
+                <input
+                  className="w-full text-xs bg-card border border-border rounded-lg px-3 py-2 text-foreground focus:outline-none focus:border-torqued-red/50"
+                  placeholder="Photo caption (optional — set before uploading)"
+                  value={photoComment}
+                  onChange={e => setPhotoComment(e.target.value)}
+                />
+                {vehiclePhotos.length === 0 ? (
+                  <Card className="p-6 text-center text-sm text-muted italic bg-card border-border">No photos yet. Upload images of your vehicle for reference.</Card>
+                ) : (
+                  <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
+                    {vehiclePhotos.map(photo => (
+                      <div key={photo.id} className="space-y-1">
+                        <img src={photo.photo_url} alt={photo.comment || 'photo'} className="w-full aspect-square object-cover rounded-xl border border-border" />
+                        {photo.comment && <p className="text-[10px] text-muted truncate">{photo.comment}</p>}
+                        <p className="text-[9px] text-muted/60">{new Date(photo.created_at).toLocaleDateString('en-NZ')}</p>
+                      </div>
+                    ))}
+                  </div>
+                )}
               </section>
 
           <section className="space-y-6">
@@ -3368,37 +3575,97 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                     </div>
                   </div>
 
-                  <div className="pt-4 border-t border-border flex flex-col sm:flex-row justify-between items-center gap-3">
-                    <p className="text-[10px] text-muted">
-                      Need a copy of your booking confirmation or want to test email relays?
-                    </p>
-                    <div className="flex flex-wrap gap-2 w-full sm:w-auto justify-end">
-                      <Button
-                        size="sm"
-                        variant="outline"
-                        className="border-border text-foreground hover:bg-background flex items-center gap-1.5 h-9 rounded-xl font-bold text-xs"
-                        onClick={() => {
-                          setLatestBooking(job);
-                          setShowEmailModal(true);
-                        }}
-                      >
-                        <Mail size={14} className="text-torqued-red" />
-                        Email Sandbox
-                      </Button>
-                      <Button
-                        size="sm"
-                        variant="outline"
-                        className="border-border text-foreground hover:bg-background flex items-center gap-1.5 h-9 rounded-xl font-bold text-xs"
-                        onClick={() => generateBookingPDF(job)}
-                      >
-                        <Download size={14} className="text-torqued-red" />
-                        Download Booking PDF
-                      </Button>
+                  {/* Itemised quote (parts + labour) — loaded on demand from the booking detail */}
+                  {(() => {
+                    const d = jobDetail[job.id];
+                    const qi = d?.quoteItems;
+                    if (!qi) return null;
+                    const parts = Array.isArray(qi.parts) ? qi.parts.filter((p: any) => p.name) : [];
+                    const labourTotal = (qi.labourHours || 0) * (qi.labourRate || 0);
+                    return (
+                      <div className="pt-4 border-t border-border space-y-2">
+                        <p className="text-[10px] font-black uppercase tracking-widest text-muted">Itemised Quote</p>
+                        {parts.map((p: any, i: number) => (
+                          <div key={i} className="flex justify-between text-xs">
+                            <span className="text-foreground/80">{p.name}{p.qty > 1 ? ` ×${p.qty}` : ''}</span>
+                            <span className="font-mono">${((p.unitPrice || 0) * (p.qty || 1)).toFixed(2)}</span>
+                          </div>
+                        ))}
+                        {labourTotal > 0 && (
+                          <div className="flex justify-between text-xs">
+                            <span className="text-foreground/80">Labour ({qi.labourHours}h @ ${qi.labourRate}/hr)</span>
+                            <span className="font-mono">${labourTotal.toFixed(2)}</span>
+                          </div>
+                        )}
+                        {d?.total > 0 && (
+                          <div className="flex justify-between text-sm font-bold pt-2 border-t border-border">
+                            <span>Total (GST incl.)</span>
+                            <span className="text-torqued-red font-mono">${Number(d.total).toFixed(2)}</span>
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })()}
+
+                  {/* Reschedule editor (business-day date + workshop time slots, like the initial booking) */}
+                  {reschedJob === job.id && (
+                    <div className="pt-4 border-t border-border space-y-3">
+                      <p className="text-[10px] font-black uppercase tracking-widest text-muted">Reschedule drop-off</p>
+                      <input type="date" min={new Date().toISOString().slice(0, 10)} value={reschedDate}
+                        onChange={(e) => setReschedDate(e.target.value)}
+                        className="bg-background border border-border rounded-xl px-3 py-2 outline-none text-foreground text-sm focus:border-torqued-red w-full" />
+                      <div className="grid grid-cols-3 sm:grid-cols-6 gap-2">
+                        {RESCHED_SLOTS.map(t => (
+                          <button key={t} onClick={() => setReschedTime(t)}
+                            className={cn("p-2 rounded-lg border text-[11px] font-bold transition-all",
+                              reschedTime === t ? "border-torqued-red bg-torqued-red text-white" : "border-border bg-card text-muted hover:border-torqued-red/30")}>{t}</button>
+                        ))}
+                      </div>
+                      <div className="flex gap-2">
+                        <Button size="sm" disabled={!reschedDate || jobBusy === job.id} onClick={() => saveReschedule(job)} className="bg-torqued-red">{jobBusy === job.id ? 'Saving…' : 'Save new time'}</Button>
+                        <Button size="sm" variant="ghost" onClick={() => setReschedJob(null)}>Cancel</Button>
+                      </div>
                     </div>
+                  )}
+
+                  <div className="pt-4 border-t border-border flex flex-wrap gap-2 justify-end">
+                    {job.paymentStatus !== 'awaiting_approval' && (
+                      <Button size="sm" variant="outline"
+                        className="border-border text-foreground hover:bg-background flex items-center gap-1.5 h-9 rounded-xl font-bold text-xs"
+                        onClick={() => { setReschedJob(reschedJob === job.id ? null : job.id); setReschedDate((job.date || '').slice(0, 10)); loadJobDetail(job); }}>
+                        <Edit2 size={14} className="text-torqued-red" /> Reschedule
+                      </Button>
+                    )}
+                    <Button size="sm" variant="outline"
+                      className="border-border text-foreground hover:bg-background flex items-center gap-1.5 h-9 rounded-xl font-bold text-xs"
+                      disabled={jobBusy === job.id}
+                      onClick={() => cancelJob(job)}>
+                      <X size={14} className="text-torqued-red" /> Cancel booking
+                    </Button>
+                    <Button size="sm" variant="outline"
+                      className="border-border text-foreground hover:bg-background flex items-center gap-1.5 h-9 rounded-xl font-bold text-xs"
+                      onClick={() => generateBookingPDF(job)}>
+                      <Download size={14} className="text-torqued-red" /> Download Quote PDF
+                    </Button>
                   </div>
                 </Card>
               ))
             )}
+          </section>
+
+          {/* Ask Torqued AI — customer diagnostic assistant */}
+          <section className="space-y-4">
+            <Card className="p-6 bg-gradient-to-br from-torqued-red/10 to-card border-torqued-red/20 flex items-center gap-4 cursor-pointer hover:border-torqued-red/40 transition-all"
+              onClick={() => setChatOpen(true)}>
+              <div className="w-12 h-12 rounded-2xl bg-torqued-red/15 flex items-center justify-center shrink-0">
+                <Sparkles size={22} className="text-torqued-red" />
+              </div>
+              <div className="flex-1 min-w-0">
+                <h4 className="text-lg font-bold">Ask Torqued AI</h4>
+                <p className="text-sm text-muted">Not sure what's wrong? Describe it and get tailored help, then book.</p>
+              </div>
+              <ChevronRight size={20} className="text-muted shrink-0" />
+            </Card>
           </section>
 
           {(() => {
@@ -4290,6 +4557,82 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                   </Button>
                 </div>
               )}
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
+      {/* Customer AI assistant chat modal */}
+      <AnimatePresence>
+        {chatOpen && (
+          <div className="fixed inset-0 z-[110] flex items-end sm:items-center justify-center p-0 sm:p-4 bg-background/80 backdrop-blur-md" onClick={() => setChatOpen(false)}>
+            <motion.div
+              initial={{ opacity: 0, y: 40 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: 40 }}
+              onClick={(e) => e.stopPropagation()}
+              className="w-full sm:max-w-lg h-[85vh] sm:h-[640px] bg-card border border-border sm:rounded-3xl rounded-t-3xl flex flex-col overflow-hidden shadow-2xl">
+              <div className="flex items-center gap-3 p-4 border-b border-border">
+                <div className="w-9 h-9 rounded-xl bg-torqued-red/15 flex items-center justify-center"><Sparkles size={18} className="text-torqued-red" /></div>
+                <div className="flex-1"><h3 className="font-bold leading-none">Torqued Assistant</h3><p className="text-[11px] text-muted mt-0.5">{vehicle ? `Helping with your ${vehicle.make} ${vehicle.model}` : 'Diagnostic & maintenance help'}</p></div>
+                <button onClick={() => setChatOpen(false)} className="p-2 hover:bg-background rounded-lg"><X size={18} className="text-muted" /></button>
+              </div>
+
+              <div className="flex-1 overflow-y-auto p-4 space-y-3">
+                {chatMessages.length === 0 && (
+                  <div className="space-y-3">
+                    <Card className="p-4 bg-background border-border"><p className="text-sm text-muted">Tell me what's worrying you about your car, or ask a maintenance question. I can see your vehicles and service history to tailor the answer — then help you book.</p></Card>
+                    {chatStarters.map(s => (
+                      <button key={s} onClick={() => sendChat(s)} className="w-full text-left text-sm p-3 rounded-xl border border-border bg-background hover:border-torqued-red/30 transition-all flex items-center justify-between gap-2">
+                        <span>{s}</span><ChevronRight size={16} className="text-torqued-red shrink-0" />
+                      </button>
+                    ))}
+                  </div>
+                )}
+                {chatMessages.map((m, i) => (
+                  <div key={i} className={cn('flex flex-col', m.role === 'user' ? 'items-end' : 'items-start')}>
+                    {m.image && (
+                      <img src={m.image} alt="attached" className="max-h-36 rounded-xl object-cover mb-1 border border-border" />
+                    )}
+                    <div className={cn('max-w-[85%] rounded-2xl px-4 py-2.5 text-sm whitespace-pre-wrap', m.role === 'user' ? 'bg-torqued-red text-white' : 'bg-background border border-border text-foreground')}>
+                      {m.text}
+                      {m.role === 'assistant' && i === chatMessages.length - 1 && !chatBusy && (
+                        <button onClick={() => { setChatOpen(false); setView('quote'); setStep(2); }} className="mt-3 inline-flex items-center gap-1.5 bg-torqued-red text-white text-xs font-bold px-3 py-1.5 rounded-lg">
+                          <Wrench size={13} /> Book a service
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                ))}
+                {chatBusy && <div className="flex justify-start"><div className="bg-background border border-border rounded-2xl px-4 py-3 text-sm text-muted">Thinking…</div></div>}
+              </div>
+
+              <div className="p-3 border-t border-border space-y-2">
+                {chatPhoto && (
+                  <div className="relative w-fit">
+                    <img src={chatPhoto} alt="pending" className="h-16 rounded-xl object-cover border border-torqued-red/40" />
+                    <button onClick={() => setChatPhoto(null)} className="absolute -top-1 -right-1 w-5 h-5 bg-torqued-red rounded-full flex items-center justify-center text-white text-[10px]">✕</button>
+                  </div>
+                )}
+                <div className="flex items-end gap-2">
+                  <label className="cursor-pointer flex items-center justify-center w-10 h-10 bg-background border border-border rounded-xl text-muted hover:border-torqued-red hover:text-torqued-red transition-all shrink-0">
+                    <Camera size={17} />
+                    <input type="file" accept="image/*" className="hidden" onChange={e => {
+                      const f = e.target.files?.[0]; if (!f) return;
+                      const reader = new FileReader();
+                      reader.onload = ev => setChatPhoto(ev.target?.result as string);
+                      reader.readAsDataURL(f);
+                      e.target.value = '';
+                    }} />
+                  </label>
+                  <textarea
+                    value={chatInput} onChange={(e) => setChatInput(e.target.value)}
+                    onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendChat(chatInput); } }}
+                    rows={1} placeholder="Ask about your car or attach a photo…"
+                    className="flex-1 resize-none bg-background border border-border rounded-xl px-3 py-2.5 text-sm outline-none focus:border-torqued-red text-foreground max-h-28" />
+                  <button onClick={() => sendChat(chatInput)} disabled={chatBusy || (!chatInput.trim() && !chatPhoto)} className="w-10 h-10 rounded-xl bg-torqued-red text-white flex items-center justify-center disabled:opacity-40 shrink-0">
+                    <Send size={18} />
+                  </button>
+                </div>
+              </div>
             </motion.div>
           </div>
         )}

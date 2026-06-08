@@ -34,7 +34,9 @@ import {
   Sun,
   Moon,
   Monitor,
-  Activity
+  Activity,
+  Camera,
+  Sparkles
 } from 'lucide-react';
 import { Logo } from '../components/Logo';
 import { Button } from '../components/Button';
@@ -49,12 +51,10 @@ import { useEffect } from 'react';
 import { supabase } from '../lib/supabase';
 import { authPasskey, registerPasskey, passkeysSupported } from '../lib/passkey';
 import { SERVICES } from '../constants';
-import { 
-  InventoryPart, 
-  VehicleHistoryItem, 
-  Recommendation, 
-  Supplier, 
-  PartOffer, 
+import {
+  InventoryPart,
+  Supplier,
+  PartOffer,
   RequiredPart,
   ProcurementItem,
   DeliveryItem
@@ -166,22 +166,6 @@ const REVENUE_DATA = [
   { day: 'Sun', amount: 0 },
 ];
 
-const VEHICLE_HISTORY_RAH190: VehicleHistoryItem[] = [
-  { id: 'h1', date: '01/01/2025', service: 'Purchased (import)', provider: 'Japanese Auction', isExternal: true },
-  { id: 'h2', date: '14/01/2025', mileage: 93000, service: 'Coolant topped up (EV system)', provider: 'VAG Dealership', isExternal: true },
-  { id: 'h3', date: '07/07/2025', service: 'Full Service', provider: 'Anthony Motors', isExternal: true },
-  { id: 'h4', date: '09/07/2025', service: 'DSG Service', provider: 'Precision Mechanical', isExternal: true },
-  { id: 'h5', date: '10/10/2025', service: '12v Battery Changed', provider: 'Auto Electricians', isExternal: true },
-  { id: 'h6', date: '22/01/2026', service: 'Oil change, water pump, cambelt', provider: 'Precision Mechanical', isExternal: true },
-];
-
-const RECOMMENDATIONS_RAH190: Recommendation[] = [
-  { id: 'r1', trigger: '118,000 km', task: 'Oil change service', priority: 'medium' },
-  { id: 'r2', trigger: '120,000 km', task: 'Spark plugs replacement', priority: 'medium' },
-  { id: 'r3', trigger: '120,000 km', task: 'Check brakes and brake fluid', priority: 'high' },
-  { id: 'r5', trigger: '140,000 km', task: 'DSG Service (DQ400e cycle)', priority: 'medium' },
-  { id: 'r6', trigger: '30/12/2026', task: 'Wark of Fitness (WoF) Renewal', priority: 'high' },
-];
 
 export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) => {
   const { theme, setTheme } = useTheme();
@@ -217,12 +201,32 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
   }, [user]);
 
   // Capacity settings
-  const [cap, setCap] = useState({ technicians: 1, parts_lead_days: 1, labour_rate: 145 });
+  const [cap, setCap] = useState({ technicians: 1, parts_lead_days: 1, labour_rate: 145, cancellation_notice_hours: 72, cancellation_partial_refund_pct: 80 });
   const [capSaving, setCapSaving] = useState(false);
 
   // Service packages
   const [packages, setPackages] = useState<any[]>([]);
-  const [newPkg, setNewPkg] = useState({ name: '', price: '', durationMin: '60', description: '', oilLitres: '', oilCostPerL: '' });
+  const [newPkg, setNewPkg] = useState({
+    name: '', price: '', durationMin: '60', description: '',
+    baseFee: '', oilLitres: '', oilCostPerL: '', oilGrade: '', filterCost: '',
+    includedItems: [] as string[], newIncludedItem: '',
+    type: 'standard' as 'standard' | 'transmission',
+    transOilLitres: '', transOilCostPerL: '', freight: '', scanToolFee: '',
+  });
+  const [oilPriceLookupBusy, setOilPriceLookupBusy] = useState(false);
+  const lookupOilPrice = async (grade: string) => {
+    if (!grade.trim()) { alert('Enter an oil grade first (e.g. 5W-30).'); return; }
+    setOilPriceLookupBusy(true);
+    try {
+      const r = await fetch('/api/ai/oil-price', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ grade }) });
+      const d = await r.json();
+      if (d.pricePerLitre) setNewPkg(p => ({ ...p, oilCostPerL: String(d.pricePerLitre) }));
+      else alert(d.error || 'Could not retrieve oil price.');
+    } catch { alert('Oil price lookup failed.'); }
+    finally { setOilPriceLookupBusy(false); }
+  };
+  const [manualQuoteFilter, setManualQuoteFilter] = useState<'queue' | 'sent'>('queue');
+  const [chatPhoto, setChatPhoto] = useState<string | null>(null);
   useEffect(() => {
     if (!user) return;
     fetch(`/api/mechanic/packages?mechanicId=${user.id}`).then(r => r.json()).then(d => setPackages(d.packages || [])).catch(() => {});
@@ -487,7 +491,10 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
       .single()
       .then(({ data }) => {
         if (!data) return;
-        setCap({ technicians: data.technicians ?? 1, parts_lead_days: data.parts_lead_days ?? 1, labour_rate: data.labour_rate ?? 145 });
+        setCap(prev => ({ ...prev, technicians: data.technicians ?? 1, parts_lead_days: data.parts_lead_days ?? 1, labour_rate: data.labour_rate ?? 145 }));
+        // Cancellation policy is read separately so a not-yet-run migration can't break the profile load.
+        supabase.from('profiles').select('cancellation_notice_hours, cancellation_partial_refund_pct').eq('id', user.id).single()
+          .then(({ data: cd }: any) => { if (cd) setCap(prev => ({ ...prev, cancellation_notice_hours: cd.cancellation_notice_hours ?? 72, cancellation_partial_refund_pct: cd.cancellation_partial_refund_pct ?? 80 })); });
         setProfileData(prev => ({
           ...prev,
           name: data.name || prev.name,
@@ -519,8 +526,8 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
         setWeekRevenue(Math.round(paidThisWeek.reduce((s: number, r: any) => s + (parseFloat(r.total_price) || 0) * 0.96, 0)));
         // Job History = accepted/in-progress/completed jobs + all cold quotes (mechanic-created)
         setPastJobs(all.filter((r: any) => ['completed', 'in_progress'].includes(r.status) || r.is_cold_quote));
-        // Incoming queue = real customer jobs still needing action (cold quotes excluded — they live in History)
-        const data = all.filter((r: any) => ['booked', 'pending_payment', 'pending'].includes(r.status) && !r.is_cold_quote);
+        // Incoming queue = real customer jobs still needing action + quoted jobs (show in SENT filter)
+        const data = all.filter((r: any) => ['booked', 'pending_payment', 'pending', 'quoted'].includes(r.status) && !r.is_cold_quote);
         if (!data || data.length === 0) { setIncomingJobs([]); return; }
         const jobs = data.map((row: any) => ({
           id: row.id,
@@ -530,7 +537,7 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
           suggestedQuote: parseFloat(row.total_price) || 0,
           services: (row.service_ids || []).map((id: string) => SERVICES.find(s => s.id === id)?.name || id),
           description: row.description || row.fault_code || '',
-          status: row.status === 'booked' ? 'Booked via Torqued' : 'Awaiting Payment',
+          status: row.status === 'booked' ? 'Booked via Torqued' : row.status === 'quoted' ? 'Quote Sent' : 'Awaiting Payment',
           partsMatch: 0,
           profit: Math.round((parseFloat(row.total_price) || 0) * 0.65),
           requiredParts: [],
@@ -601,12 +608,13 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
     savePartsToOrder([...partsToOrder, { id: Math.random().toString(36).slice(2), name: clean, qty, forRego }]);
   };
 
-  const sendChat = async () => {
-    const text = chatInput.trim();
-    if (!text || chatBusy) return;
+  const sendChat = async (overrideText?: string) => {
+    const text = (overrideText ?? chatInput).trim();
+    const photo = chatPhoto;
+    if (!text && !photo || chatBusy) return;
     // Command: "order: <part> [xN]" adds straight to the parts-to-order list (no AI call)
     const orderCmd = text.match(/^(?:order|add to order(?: list)?)\s*[:\-]?\s*(.+)/i);
-    if (orderCmd) {
+    if (orderCmd && !photo) {
       const raw = orderCmd[1].trim();
       const qm = raw.match(/\s*x\s*(\d+)\s*$/i);
       const qty = qm ? parseInt(qm[1], 10) : 1;
@@ -616,18 +624,83 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
       setChatInput('');
       return;
     }
-    const next = [...chatMessages, { role: 'user' as const, content: text }];
-    setChatMessages(next); setChatInput(''); setChatBusy(true);
+    const userMsg: any = { role: 'user' as const, content: text || 'What can you see in this image?' };
+    if (photo) userMsg.image = photo;
+    const next = [...chatMessages, userMsg];
+    setChatMessages(next); setChatInput(''); setChatPhoto(null); setChatBusy(true);
     try {
       const r = await fetch('/api/ai/mechanic-assistant', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ messages: next, vehicle: quoteJob?.model || undefined }),
+        body: JSON.stringify({ messages: next, vehicle: quoteJob?.model || undefined, rego: quoteJob?.reg || undefined, mechanicId: user?.id }),
       });
       const d = await r.json();
       setChatMessages(m => [...m, { role: 'assistant', content: r.ok ? d.reply : (d.error || 'Assistant unavailable.') }]);
     } catch {
       setChatMessages(m => [...m, { role: 'assistant', content: 'Could not reach the assistant.' }]);
     } finally { setChatBusy(false); }
+  };
+
+  // Job notes: { [bookingId]: { open: bool, notes: [], input: str, loading: bool } }
+  const [jobNotes, setJobNotes] = useState<Record<string, { open: boolean; notes: { id: string; note: string; author: string; created_at: string }[]; input: string; loading: boolean }>>({});
+  // Vehicle photos per rego
+  const [vehiclePhotos, setVehiclePhotos] = useState<Record<string, { open: boolean; photos: { id: string; photo_url: string; comment: string; uploaded_by: string; created_at: string; booking_id?: string }[]; comment: string; loading: boolean }>>({});
+
+  const openJobNotes = async (bookingId: string) => {
+    setJobNotes(prev => ({ ...prev, [bookingId]: { ...prev[bookingId], open: true, loading: true, notes: prev[bookingId]?.notes || [], input: prev[bookingId]?.input || '' } }));
+    try {
+      const r = await fetch(`/api/booking/${bookingId}/notes`);
+      const d = await r.json();
+      setJobNotes(prev => ({ ...prev, [bookingId]: { ...prev[bookingId], notes: d.notes || [], loading: false } }));
+    } catch { setJobNotes(prev => ({ ...prev, [bookingId]: { ...prev[bookingId], loading: false } })); }
+  };
+
+  const addJobNote = async (bookingId: string) => {
+    const s = jobNotes[bookingId];
+    if (!s?.input?.trim()) return;
+    const note = s.input.trim();
+    setJobNotes(prev => ({ ...prev, [bookingId]: { ...prev[bookingId], input: '', loading: true } }));
+    try {
+      const r = await fetch(`/api/booking/${bookingId}/notes`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ note, author: profileData.name || 'mechanic' }),
+      });
+      const d = await r.json();
+      if (d.note) setJobNotes(prev => ({ ...prev, [bookingId]: { ...prev[bookingId], notes: [d.note, ...(prev[bookingId]?.notes || [])], loading: false } }));
+    } catch { setJobNotes(prev => ({ ...prev, [bookingId]: { ...prev[bookingId], loading: false } })); }
+  };
+
+  const deleteJobNote = async (bookingId: string, noteId: string) => {
+    await fetch(`/api/booking/${bookingId}/notes/${noteId}`, { method: 'DELETE' });
+    setJobNotes(prev => ({ ...prev, [bookingId]: { ...prev[bookingId], notes: (prev[bookingId]?.notes || []).filter(n => n.id !== noteId) } }));
+  };
+
+  const openVehiclePhotos = async (rego: string) => {
+    setVehiclePhotos(prev => ({ ...prev, [rego]: { ...prev[rego], open: true, loading: true, photos: prev[rego]?.photos || [], comment: prev[rego]?.comment || '' } }));
+    try {
+      const r = await fetch(`/api/vehicle-photos/${rego}`);
+      const d = await r.json();
+      setVehiclePhotos(prev => ({ ...prev, [rego]: { ...prev[rego], photos: d.photos || [], loading: false } }));
+    } catch { setVehiclePhotos(prev => ({ ...prev, [rego]: { ...prev[rego], loading: false } })); }
+  };
+
+  const uploadVehiclePhoto = async (rego: string, file: File, bookingId?: string) => {
+    setVehiclePhotos(prev => ({ ...prev, [rego]: { ...prev[rego], loading: true } }));
+    try {
+      const base64 = await new Promise<string>((res, rej) => {
+        const reader = new FileReader(); reader.onload = () => res(reader.result as string); reader.onerror = rej; reader.readAsDataURL(file);
+      });
+      const comment = vehiclePhotos[rego]?.comment || '';
+      const r = await fetch('/api/vehicle-photos', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ rego, bookingId: bookingId || null, imageBase64: base64, comment, uploadedBy: profileData.name || 'mechanic' }),
+      });
+      const d = await r.json();
+      if (d.photo) {
+        setVehiclePhotos(prev => ({ ...prev, [rego]: { ...prev[rego], photos: [d.photo, ...(prev[rego]?.photos || [])], comment: '', loading: false } }));
+      } else {
+        setVehiclePhotos(prev => ({ ...prev, [rego]: { ...prev[rego], loading: false } }));
+      }
+    } catch { setVehiclePhotos(prev => ({ ...prev, [rego]: { ...prev[rego], loading: false } })); }
   };
 
   const [showColdQuote, setShowColdQuote] = useState(false);
@@ -678,11 +751,39 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
       .catch(() => setJobHistory([]));
   }, [selectedJobId, incomingJobs]);
 
-  // Mechanic records the odometer at check-in / check-out → updates system-wide for that rego
+  // Check-out modal state
+  const [checkoutModal, setCheckoutModal] = useState<{ job: any } | null>(null);
+  const [checkoutKm, setCheckoutKm] = useState('');
+  const [checkoutNotes, setCheckoutNotes] = useState('');
+  const [checkoutBusy, setCheckoutBusy] = useState(false);
+
+  const openCheckout = (job: any) => { setCheckoutModal({ job }); setCheckoutKm(''); setCheckoutNotes(''); };
+
+  const confirmCheckout = async () => {
+    if (!checkoutModal) return;
+    const { job } = checkoutModal;
+    const km = parseInt(checkoutKm.replace(/\D/g, ''), 10);
+    if (!Number.isFinite(km) || km <= 0) { alert('Please enter a valid odometer reading.'); return; }
+    setCheckoutBusy(true);
+    try {
+      const r = await fetch('/api/mechanic/car-ready', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ bookingId: job.id, km, notes: checkoutNotes.trim() || undefined, mechanicName: profileData.name }),
+      });
+      if (!r.ok) { alert('Could not complete checkout. Please try again.'); return; }
+      setPastJobs(prev => prev.filter((j: any) => j.id !== job.id));
+      setIncomingJobs(prev => prev.filter(j => j.id !== job.id));
+      setCheckoutModal(null);
+    } catch { alert('Could not complete checkout.'); }
+    finally { setCheckoutBusy(false); }
+  };
+
+  // Mechanic records the odometer at check-in
   const recordMileage = async (job: any, phase: 'in' | 'out') => {
+    if (phase === 'out') { openCheckout(job); return; }
     const reg = job.reg;
     if (!reg) { alert('No registration on this job.'); return; }
-    const entered = prompt(`Odometer reading (km) at ${phase === 'in' ? 'check-IN (vehicle received)' : 'check-OUT (vehicle returned)'} for ${reg}:`);
+    const entered = prompt(`Odometer reading (km) at check-IN (vehicle received) for ${reg}:`);
     if (entered == null) return;
     const km = parseInt(entered.replace(/\D/g, ''), 10);
     if (!Number.isFinite(km) || km <= 0) { alert('Please enter a valid number.'); return; }
@@ -692,15 +793,7 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
         body: JSON.stringify({ mileage: km, phase, bookingId: job.id }),
       });
       if (!r.ok) { alert('Could not save mileage.'); return; }
-      // Check-OUT completes the job: mark complete + send the review request to the customer
-      if (phase === 'out') {
-        await fetch('/api/mechanic/update-job-status', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ bookingId: job.id, status: 'completed' }) });
-        await fetch('/api/reviews/request', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ bookingId: job.id }) }).catch(() => {});
-        setIncomingJobs(prev => prev.filter(j => j.id !== job.id));
-        alert(`Checked out at ${km.toLocaleString()} km. Job completed and a review request was emailed to the customer.`);
-      } else {
-        alert(`Checked in at ${km.toLocaleString()} km. Updated system-wide for ${reg}.`);
-      }
+      alert(`Checked in at ${km.toLocaleString()} km. Updated system-wide for ${reg}.`);
     } catch { alert('Could not save mileage.'); }
   };
 
@@ -1212,12 +1305,18 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
   );
 
   const renderIncomingJobs = (showOnlyDiagnostics = false) => {
+    const allDiagnosticJobs = incomingJobs.filter(isDiagnosticJob);
+    const queueJobs = allDiagnosticJobs.filter(j => !j.quoteItems);
+    const sentDiagJobs = allDiagnosticJobs.filter(j => !!j.quoteItems);
+    const sentColdJobs = pastJobs.filter((j: any) => j.is_cold_quote && !!j.quoteItems);
+    const sentJobs = [...sentDiagJobs, ...sentColdJobs];
+
     const displayJobs = showOnlyDiagnostics
-      ? incomingJobs.filter(isDiagnosticJob)
+      ? (manualQuoteFilter === 'queue' ? queueJobs : sentJobs)
       : incomingJobs.filter(j => !isDiagnosticJob(j));
 
-    const title = showOnlyDiagnostics ? 'Manual Quoting Queue' : 'Incoming Job Requests';
-    const subtitle = showOnlyDiagnostics ? 'Jobs requiring physical diagnostic before final quote' : 'Standard service and repair requests';
+    const title = showOnlyDiagnostics ? 'Manual Quotes' : 'Incoming Job Requests';
+    const subtitle = showOnlyDiagnostics ? 'Diagnostic jobs needing quotes, and sent quotes waiting for booking' : 'Standard service and repair requests';
 
     return (
       <div className="space-y-6">
@@ -1234,27 +1333,63 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
           )}
         </div>
 
+        {showOnlyDiagnostics && (
+          <div className="flex gap-1 p-1 bg-card border border-border rounded-xl w-fit">
+            <button
+              onClick={() => setManualQuoteFilter('queue')}
+              className={cn(
+                'px-4 py-2 rounded-lg text-xs font-black uppercase tracking-wider transition-all',
+                manualQuoteFilter === 'queue'
+                  ? 'bg-torqued-red text-white shadow'
+                  : 'text-muted hover:text-foreground'
+              )}
+            >
+              To Be Quoted {queueJobs.length > 0 && <span className="ml-1.5 bg-white/20 text-inherit px-1.5 py-0.5 rounded-full">{queueJobs.length}</span>}
+            </button>
+            <button
+              onClick={() => setManualQuoteFilter('sent')}
+              className={cn(
+                'px-4 py-2 rounded-lg text-xs font-black uppercase tracking-wider transition-all',
+                manualQuoteFilter === 'sent'
+                  ? 'bg-torqued-red text-white shadow'
+                  : 'text-muted hover:text-foreground'
+              )}
+            >
+              Quoted {sentJobs.length > 0 && <span className="ml-1.5 bg-white/20 text-inherit px-1.5 py-0.5 rounded-full">{sentJobs.length}</span>}
+            </button>
+          </div>
+        )}
+
         <div className="space-y-4">
           {displayJobs.length === 0 ? (
             <div className="text-center py-20 bg-white/5 rounded-3xl border border-dashed border-white/10">
-              <p className="text-white/40 font-bold uppercase tracking-widest">No jobs in this queue</p>
+              <p className="text-white/40 font-bold uppercase tracking-widest">
+                {showOnlyDiagnostics
+                  ? (manualQuoteFilter === 'queue' ? 'No jobs awaiting a quote' : 'No sent quotes pending booking')
+                  : 'No jobs in this queue'}
+              </p>
             </div>
           ) : displayJobs.map(job => (
-          <Card key={job.id} className="p-6 space-y-6 border-border bg-card hover:border-torqued-red transition-all">
+          <Card key={job.id} className={cn("p-6 space-y-6 border-border bg-card hover:border-torqued-red transition-all", job.quoteItems && "border-emerald-500/30")}>
             <div className="flex justify-between items-start">
               <div className="flex gap-4">
                 <div className="w-16 h-16 bg-background border border-border rounded-xl flex items-center justify-center">
                   <Car size={32} className="text-muted/40" />
                 </div>
                 <div>
-                  <div className="torqued-badge text-[10px] mb-1">{job.reg}</div>
+                  <div className="flex items-center gap-2 mb-1">
+                    <div className="torqued-badge text-[10px]">{job.reg}</div>
+                    {job.quoteItems && (
+                      <span className="text-[10px] font-black uppercase tracking-wider px-2 py-0.5 rounded bg-emerald-500/15 text-emerald-500 border border-emerald-500/30">Quote Sent</span>
+                    )}
+                  </div>
                   <h3 className="text-2xl text-foreground font-bold">{job.model}</h3>
                   <p className="text-sm text-muted font-medium">{job.details}</p>
                 </div>
               </div>
               <div className="text-right">
-                <p className="text-[10px] font-bold uppercase text-muted">Suggested Quote</p>
-                <p className="text-2xl font-bold text-torqued-red">{formatCurrency(job.suggestedQuote)} <span className="text-[10px] block font-normal text-muted/50">Incl. GST</span></p>
+                <p className="text-[10px] font-bold uppercase text-muted">{job.quoteItems ? 'Quoted Price' : 'Suggested Quote'}</p>
+                <p className="text-2xl font-bold text-torqued-red">{formatCurrency(job.quoteItems ? (job.quoteItems.parts?.reduce((s: number, p: any) => s + (p.qty||0)*(p.unitPrice||0), 0) + (job.quoteItems.labourHours||0)*(job.quoteItems.labourRate||0) + (job.quoteItems.other||[]).reduce((s: number, o: any) => s + (o.amount||0), 0) - (job.quoteItems.discount||0)) : job.suggestedQuote)} <span className="text-[10px] block font-normal text-muted/50">Incl. GST</span></p>
               </div>
             </div>
 
@@ -1354,7 +1489,18 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
             <div className="flex gap-3 pt-4 border-t border-border">
               {showOnlyDiagnostics ? (
                 <>
-                  <Button className="flex-1 bg-torqued-red text-white" onClick={() => openQuoteEditor(job)}>Write Manual Quote</Button>
+                  {job.quoteItems ? (
+                    <>
+                      <Button className="flex-1 bg-emerald-600 hover:bg-emerald-700 text-white font-bold" onClick={() => {
+                        fetch('/api/mechanic/update-job-status', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ bookingId: job.id, status: 'in_progress' }) }).catch(() => {});
+                        setIncomingJobs(prev => prev.map(j => j.id === job.id ? { ...j, services: j.services.filter(s => s !== 'Diagnostic Inspection').concat(['Quoted Job']) } : j));
+                        setActiveTab('jobs');
+                      }}>Move to My Jobs</Button>
+                      <Button className="bg-torqued-red text-white" onClick={() => openQuoteEditor(job)}>Revise Quote</Button>
+                    </>
+                  ) : (
+                    <Button className="flex-1 bg-torqued-red text-white" onClick={() => openQuoteEditor(job)}>Write Manual Quote</Button>
+                  )}
                   <Button variant="outline" className="border-border text-foreground hover:bg-card" onClick={() => setSelectedJobId(job.id)}>Diagnostic Report</Button>
                   <Button variant="outline" className="border-border text-foreground hover:bg-card" onClick={() => recordMileage(job, 'in')}>Check-in km</Button>
                   <Button variant="outline" className="border-border text-foreground hover:bg-card" onClick={() => messageCustomer(job)}>Message</Button>
@@ -1454,49 +1600,6 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
         </Card>
 
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 sm:gap-6">
-          <Card className="p-4 sm:p-6 space-y-4 sm:space-y-6 bg-card border-border shadow-sm">
-            <div className="flex items-center gap-2 border-b border-border pb-4 mb-4">
-              <Wrench size={20} className="text-torqued-red" />
-              <h3 className="text-xl text-foreground font-bold">Business Info</h3>
-            </div>
-            <div className="grid grid-cols-1 gap-4">
-              <Input label="Workshop Name" value={profileData.name} onChange={(e) => setProfileData({...profileData, name: e.target.value})} className="bg-background text-foreground" />
-              <Input label="NZBN" value={profileData.nzbn} onChange={(e) => setProfileData({...profileData, nzbn: e.target.value})} className="bg-background text-foreground" />
-              <Input label="Phone" value={profileData.phone} onChange={(e) => setProfileData({...profileData, phone: e.target.value})} className="bg-background text-foreground" />
-              <Input label="Public Address" value={profileData.address} onChange={(e) => setProfileData({...profileData, address: e.target.value})} className="bg-background text-foreground" />
-            </div>
-          </Card>
-
-          <Card className="p-6 space-y-6">
-            <div className="flex items-center gap-2 border-b border-black/5 pb-4 mb-4">
-              <Map size={20} className="text-torqued-red" />
-              <h3 className="text-xl">Service Areas</h3>
-            </div>
-            <div className="space-y-4">
-              <p className="text-xs font-bold uppercase text-black/40">Regions you cover</p>
-              <div className="flex flex-wrap gap-2">
-                {profileData.serviceAreas.map(area => (
-                  <span key={area} className="px-3 py-1.5 bg-black/5 rounded-lg text-xs font-bold flex items-center gap-2">
-                    {area}
-                    <button className="text-black/20 hover:text-torqued-red"><X size={12} /></button>
-                  </span>
-                ))}
-                <button className="px-3 py-1.5 border border-dashed border-black/20 rounded-lg text-xs font-bold text-black/40 hover:border-torqued-red hover:text-torqued-red transition-all flex items-center gap-1">
-                  <Plus size={12} /> Add Area
-                </button>
-              </div>
-              <div className="p-4 bg-torqued-red/5 rounded-xl border border-torqued-red/10 space-y-2">
-                <div className="flex items-center gap-2 text-torqued-red font-bold uppercase text-[10px]">
-                  <Info size={12} /> Mobile Service Radius
-                </div>
-                <div className="flex items-center gap-4">
-                  <input type="range" min="0" max="100" defaultValue="25" className="flex-1 accent-torqued-red" />
-                  <span className="text-sm font-bold">25 km</span>
-                </div>
-              </div>
-            </div>
-          </Card>
-
           <Card className="p-6 space-y-6 bg-card border-border">
             <div className="flex items-center gap-2 border-b border-border pb-4 mb-4">
               <Award size={20} className="text-torqued-red" />
@@ -1612,54 +1715,222 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
         <Button fullWidth size="lg" className="h-16 text-lg" onClick={handleSaveProfile}>Save Profile Updates</Button>
 
         {/* Service Packages */}
-        <Card className="p-6 space-y-4 md:col-span-2">
+        <Card className="p-6 space-y-5 md:col-span-2">
           <div className="flex items-center gap-2 border-b border-black/5 pb-4">
             <Package size={20} className="text-torqued-red" />
             <h3 className="text-xl">Service Packages</h3>
-            <span className="text-[10px] text-muted ml-auto">Optional fixed-price bundles customers can book</span>
+            <span className="text-[10px] text-muted ml-auto">Up to 5 fixed-price bundles customers can book</span>
+            <span className={cn("text-[10px] font-black uppercase px-2 py-0.5 rounded", packages.length >= 5 ? "bg-torqued-red/15 text-torqued-red" : "bg-emerald-500/10 text-emerald-500")}>{packages.length}/5</span>
           </div>
-          <div className="space-y-2">
+
+          <div className="space-y-3">
             {packages.map(p => (
-              <div key={p.id} className="flex items-center justify-between bg-background/50 border border-border rounded-xl p-3">
-                <div>
-                  <p className="font-bold text-sm text-foreground">{p.name} <span className="text-muted font-normal">· {p.duration_min}min</span></p>
-                  {p.description && <p className="text-xs text-muted">{p.description}</p>}
-                </div>
-                <div className="flex items-center gap-3">
-                  <span className="font-black text-torqued-red">${Number(p.price).toFixed(0)}</span>
-                  <button onClick={async () => {
-                    await fetch('/api/mechanic/packages/delete', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id: p.id, mechanicId: user!.id }) });
-                    setPackages(packages.filter(x => x.id !== p.id));
-                  }} className="text-muted hover:text-torqued-red"><Trash2 size={15} /></button>
+              <div key={p.id} className="bg-background/50 border border-border rounded-xl p-4 space-y-2">
+                <div className="flex items-start justify-between gap-3">
+                  <div className="flex-1">
+                    <div className="flex items-center gap-2">
+                      <p className="font-bold text-sm text-foreground">{p.name}</p>
+                      <span className="text-[10px] text-muted">· {p.duration_min}min</span>
+                      {p.pkg_type === 'transmission' && <span className="text-[10px] font-black uppercase px-1.5 py-0.5 rounded bg-blue-500/15 text-blue-400">Transmission</span>}
+                    </div>
+                    {p.description && <p className="text-xs text-muted mt-0.5">{p.description}</p>}
+                    {/* Price breakdown */}
+                    {p.pkg_type === 'standard' && (p.oil_litres || p.base_fee || p.filter_cost) ? (
+                      <div className="flex flex-wrap gap-x-3 gap-y-0.5 mt-1">
+                        {p.base_fee > 0 && <span className="text-[10px] text-muted">Service fee: <span className="font-bold text-foreground">${Number(p.base_fee).toFixed(0)}</span></span>}
+                        {p.oil_litres > 0 && p.oil_cost_per_l > 0 && <span className="text-[10px] text-muted">{p.oil_litres}L {p.oil_grade || 'oil'} @ ${Number(p.oil_cost_per_l).toFixed(2)}/L = <span className="font-bold text-foreground">${(p.oil_litres * p.oil_cost_per_l).toFixed(2)}</span></span>}
+                        {p.filter_cost > 0 && <span className="text-[10px] text-muted">Filter: <span className="font-bold text-foreground">${Number(p.filter_cost).toFixed(2)}</span></span>}
+                      </div>
+                    ) : p.pkg_type === 'transmission' && (p.trans_oil_litres || p.freight || p.scan_tool_fee) ? (
+                      <div className="flex flex-wrap gap-x-3 gap-y-0.5 mt-1">
+                        {p.base_fee > 0 && <span className="text-[10px] text-muted">Labour 1hr: <span className="font-bold text-foreground">${Number(p.base_fee).toFixed(0)}</span></span>}
+                        {p.trans_oil_litres > 0 && p.trans_oil_cost_per_l > 0 && <span className="text-[10px] text-muted">{p.trans_oil_litres}L fluid @ ${Number(p.trans_oil_cost_per_l).toFixed(2)}/L = <span className="font-bold text-foreground">${(p.trans_oil_litres * p.trans_oil_cost_per_l).toFixed(2)}</span></span>}
+                        {p.freight > 0 && <span className="text-[10px] text-muted">Freight: <span className="font-bold text-foreground">${Number(p.freight).toFixed(2)}</span></span>}
+                        {p.scan_tool_fee > 0 && <span className="text-[10px] text-muted">Scan tool: <span className="font-bold text-foreground">${Number(p.scan_tool_fee).toFixed(2)}</span></span>}
+                      </div>
+                    ) : null}
+                    {p.included_items?.length > 0 && (
+                      <div className="flex flex-wrap gap-1 mt-1.5">
+                        {p.included_items.map((item: string, i: number) => (
+                          <span key={i} className="text-[10px] bg-card border border-border px-2 py-0.5 rounded text-muted">✓ {item}</span>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                  <div className="flex items-center gap-3 shrink-0">
+                    <span className="font-black text-torqued-red">${Number(p.price).toFixed(0)}</span>
+                    <button onClick={async () => {
+                      await fetch('/api/mechanic/packages/delete', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id: p.id, mechanicId: user!.id }) });
+                      setPackages(packages.filter(x => x.id !== p.id));
+                    }} className="text-muted hover:text-torqued-red"><Trash2 size={15} /></button>
+                  </div>
                 </div>
               </div>
             ))}
-            {packages.length === 0 && <p className="text-sm text-muted">No packages yet. Add one below.</p>}
+            {packages.length === 0 && <p className="text-sm text-muted italic">No packages yet. Add up to 5 below.</p>}
           </div>
-          <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
-            <Input placeholder="Name (e.g. Basic Service)" value={newPkg.name} onChange={e => setNewPkg({ ...newPkg, name: e.target.value })} className="sm:col-span-2 bg-background text-foreground" />
-            <Input placeholder="Price $" type="number" value={newPkg.price} onChange={e => setNewPkg({ ...newPkg, price: e.target.value })} className="bg-background text-foreground" />
-            <Input placeholder="Mins" type="number" value={newPkg.durationMin} onChange={e => setNewPkg({ ...newPkg, durationMin: e.target.value })} className="bg-background text-foreground" />
-          </div>
-          {/* Oil pricing sync: refill capacity × oil cost → adds to package price */}
-          <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 items-center">
-            <Input placeholder="Oil refill (L)" type="number" value={newPkg.oilLitres} onChange={e => setNewPkg({ ...newPkg, oilLitres: e.target.value })} className="bg-background text-foreground" />
-            <Input placeholder="Oil $/L" type="number" value={newPkg.oilCostPerL} onChange={e => setNewPkg({ ...newPkg, oilCostPerL: e.target.value })} className="bg-background text-foreground" />
-            {(() => {
-              const oilCost = (parseFloat(newPkg.oilLitres) || 0) * (parseFloat(newPkg.oilCostPerL) || 0);
-              return (
-                <div className="col-span-2 flex items-center gap-2">
-                  <span className="text-xs text-muted">Oil cost: <span className="font-bold text-foreground">${oilCost.toFixed(2)}</span></span>
-                  {oilCost > 0 && <button onClick={() => setNewPkg(p => ({ ...p, price: String((parseFloat(p.price) || 0) + oilCost) }))} className="text-[10px] font-bold text-torqued-red underline">+ add to price</button>}
+
+          {packages.length < 5 && (
+            <div className="space-y-4 pt-2 border-t border-border">
+              <p className="text-[10px] font-black uppercase tracking-widest text-muted">New Package</p>
+
+              {/* Package type toggle */}
+              <div className="flex gap-1 p-1 bg-background border border-border rounded-xl w-fit">
+                <button onClick={() => setNewPkg(p => ({ ...p, type: 'standard' }))} className={cn("px-3 py-1.5 rounded-lg text-xs font-black uppercase transition-all", newPkg.type === 'standard' ? 'bg-torqued-red text-white' : 'text-muted hover:text-foreground')}>Standard Service</button>
+                <button onClick={() => setNewPkg(p => ({ ...p, type: 'transmission' }))} className={cn("px-3 py-1.5 rounded-lg text-xs font-black uppercase transition-all", newPkg.type === 'transmission' ? 'bg-blue-600 text-white' : 'text-muted hover:text-foreground')}>Transmission Service</button>
+              </div>
+
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+                <Input placeholder="Package name" value={newPkg.name} onChange={e => setNewPkg({ ...newPkg, name: e.target.value })} className="sm:col-span-2 bg-background text-foreground" />
+                <Input placeholder="Duration (min)" type="number" value={newPkg.durationMin} onChange={e => setNewPkg({ ...newPkg, durationMin: e.target.value })} className="bg-background text-foreground" />
+                <Input placeholder="Base fee $" type="number" value={newPkg.baseFee} onChange={e => setNewPkg({ ...newPkg, baseFee: e.target.value })} className="bg-background text-foreground" />
+              </div>
+
+              {/* Oil / fluid pricing */}
+              {newPkg.type === 'standard' && (
+                <div className="space-y-2">
+                  <p className="text-[10px] font-black uppercase tracking-widest text-muted">Engine Oil (match vehicle refill capacity)</p>
+                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 items-end">
+                    <Input placeholder="Oil refill capacity (L)" type="number" value={newPkg.oilLitres} onChange={e => setNewPkg({ ...newPkg, oilLitres: e.target.value })} className="bg-background text-foreground" />
+                    <div className="flex gap-1.5 items-end">
+                      <Input placeholder="Oil grade e.g. 5W-30" value={newPkg.oilGrade} onChange={e => setNewPkg({ ...newPkg, oilGrade: e.target.value })} className="bg-background text-foreground flex-1" />
+                      <button
+                        onClick={() => lookupOilPrice(newPkg.oilGrade)}
+                        disabled={oilPriceLookupBusy}
+                        className="h-10 px-2.5 bg-torqued-red/10 border border-torqued-red/30 rounded-xl text-[10px] font-black text-torqued-red uppercase hover:bg-torqued-red/20 disabled:opacity-50 shrink-0 flex items-center gap-1"
+                        title="AI oil price lookup"
+                      >
+                        {oilPriceLookupBusy ? '…' : '✦ AI'}
+                      </button>
+                    </div>
+                    <Input placeholder="$ per litre" type="number" value={newPkg.oilCostPerL} onChange={e => setNewPkg({ ...newPkg, oilCostPerL: e.target.value })} className="bg-background text-foreground" />
+                    {(() => {
+                      const oilCost = (parseFloat(newPkg.oilLitres) || 0) * (parseFloat(newPkg.oilCostPerL) || 0);
+                      const filterCost = parseFloat(newPkg.filterCost) || 0;
+                      const base = parseFloat(newPkg.baseFee) || 0;
+                      const total = base + oilCost + filterCost;
+                      return (
+                        <div className="flex items-center gap-3 flex-wrap">
+                          {oilCost > 0 && <span className="text-xs text-muted">Oil: <span className="font-bold text-foreground">${oilCost.toFixed(2)}</span></span>}
+                          {filterCost > 0 && <span className="text-xs text-muted">Filter: <span className="font-bold text-foreground">${filterCost.toFixed(2)}</span></span>}
+                          {total > 0 && (
+                            <span className="text-xs font-bold text-torqued-red">= ${total.toFixed(2)} total</span>
+                          )}
+                          {total > 0 && (
+                            <button onClick={() => setNewPkg(p => {
+                              const o = (parseFloat(p.oilLitres)||0)*(parseFloat(p.oilCostPerL)||0);
+                              const f = parseFloat(p.filterCost)||0;
+                              return { ...p, price: String(parseFloat(p.baseFee||'0') + o + f) };
+                            })} className="text-[10px] font-bold text-torqued-red underline">Set as price</button>
+                          )}
+                        </div>
+                      );
+                    })()}
+                  </div>
+                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 mt-2">
+                    <Input placeholder="Oil filter cost $" type="number" value={newPkg.filterCost} onChange={e => setNewPkg({ ...newPkg, filterCost: e.target.value })} className="bg-background text-foreground" />
+                  </div>
                 </div>
-              );
-            })()}
-          </div>
-          <Button className="bg-torqued-red text-white" disabled={!newPkg.name || !newPkg.price} onClick={async () => {
-            const r = await fetch('/api/mechanic/packages', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ mechanicId: user!.id, name: newPkg.name, price: parseFloat(newPkg.price), durationMin: parseInt(newPkg.durationMin) || 60, description: newPkg.description }) });
-            const d = await r.json();
-            if (d.package) { setPackages([...packages, d.package]); setNewPkg({ name: '', price: '', durationMin: '60', description: '', oilLitres: '', oilCostPerL: '' }); }
-          }}><Plus size={14} className="mr-1" /> Add Package</Button>
+              )}
+
+              {/* Transmission service specific fields */}
+              {newPkg.type === 'transmission' && (
+                <div className="space-y-2">
+                  <p className="text-[10px] font-black uppercase tracking-widest text-muted">Transmission Service Costs</p>
+                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+                    <Input placeholder="Trans fluid capacity (L)" type="number" value={newPkg.transOilLitres} onChange={e => setNewPkg({ ...newPkg, transOilLitres: e.target.value })} className="bg-background text-foreground" />
+                    <Input placeholder="$ per litre trans fluid" type="number" value={newPkg.transOilCostPerL} onChange={e => setNewPkg({ ...newPkg, transOilCostPerL: e.target.value })} className="bg-background text-foreground" />
+                    <Input placeholder="Freight $" type="number" value={newPkg.freight} onChange={e => setNewPkg({ ...newPkg, freight: e.target.value })} className="bg-background text-foreground" />
+                    <Input placeholder="Scan tool fee $" type="number" value={newPkg.scanToolFee} onChange={e => setNewPkg({ ...newPkg, scanToolFee: e.target.value })} className="bg-background text-foreground" />
+                  </div>
+                  {(() => {
+                    const labourCost = (parseFloat(newPkg.baseFee) || cap.labour_rate || 145);
+                    const fluidCost = (parseFloat(newPkg.transOilLitres) || 0) * (parseFloat(newPkg.transOilCostPerL) || 0);
+                    const freight = parseFloat(newPkg.freight) || 0;
+                    const scanTool = parseFloat(newPkg.scanToolFee) || 0;
+                    const total = labourCost + fluidCost + freight + scanTool;
+                    return total > 0 ? (
+                      <div className="p-3 bg-blue-500/5 border border-blue-500/20 rounded-xl space-y-1.5">
+                        <p className="text-[10px] font-black uppercase text-blue-400">Price Breakdown</p>
+                        <div className="space-y-1 text-xs text-muted">
+                          <div className="flex justify-between"><span>Labour (1hr)</span><span className="font-bold text-foreground">${labourCost.toFixed(2)}</span></div>
+                          {fluidCost > 0 && <div className="flex justify-between"><span>Trans fluid ({newPkg.transOilLitres}L × ${newPkg.transOilCostPerL}/L)</span><span className="font-bold text-foreground">${fluidCost.toFixed(2)}</span></div>}
+                          {freight > 0 && <div className="flex justify-between"><span>Freight</span><span className="font-bold text-foreground">${freight.toFixed(2)}</span></div>}
+                          {scanTool > 0 && <div className="flex justify-between"><span>Scan tool fee</span><span className="font-bold text-foreground">${scanTool.toFixed(2)}</span></div>}
+                          <div className="flex justify-between pt-1 border-t border-border font-black text-foreground"><span>Total</span><span className="text-torqued-red">${total.toFixed(2)}</span></div>
+                        </div>
+                        <button onClick={() => setNewPkg(p => ({ ...p, price: String(total) }))} className="text-[10px] font-bold text-torqued-red underline">Set as price</button>
+                      </div>
+                    ) : null;
+                  })()}
+                </div>
+              )}
+
+              {/* Package description */}
+              <div className="space-y-1">
+                <p className="text-[10px] font-black uppercase tracking-widest text-muted">Package Description</p>
+                <textarea
+                  value={newPkg.description}
+                  onChange={e => setNewPkg(p => ({ ...p, description: e.target.value }))}
+                  placeholder="Describe what this service covers…"
+                  rows={2}
+                  className="w-full bg-background border border-border rounded-xl px-3 py-2 text-xs text-foreground focus:outline-none focus:border-torqued-red resize-none"
+                />
+              </div>
+
+              {/* Included items checklist */}
+              <div className="space-y-2">
+                <p className="text-[10px] font-black uppercase tracking-widest text-muted">What's Included / Checked</p>
+                <div className="flex flex-wrap gap-1.5">
+                  {newPkg.includedItems.map((item, i) => (
+                    <span key={i} className="flex items-center gap-1 text-[10px] bg-card border border-border px-2 py-1 rounded-lg text-foreground">
+                      ✓ {item}
+                      <button onClick={() => setNewPkg(p => ({ ...p, includedItems: p.includedItems.filter((_, idx) => idx !== i) }))} className="text-muted hover:text-torqued-red ml-0.5"><X size={10} /></button>
+                    </span>
+                  ))}
+                </div>
+                <div className="flex gap-2">
+                  <input
+                    value={newPkg.newIncludedItem}
+                    onChange={e => setNewPkg(p => ({ ...p, newIncludedItem: e.target.value }))}
+                    onKeyDown={e => { if (e.key === 'Enter' && newPkg.newIncludedItem.trim()) { setNewPkg(p => ({ ...p, includedItems: [...p.includedItems, p.newIncludedItem.trim()], newIncludedItem: '' })); } }}
+                    placeholder="e.g. Engine oil & filter, Tyre pressures, Brake inspection…"
+                    className="flex-1 bg-background border border-border rounded-xl px-3 h-9 text-xs text-foreground focus:outline-none focus:border-torqued-red"
+                  />
+                  <button onClick={() => { if (newPkg.newIncludedItem.trim()) setNewPkg(p => ({ ...p, includedItems: [...p.includedItems, p.newIncludedItem.trim()], newIncludedItem: '' })); }} className="h-9 px-3 bg-card border border-border rounded-xl text-xs font-bold text-foreground hover:border-torqued-red">Add</button>
+                </div>
+              </div>
+
+              {/* Final price field + add button */}
+              <div className="flex gap-3 items-end pt-1">
+                <div className="flex-1">
+                  <Input label="Final Package Price $" type="number" value={newPkg.price} onChange={e => setNewPkg({ ...newPkg, price: e.target.value })} className="bg-background text-foreground" />
+                </div>
+                <Button className="bg-torqued-red text-white h-10 shrink-0" disabled={!newPkg.name || !newPkg.price} onClick={async () => {
+                  const r = await fetch('/api/mechanic/packages', {
+                    method: 'POST', headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                      mechanicId: user!.id, name: newPkg.name, price: parseFloat(newPkg.price),
+                      durationMin: parseInt(newPkg.durationMin) || 60, description: newPkg.description,
+                      pkgType: newPkg.type, includedItems: newPkg.includedItems,
+                      baseFee: newPkg.baseFee, oilGrade: newPkg.oilGrade, oilLitres: newPkg.oilLitres,
+                      oilCostPerL: newPkg.oilCostPerL, filterCost: newPkg.filterCost,
+                      transOilLitres: newPkg.transOilLitres, transOilCostPerL: newPkg.transOilCostPerL,
+                      freight: newPkg.freight, scanToolFee: newPkg.scanToolFee,
+                    }),
+                  });
+                  const d = await r.json();
+                  if (d.package) {
+                    setPackages([...packages, d.package]);
+                    setNewPkg({ name: '', price: '', durationMin: '60', description: '', baseFee: '', oilLitres: '', oilCostPerL: '', oilGrade: '', filterCost: '', includedItems: [], newIncludedItem: '', type: 'standard', transOilLitres: '', transOilCostPerL: '', freight: '', scanToolFee: '' });
+                  }
+                }}><Plus size={14} className="mr-1" /> Add Package</Button>
+              </div>
+            </div>
+          )}
+          {packages.length >= 5 && (
+            <p className="text-xs text-muted italic">Maximum of 5 packages reached. Remove one to add another.</p>
+          )}
         </Card>
       </div>
     </div>
@@ -1678,6 +1949,14 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
           <div><label className="text-[10px] font-black uppercase tracking-widest text-muted block mb-1">Technicians</label><Input type="number" value={String(cap.technicians)} onChange={e => setCap({ ...cap, technicians: parseInt(e.target.value) || 1 })} className="bg-background text-foreground" /></div>
           <div><label className="text-[10px] font-black uppercase tracking-widest text-muted block mb-1">Parts lead (days)</label><Input type="number" value={String(cap.parts_lead_days)} onChange={e => setCap({ ...cap, parts_lead_days: parseInt(e.target.value) || 0 })} className="bg-background text-foreground" /></div>
           <div><label className="text-[10px] font-black uppercase tracking-widest text-muted block mb-1">Labour $/hr</label><Input type="number" value={String(cap.labour_rate)} onChange={e => setCap({ ...cap, labour_rate: parseFloat(e.target.value) || 0 })} className="bg-background text-foreground" /></div>
+        </div>
+        <div className="pt-3 mt-1 border-t border-border">
+          <p className="text-[11px] font-black uppercase tracking-widest text-torqued-red mb-2">Cancellation Policy</p>
+          <div className="grid grid-cols-2 gap-3">
+            <div><label className="text-[10px] font-black uppercase tracking-widest text-muted block mb-1">Free-cancel notice (hrs)</label><Input type="number" value={String(cap.cancellation_notice_hours)} onChange={e => setCap({ ...cap, cancellation_notice_hours: parseInt(e.target.value) || 0 })} className="bg-background text-foreground" /></div>
+            <div><label className="text-[10px] font-black uppercase tracking-widest text-muted block mb-1">Late-cancel refund (%)</label><Input type="number" value={String(cap.cancellation_partial_refund_pct)} onChange={e => setCap({ ...cap, cancellation_partial_refund_pct: Math.max(0, Math.min(100, parseInt(e.target.value) || 0)) })} className="bg-background text-foreground" /></div>
+          </div>
+          <p className="text-xs text-muted mt-2">Cancel with at least this many hours of <strong>open</strong> notice (weekends &amp; public holidays don't count) → full refund. Less notice → the customer is refunded this percentage.</p>
         </div>
         <p className="text-xs text-muted">Quick jobs (oil, WOF) → next business day. Jobs needing parts (cambelt, rotors) → drop-off after your parts lead time. More technicians = faster turnaround on big jobs.</p>
         <Button className="bg-torqued-red text-white" disabled={capSaving} onClick={async () => {
@@ -1782,21 +2061,15 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
             {[...Array(35)].map((_, i) => (
               <div key={i} className="border-r border-b border-black/5 p-2 relative group hover:bg-black/5 transition-colors">
                 <span className="text-[10px] font-bold text-black/20">{i + 1}</span>
-                {i === 8 && (
-                  <div className="mt-1 p-1 bg-torqued-red text-white text-[8px] font-bold rounded uppercase leading-tight">
-                    VW Golf - Oil Change
+                {appointments.filter(a => {
+                  const dayIdx = ['Mon','Tue','Wed','Thu','Fri','Sat','Sun'].indexOf(a.day);
+                  return dayIdx >= 0 && (i % 7) === dayIdx;
+                }).map(a => (
+                  <div key={a.id} className={cn("mt-1 p-1 text-white text-[8px] font-bold rounded uppercase leading-tight truncate",
+                    a.type === 'maintenance' ? 'bg-blue-500' : a.type === 'repair' ? 'bg-torqued-red' : 'bg-emerald-500')}>
+                    {a.car.split('(')[0].trim()} - {a.service.split(' ')[0]}
                   </div>
-                )}
-                {i === 10 && (
-                  <div className="mt-1 p-1 bg-blue-500 text-white text-[8px] font-bold rounded uppercase leading-tight">
-                    Audi A3 - Brakes
-                  </div>
-                )}
-                 {i === 15 && (
-                  <div className="mt-1 p-1 bg-emerald-500 text-white text-[8px] font-bold rounded uppercase leading-tight">
-                    Toyota Hilux - WOF
-                  </div>
-                )}
+                ))}
               </div>
             ))}
           </div>
@@ -1838,9 +2111,8 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                   size="sm" 
                   className="opacity-0 group-hover:opacity-100 transition-opacity"
                   onClick={() => {
-                    // Map appointment ID to job ID for demo
-                    const jobId = appt.id === '6' ? 'req3' : 'req1';
-                    setSelectedJobId(jobId);
+                    const realJob = incomingJobs.find(j => j.reg === appt.car.match(/\(([^)]+)\)/)?.[1]);
+                    if (realJob) setSelectedJobId(realJob.id);
                   }}
                 >
                   View Details
@@ -2054,7 +2326,6 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
     const isDiagnostic = job.services.includes('Diagnostic Inspection');
     // Real portable history for this vehicle (customer imports + past Torqued jobs)
     const history = jobHistory;
-    const recommendations: typeof RECOMMENDATIONS_RAH190 = [];
 
     return (
       <div className="fixed inset-0 bg-black/80 backdrop-blur-sm z-50 flex items-center justify-center p-4">
@@ -2081,7 +2352,10 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
             </button>
           </div>
 
-          <div className="flex-1 overflow-y-auto p-8 space-y-12 bg-background">
+          <div className="flex-1 overflow-y-auto p-8 space-y-8 bg-background">
+            {/* AI Health Insights + Vehicle Timeline */}
+            <VehicleTimelineAnalysis rego={job.reg} />
+
             <div className="grid grid-cols-1 lg:grid-cols-3 gap-12 text-foreground">
               {/* Left Column: Service History */}
               <div className="space-y-8 lg:col-span-1">
@@ -2206,58 +2480,13 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                     </Card>
                   </div>
                 ) : (
-                  <div className="space-y-8">
-                    <div className="flex items-center gap-2">
-                      <AlertCircle size={20} className="text-torqued-red" />
-                      <h3 className="text-xl mt-0">Next Recommendations</h3>
-                    </div>
-                    <div className="grid grid-cols-1 gap-4">
-                      {recommendations.map((rec) => (
-                        <Card key={rec.id} className={cn(
-                          "p-4 border-l-4 flex justify-between items-center transition-transform hover:scale-[1.02]",
-                          rec.priority === 'high' ? "border-l-torqued-red bg-red-50/30" : 
-                          rec.priority === 'medium' ? "border-l-yellow-500 bg-yellow-50/30" : 
-                          "border-l-blue-500 bg-blue-50/30"
-                        )}>
-                          <div>
-                            <div className="flex items-center gap-2 mb-1">
-                               <span className={cn(
-                                 "text-[8px] font-bold px-1.5 py-0.5 rounded uppercase tracking-widest",
-                                 rec.priority === 'high' ? "bg-torqued-red text-white" : "bg-black/5 text-black/40"
-                               )}>{rec.priority} PRIORITY</span>
-                            </div>
-                            <h4 className="text-sm font-bold">{rec.task}</h4>
-                            <p className="text-xs text-black/60">Due at/on: <span className="font-bold">{rec.trigger}</span></p>
-                          </div>
-                          <ChevronRight size={16} className="text-black/20" />
-                        </Card>
-                      ))}
-                    </div>
-
-                    <Card className="p-6 bg-torqued-red text-white border-none space-y-4">
-                      <div className="flex items-center gap-2 text-[10px] font-bold uppercase tracking-widest opacity-80">
-                        <Info size={14} /> Note for Mechanic
-                      </div>
-                      <p className="text-sm leading-relaxed font-medium">
-                        Standard factory procedures applied. No immediate faults detected beyond requested services.
-                      </p>
-                    </Card>
+                  <div className="space-y-4">
+                    <p className="text-sm text-muted italic">AI health insights are shown above. No diagnostic workflow for this job type.</p>
                   </div>
                 )}
               </div>
             </div>
 
-            {/* Vehicle Diagnostic Timeline section */}
-            <div className="border-t border-border pt-10">
-              <div className="flex items-center gap-2.5 mb-6">
-                <span className="w-2.5 h-2.5 bg-torqued-red rounded-full animate-pulse" />
-                <h3 className="text-xl font-black text-foreground flex items-center gap-2 uppercase tracking-tighter">
-                  <Activity size={20} className="text-torqued-red" />
-                  Live Diagnostic Telemetry: {job.reg}
-                </h3>
-              </div>
-              <VehicleTimelineAnalysis rego={job.reg} />
-            </div>
           </div>
 
           {/* Modal Footer */}
@@ -2306,7 +2535,68 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
               <Button size="sm" variant="outline" className="text-foreground border-border hover:bg-background" onClick={() => messageCustomer(jobShape)}>Message Customer</Button>
               <Button size="sm" variant="outline" className="text-foreground border-border hover:bg-background" onClick={() => recordMileage(jobShape, 'out')}>Check-out km</Button>
               <Button size="sm" variant="outline" className="text-emerald-600 border-border hover:bg-background" onClick={() => exportInvoice(j)}>{j.payment_status === 'confirmed' ? 'Export invoice' : 'Download PDF'}</Button>
+              <Button size="sm" variant="outline" className="text-foreground border-border hover:bg-background" onClick={() => jobNotes[j.id]?.open ? setJobNotes(p => ({...p, [j.id]: {...p[j.id], open: false}})) : openJobNotes(j.id)}>
+                📝 Notes {(jobNotes[j.id]?.notes?.length ?? 0) > 0 ? `(${jobNotes[j.id]!.notes.length})` : ''}
+              </Button>
+              <Button size="sm" variant="outline" className="text-foreground border-border hover:bg-background" onClick={() => vehiclePhotos[j.vehicle_rego]?.open ? setVehiclePhotos(p => ({...p, [j.vehicle_rego]: {...p[j.vehicle_rego], open: false}})) : openVehiclePhotos(j.vehicle_rego)}>
+                📷 Photos {(vehiclePhotos[j.vehicle_rego]?.photos?.length ?? 0) > 0 ? `(${vehiclePhotos[j.vehicle_rego]!.photos.length})` : ''}
+              </Button>
             </div>
+
+            {/* Job Notes Panel */}
+            {jobNotes[j.id]?.open && (
+              <div className="border-t border-border pt-3 space-y-3">
+                <p className="text-[10px] font-bold uppercase tracking-widest text-muted">Job Notes</p>
+                {jobNotes[j.id]?.loading && <p className="text-xs text-muted">Loading…</p>}
+                {(jobNotes[j.id]?.notes || []).map((n) => (
+                  <div key={n.id} className="flex items-start gap-2 bg-background rounded-xl p-3">
+                    <div className="flex-1">
+                      <p className="text-xs text-foreground">{n.note}</p>
+                      <p className="text-[10px] text-muted mt-1">{n.author} · {new Date(n.created_at).toLocaleString('en-NZ')}</p>
+                    </div>
+                    <button onClick={() => deleteJobNote(j.id, n.id)} className="text-muted hover:text-torqued-red text-xs">✕</button>
+                  </div>
+                ))}
+                <div className="flex gap-2">
+                  <input
+                    className="flex-1 text-xs bg-background border border-border rounded-lg px-3 py-2 text-foreground focus:outline-none focus:border-torqued-red/50"
+                    placeholder="Add a note… (auto-timestamped)"
+                    value={jobNotes[j.id]?.input || ''}
+                    onChange={e => setJobNotes(p => ({...p, [j.id]: {...p[j.id], input: e.target.value}}))}
+                    onKeyDown={e => { if (e.key === 'Enter') addJobNote(j.id); }}
+                  />
+                  <Button size="sm" className="bg-torqued-red text-white" onClick={() => addJobNote(j.id)}>Add</Button>
+                </div>
+              </div>
+            )}
+
+            {/* Vehicle Photos Panel */}
+            {vehiclePhotos[j.vehicle_rego]?.open && (
+              <div className="border-t border-border pt-3 space-y-3">
+                <p className="text-[10px] font-bold uppercase tracking-widest text-muted">Photos — {j.vehicle_rego}</p>
+                {vehiclePhotos[j.vehicle_rego]?.loading && <p className="text-xs text-muted">Loading…</p>}
+                <div className="flex flex-wrap gap-2">
+                  {(vehiclePhotos[j.vehicle_rego]?.photos || []).map((photo) => (
+                    <div key={photo.id} className="relative group">
+                      <img src={photo.photo_url} alt={photo.comment || 'photo'} className="w-20 h-20 object-cover rounded-lg border border-border" />
+                      {photo.comment && <p className="text-[9px] text-muted mt-0.5 max-w-[80px] truncate">{photo.comment}</p>}
+                    </div>
+                  ))}
+                </div>
+                <div className="space-y-2">
+                  <input
+                    className="w-full text-xs bg-background border border-border rounded-lg px-3 py-2 text-foreground focus:outline-none focus:border-torqued-red/50"
+                    placeholder="Photo comment (optional)"
+                    value={vehiclePhotos[j.vehicle_rego]?.comment || ''}
+                    onChange={e => setVehiclePhotos(p => ({...p, [j.vehicle_rego]: {...p[j.vehicle_rego], comment: e.target.value}}))}
+                  />
+                  <label className="flex items-center gap-2 cursor-pointer">
+                    <span className="text-xs font-bold text-torqued-red border border-torqued-red/30 rounded-lg px-3 py-1.5 hover:bg-torqued-red/5">📷 Upload photo</span>
+                    <input type="file" accept="image/*" className="hidden" onChange={e => { const f = e.target.files?.[0]; if (f) uploadVehiclePhoto(j.vehicle_rego, f, j.id); e.target.value = ''; }} />
+                  </label>
+                </div>
+              </div>
+            )}
           </Card>
         );
       })}
@@ -2453,7 +2743,7 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
         <div>
           <h2 className="text-2xl sm:text-3xl font-black tracking-tight text-foreground">Mechanic Assistant</h2>
           <p className="text-sm text-muted">Quick generalist data — oil capacities, fluid types, torque specs, intervals. Always confirm exact figures against the OEM manual.</p>
-          <p className="text-[11px] text-torqued-red font-bold mt-1">Tip: type "order: cambelt kit x1" to add a part straight to your Parts-to-order list.</p>
+          <p className="text-[11px] text-torqued-red font-bold mt-1">Tip: type "order: cambelt kit x1" to add a part straight to your Parts-to-order list. You can also attach a photo for visual analysis.</p>
         </div>
         <div className="flex-1 overflow-y-auto space-y-3 py-4">
           {chatMessages.length === 0 && (
@@ -2465,6 +2755,9 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
           )}
           {chatMessages.map((m, i) => (
             <div key={i} className={cn('max-w-[85%] space-y-1', m.role === 'user' ? 'ml-auto' : '')}>
+              {(m as any).image && (
+                <img src={(m as any).image} alt="attached" className={cn('max-h-40 rounded-xl object-cover', m.role === 'user' ? 'ml-auto' : '')} />
+              )}
               <div className={cn('p-3 rounded-2xl text-sm whitespace-pre-wrap', m.role === 'user' ? 'bg-torqued-red text-white' : 'bg-card border border-border text-foreground')}>{m.content}</div>
               {m.role === 'assistant' && !m.content.startsWith('✓ Added') && (
                 <button onClick={() => { const part = prompt('Add which part to your order list?'); if (part?.trim()) { addPartToOrder(part, 1, quoteJob?.reg); setChatMessages(cm => [...cm, { role: 'assistant', content: `✓ Added "${part.trim()}" to your Parts-to-order list.` }]); } }}
@@ -2474,10 +2767,26 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
           ))}
           {chatBusy && <div className="bg-card border border-border text-muted text-sm p-3 rounded-2xl w-fit">Thinking…</div>}
         </div>
+        {chatPhoto && (
+          <div className="relative w-fit mb-2">
+            <img src={chatPhoto} alt="pending" className="h-20 rounded-xl object-cover border border-torqued-red/40" />
+            <button onClick={() => setChatPhoto(null)} className="absolute -top-1 -right-1 w-5 h-5 bg-torqued-red rounded-full flex items-center justify-center text-white"><X size={10} /></button>
+          </div>
+        )}
         <div className="flex gap-2 pt-2 border-t border-border">
+          <label className="cursor-pointer flex items-center justify-center w-12 h-12 bg-card border border-border rounded-xl text-muted hover:border-torqued-red hover:text-torqued-red transition-all shrink-0">
+            <Camera size={18} />
+            <input type="file" accept="image/*" className="hidden" onChange={e => {
+              const f = e.target.files?.[0]; if (!f) return;
+              const reader = new FileReader();
+              reader.onload = ev => setChatPhoto(ev.target?.result as string);
+              reader.readAsDataURL(f);
+              e.target.value = '';
+            }} />
+          </label>
           <input value={chatInput} onChange={e => setChatInput(e.target.value)} onKeyDown={e => { if (e.key === 'Enter') sendChat(); }}
-            placeholder="Ask a question…" className="flex-1 bg-card border border-border rounded-xl px-4 h-12 text-sm text-foreground focus:outline-none focus:border-torqued-red" />
-          <Button className="bg-torqued-red text-white" disabled={chatBusy || !chatInput.trim()} onClick={sendChat}>Send</Button>
+            placeholder="Ask a question or attach a photo…" className="flex-1 bg-card border border-border rounded-xl px-4 h-12 text-sm text-foreground focus:outline-none focus:border-torqued-red" />
+          <Button className="bg-torqued-red text-white" disabled={chatBusy || (!chatInput.trim() && !chatPhoto)} onClick={() => sendChat()}>Send</Button>
         </div>
       </div>
     );
@@ -3172,7 +3481,6 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                 onChange={(e) => setSearchQuery(e.target.value)}
               />
             </div>
-            <Button variant="outline" size="sm" className="border-border text-foreground hover:bg-card shadow-sm" onClick={() => setSearchQuery('RAH190')}>Demo Search</Button>
           </div>
         </header>
 
@@ -3191,37 +3499,31 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
               const matchedJob = incomingJobs.find(j => j.reg.toUpperCase().includes(query) || j.model.toUpperCase().includes(query));
               if (matchedJob) {
                 return (
-                  <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
-                    <div className="p-6 bg-background border border-border hover:border-torqued-red/20 transition-all rounded-3xl flex flex-col justify-between space-y-6">
-                      <div className="space-y-4 text-left">
-                        <span className="text-[10px] font-mono tracking-widest bg-emerald-500/10 text-emerald-400 font-extrabold px-2.5 py-1 rounded-full uppercase border border-emerald-500/10">Vehicle Found</span>
-                        <h4 className="text-2xl font-black text-foreground tracking-tight">{matchedJob.reg}</h4>
-                        <p className="text-sm font-bold text-foreground">{matchedJob.model}</p>
-                        <p className="text-xs text-muted leading-relaxed">{matchedJob.details}</p>
-                      </div>
-                      <div className="pt-2">
-                        <Button 
-                          fullWidth 
-                          onClick={() => {
-                            setSelectedJobId(matchedJob.id);
-                            setSearchQuery(''); // auto-clear searchQuery so they view the report directly
-                          }}
-                          className="bg-torqued-red text-white hover:bg-red-700 font-bold text-xs"
-                        >
-                          Configure Health Report & Timeline
-                        </Button>
-                      </div>
+                  <div className="p-6 bg-background border border-border hover:border-torqued-red/20 transition-all rounded-3xl flex flex-col justify-between space-y-6 max-w-sm">
+                    <div className="space-y-4 text-left">
+                      <span className="text-[10px] font-mono tracking-widest bg-emerald-500/10 text-emerald-400 font-extrabold px-2.5 py-1 rounded-full uppercase border border-emerald-500/10">Vehicle Found</span>
+                      <h4 className="text-2xl font-black text-foreground tracking-tight">{matchedJob.reg}</h4>
+                      <p className="text-sm font-bold text-foreground">{matchedJob.model}</p>
+                      <p className="text-xs text-muted leading-relaxed">{matchedJob.details}</p>
                     </div>
-                    
-                    <div className="lg:col-span-2">
-                      <VehicleTimelineAnalysis rego={matchedJob.reg} />
+                    <div className="pt-2">
+                      <Button
+                        fullWidth
+                        onClick={() => {
+                          setSelectedJobId(matchedJob.id);
+                          setSearchQuery('');
+                        }}
+                        className="bg-torqued-red text-white hover:bg-red-700 font-bold text-xs"
+                      >
+                        View Health Report
+                      </Button>
                     </div>
                   </div>
                 );
               } else {
                 return (
                   <div className="py-4 text-center text-muted text-sm font-medium">
-                    No matching vehicles found for "{searchQuery}". Try searching for <strong className="text-foreground">"RAH190"</strong>, <strong className="text-foreground">"HMT921"</strong> or <strong className="text-foreground">"CGA689"</strong>.
+                    No matching vehicles found for "{searchQuery}".
                   </div>
                 );
               }
@@ -3421,8 +3723,17 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                       items: { parts: qParts, labourHours: qLabourHours, labourRate: qLabourRate, other: qOther, discount: qDiscount, notes: qNotes },
                     }),
                   });
-                  if (r.ok) { alert('Quote PDF emailed to the customer.'); setQuoteJob(null); }
-                  else { const d = await r.json(); alert(d.error || 'Could not send quote.'); }
+                  if (r.ok) {
+                    // Mark diagnostic job as quoted → moves it to the SENT filter
+                    setIncomingJobs(prev => prev.map(j => j.id === quoteJob.id
+                      ? { ...j, quoteItems: { parts: qParts, labourHours: qLabourHours, labourRate: qLabourRate, other: qOther, discount: qDiscount, notes: qNotes } }
+                      : j
+                    ));
+                    fetch('/api/mechanic/update-job-status', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ bookingId: quoteJob.id, status: 'quoted' }) }).catch(() => {});
+                    setManualQuoteFilter('sent');
+                    setActiveTab('manual-quotes');
+                    setQuoteJob(null);
+                  } else { const d = await r.json(); alert(d.error || 'Could not send quote.'); }
                 } catch (e) { alert('Could not generate/send quote.'); }
                 finally { setQSending(false); }
               }}>{qSending ? 'Generating & sending…' : `Email Quote PDF — $${qTotal.toFixed(2)}`}</Button>
