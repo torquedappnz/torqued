@@ -2412,51 +2412,116 @@ app.post('/api/ai/mechanic-assistant', async (req, res) => {
     let bookingsCtx = '';
     let customerCtx = '';
 
-    if (supabase && rego) {
-      const plate = String(rego).toUpperCase();
-      const [vRes, hRes, bRes] = await Promise.all([
-        supabase.from('vehicles').select('rego,make,model,year,variant,mileage').eq('rego', plate).single(),
-        supabase.from('vehicle_history').select('service_date,work_done,mileage,provider,price').eq('rego', plate).order('service_date', { ascending: false }).limit(15),
-        supabase.from('bookings').select('id,status,service_ids,description,date,quoted_price,total_price,customer_name,email').eq('vehicle_rego', plate).order('created_at', { ascending: false }).limit(10),
+    // Extract rego plates and customer name references from the mechanic's latest message
+    const lastMsg = String(messages[messages.length - 1]?.content ?? messages[messages.length - 1]?.text ?? '');
+    const mentionedRegos = [...new Set((lastMsg.toUpperCase().match(/\b[A-Z]{1,3}\d{2,4}[A-Z]?\b/g) || []))];
+    const nameMatch = lastMsg.match(/(\w+)(?:'s|s')\s+(?:car|vehicle|ute|van|truck|bikes?)/i)
+      || lastMsg.match(/(?:cars?|vehicles?)\s+(?:for|owned?\s+by)\s+(\w+)/i);
+    const mentionedName = nameMatch?.[1] ?? null;
+
+    const buildVehicleCtx = async (plate: string) => {
+      const [vRes, sRes, hRes, bRes] = await Promise.all([
+        supabase!.from('vehicles').select('rego,make,model,year,variant,mileage,owner_id').eq('rego', plate).single(),
+        supabase!.from('vehicle_specs').select('oil_type,oil_capacity_litres,oil_service_interval_km,transmission_fluid_type,transmission_service_interval_km,cambelt_or_chain,cambelt_interval_km').eq('rego', plate).single(),
+        supabase!.from('vehicle_history').select('service_date,work_done,mileage,provider,price').eq('rego', plate).order('service_date', { ascending: false }).limit(15),
+        supabase!.from('bookings').select('id,status,service_ids,description,date,quoted_price,total_price,customer_name,email').eq('vehicle_rego', plate).order('created_at', { ascending: false }).limit(10),
       ]);
+      let ctx = '';
       if (vRes.data) {
         const v = vRes.data;
-        vehicleCtx = `${v.year || ''} ${v.make || ''} ${v.model || ''}${v.variant ? ` ${v.variant}` : ''} (${plate})${v.mileage ? `, odometer ${Number(v.mileage).toLocaleString()}km` : ''}`.trim();
+        const s = sRes.data;
+        ctx = `${v.year || ''} ${v.make || ''} ${v.model || ''}${v.variant ? ` ${v.variant}` : ''} (${plate})${v.mileage ? `, ${Number(v.mileage).toLocaleString()}km` : ''}`;
+        if (s) {
+          const specs = [
+            s.oil_type && `oil: ${s.oil_type}`,
+            s.oil_capacity_litres && `capacity: ${s.oil_capacity_litres}L`,
+            s.oil_service_interval_km && `service every ${s.oil_service_interval_km}km`,
+            s.transmission_fluid_type && `trans fluid: ${s.transmission_fluid_type}`,
+            s.cambelt_or_chain && `cambelt/chain: ${s.cambelt_or_chain}${s.cambelt_interval_km ? ` @${s.cambelt_interval_km}km` : ''}`,
+          ].filter(Boolean).join(', ');
+          if (specs) ctx += ` — ${specs}`;
+        }
       }
-      if (hRes.data?.length) {
-        historyCtx = 'Service history: ' + hRes.data.map((h: any) => `${h.service_date || '?'}: ${h.work_done || 'service'}${h.mileage ? ` @${h.mileage}km` : ''}${h.price ? ` ($${h.price})` : ''}`).join(' | ');
-      }
+      if (hRes.data?.length) ctx += '\n  History: ' + hRes.data.map((h: any) => `${h.service_date || '?'}: ${h.work_done || 'service'}${h.mileage ? ` @${h.mileage}km` : ''}${h.price ? ` ($${h.price})` : ''}`).join(' | ');
       if (bRes.data?.length) {
-        bookingsCtx = 'Bookings on file: ' + bRes.data.map((b: any) => {
+        ctx += '\n  Bookings: ' + bRes.data.map((b: any) => {
           const svc = (b.service_ids || []).map((id: string) => SERVICE_NAMES[id] || id).join(', ') || b.description || 'service';
-          return `${b.date?.slice(0, 10) || '?'} – ${svc} (${b.status}) ${b.quoted_price ? `$${b.quoted_price}` : ''}`;
+          return `${b.date?.slice(0, 10) || '?'} – ${svc} (${b.status})${b.quoted_price ? ` $${b.quoted_price}` : ''}`;
         }).join(' | ');
+        if (bRes.data[0]?.customer_name) ctx += `\n  Customer: ${bRes.data[0].customer_name}`;
       }
-      if (bRes.data?.[0]?.customer_name) customerCtx = `Customer: ${bRes.data[0].customer_name}`;
+      return ctx;
+    };
+
+    if (supabase) {
+      // Primary rego context (from focused vehicle in the portal)
+      const primaryRego = rego ? String(rego).toUpperCase() : null;
+      if (primaryRego) vehicleCtx = await buildVehicleCtx(primaryRego);
+
+      // Additional regos mentioned in the message (e.g., mechanic types "RAH190")
+      const extraRegos = mentionedRegos.filter(r => r !== primaryRego).slice(0, 3);
+      if (extraRegos.length) {
+        const extraCtxs = await Promise.all(extraRegos.map(buildVehicleCtx));
+        const validExtras = extraCtxs.filter(Boolean);
+        if (validExtras.length) vehicleCtx += (vehicleCtx ? '\n' : '') + validExtras.join('\n');
+      }
+
+      // Customer name lookup — "Sri's car" or "cars for Sri"
+      if (mentionedName) {
+        const { data: matchedProfiles } = await supabase.from('profiles').select('id,name').ilike('name', `%${mentionedName}%`).limit(3);
+        if (matchedProfiles?.length) {
+          const ownerIds = matchedProfiles.map((p: any) => p.id);
+          const { data: ownerVehicles } = await supabase.from('vehicles').select('rego,make,model,year,variant,mileage').in('owner_id', ownerIds);
+          if (ownerVehicles?.length) {
+            customerCtx = `Vehicles for ${matchedProfiles[0].name}: ` + ownerVehicles.map((v: any) => `${v.rego} – ${v.year} ${v.make} ${v.model}${v.variant ? ` ${v.variant}` : ''}${v.mileage ? ` @${Number(v.mileage).toLocaleString()}km` : ''}`).join(', ');
+          }
+        }
+      }
     }
 
-    // Also load all vehicles if mechanic wants general workshop context
+    // Workshop jobs for this mechanic
     let workshopCtx = '';
     if (supabase && mechanicId) {
       const { data: wJobs } = await supabase.from('bookings')
         .select('vehicle_rego,service_ids,status,date,customer_name')
         .eq('mechanic_id', mechanicId).in('status', ['pending','accepted','in_progress'])
         .order('date', { ascending: true }).limit(20);
-      if (wJobs?.length) {
-        workshopCtx = `Current workshop jobs: ${wJobs.map((j: any) => `${j.vehicle_rego} – ${(j.service_ids||[]).map((id: string)=>SERVICE_NAMES[id]||id).join(',')||'service'} (${j.status}) ${j.date?.slice(0,10)||''}`).join(' | ')}`;
+      if (wJobs?.length) workshopCtx = `Workshop queue: ${wJobs.map((j: any) => `${j.vehicle_rego}${j.customer_name ? ` (${j.customer_name})` : ''} – ${(j.service_ids||[]).map((id: string)=>SERVICE_NAMES[id]||id).join(',')||'service'} (${j.status}) ${j.date?.slice(0,10)||''}`).join(' | ')}`;
+    }
+
+    // This mechanic's service packages (so AI can quote package pricing)
+    let packagesCtx = '';
+    if (supabase && mechanicId) {
+      const { data: pkgs } = await supabase.from('service_packages')
+        .select('name,price,pkg_type,base_fee,oil_grade,oil_litres,oil_cost_per_l,filter_cost,trans_oil_litres,trans_oil_cost_per_l,freight,scan_tool_fee,included_items')
+        .eq('mechanic_id', mechanicId);
+      if (pkgs?.length) {
+        packagesCtx = 'Your service packages:\n' + pkgs.map((p: any) => {
+          const pricing = p.pkg_type === 'standard'
+            ? `base $${p.base_fee ?? '?'} + ${p.oil_litres ?? '?'}L ${p.oil_grade ?? 'oil'} @$${p.oil_cost_per_l ?? '?'}/L + filter $${p.filter_cost ?? '?'} = $${p.price}`
+            : `base $${p.base_fee ?? '?'} + ${p.trans_oil_litres ?? '?'}L trans fluid @$${p.trans_oil_cost_per_l ?? '?'}/L + freight $${p.freight ?? '?'} + scan $${p.scan_tool_fee ?? '?'} = $${p.price}`;
+          const items = Array.isArray(p.included_items) && p.included_items.length ? ` | includes: ${p.included_items.join(', ')}` : '';
+          return `  • ${p.name} [${p.pkg_type}]: ${pricing}${items}`;
+        }).join('\n');
       }
     }
 
-    const ctxParts = [vehicleCtx && `Vehicle: ${vehicleCtx}`, historyCtx, bookingsCtx, customerCtx, workshopCtx].filter(Boolean).join('\n');
+    const ctxParts = [
+      vehicleCtx && `Vehicle data:\n${vehicleCtx}`,
+      customerCtx,
+      workshopCtx,
+      packagesCtx,
+    ].filter(Boolean).join('\n\n');
+
     const sys = {
       role: 'system',
-      content: `You are the Torqued Mechanic Assistant for New Zealand automotive workshops. You have full access to vehicle data, service history, and bookings in the Torqued system.
+      content: `You are the Torqued Mechanic Assistant for New Zealand automotive workshops. You have live read access to the entire Torqued database — vehicles, specs, service history, bookings, and this workshop's service packages.
 
 ${ctxParts}
 
-Answer concisely and practically: oil capacities & grades, fluid types, torque specs, service intervals, common faults, part fitments, customer history context. Use NZ-relevant info and metric units. When giving exact specs confirm against OEM manual for the exact variant. Keep answers under ~150 words unless asked for detail. Never invent part numbers.`,
+When a mechanic asks about a specific rego or customer name, use the vehicle data above. For oil service pricing, calculate: base_fee + (vehicle's actual oil capacity × oil_cost_per_litre) + filter_cost. Answer concisely: oil capacities, grades, torque specs, service intervals, common faults, part fitments, pricing. NZ metric units. Under ~150 words unless asked for detail. Never invent part numbers.`,
     };
-    // Normalise incoming messages: web sends { role, content } or { role, content, image }; iOS may send { role, text }
+
     const normalised = messages.slice(-10).map((m: any) => ({
       role: m.role, content: m.content ?? m.text ?? '', image: m.image || undefined,
     }));
@@ -2465,6 +2530,40 @@ Answer concisely and practically: oil capacities & grades, fluid types, torque s
   } catch (err: any) {
     console.error('[ai/mechanic-assistant]', err);
     res.status(500).json({ error: err?.message || 'Assistant failed' });
+  }
+});
+
+// GET /api/mechanic/:mechanicId/package-price?rego= — calculate the exact package price for a specific vehicle
+app.get('/api/mechanic/:mechanicId/package-price', async (req, res) => {
+  try {
+    const { mechanicId } = req.params;
+    const rego = req.query.rego ? String(req.query.rego).toUpperCase().trim() : null;
+    const supabase = getSupabaseAdmin();
+    if (!supabase) return res.json({ packages: [] });
+
+    const [pkgRes, specRes] = await Promise.all([
+      supabase.from('service_packages')
+        .select('id,name,price,pkg_type,base_fee,oil_grade,oil_litres,oil_cost_per_l,filter_cost,trans_oil_litres,trans_oil_cost_per_l,freight,scan_tool_fee,included_items,duration_min')
+        .eq('mechanic_id', mechanicId).order('price'),
+      rego ? supabase.from('vehicle_specs').select('oil_capacity_litres,oil_type,transmission_fluid_type,transmission_service_interval_km').eq('rego', rego).single() : Promise.resolve({ data: null }),
+    ]);
+
+    const spec = specRes.data;
+    const packages = (pkgRes.data ?? []).map((p: any) => {
+      let calculatedPrice = p.price; // fallback to stored total
+      if (p.pkg_type === 'standard' && spec?.oil_capacity_litres && p.oil_cost_per_l && p.base_fee != null) {
+        // Recalculate using vehicle's actual oil capacity
+        calculatedPrice = Math.round(p.base_fee + (spec.oil_capacity_litres * p.oil_cost_per_l) + (p.filter_cost || 0));
+      } else if (p.pkg_type === 'transmission' && p.base_fee != null) {
+        calculatedPrice = Math.round((p.base_fee || 0) + ((p.trans_oil_litres || 0) * (p.trans_oil_cost_per_l || 0)) + (p.freight || 0) + (p.scan_tool_fee || 0));
+      }
+      return { ...p, calculatedPrice, vehicleOilCapacity: spec?.oil_capacity_litres ?? null };
+    });
+
+    res.json({ packages, vehicleSpec: spec ?? null });
+  } catch (err) {
+    console.error('[package-price]', err);
+    res.json({ packages: [] });
   }
 });
 

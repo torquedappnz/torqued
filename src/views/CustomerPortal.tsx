@@ -395,6 +395,11 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
   const [customerEmail, setCustomerEmail] = useState<string>('');
   // Per-vehicle service pricing loaded from the DB for the active vehicle
   const [vehiclePrices, setVehiclePrices] = useState<Record<string, number>>({});
+  // Vehicle oil spec (from vehicle_specs) — used to calculate mechanic package price for this vehicle
+  const [vehicleOilCapacity, setVehicleOilCapacity] = useState<number | null>(null);
+  const [vehicleOilType, setVehicleOilType] = useState<string | null>(null);
+  // Mechanic's service packages fetched when a mechanic is selected
+  const [mechanicPackages, setMechanicPackages] = useState<any[]>([]);
   // The customer's garage — all vehicles on their account
   const [garageVehicles, setGarageVehicles] = useState<Vehicle[]>([]);
   const [customerOwnerId, setCustomerOwnerId] = useState<string | null>(null);
@@ -1066,9 +1071,11 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
       setMileage((data.mileage ?? 0).toString());
       setIsRAH190(rego === 'RAH190');
       setUserName(userProfile?.name || null);
-      // Per-vehicle service pricing from the DB (vehicle_specs.service_prices)
+      // Per-vehicle service pricing and oil specs from the DB
       const specs = Array.isArray(data.vehicle_specs) ? data.vehicle_specs[0] : data.vehicle_specs;
       setVehiclePrices(specs?.service_prices || {});
+      setVehicleOilCapacity(specs?.oil_capacity_litres ?? null);
+      setVehicleOilType(specs?.oil_type ?? null);
       // Load any saved/imported service history for this vehicle
       if (Array.isArray(data.history) && data.history.length) {
         setManualHistory(data.history.map((h: any) => ({
@@ -2511,6 +2518,26 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                         <Button variant="outline" size="sm" className="flex-1 sm:flex-initial border-border text-foreground hover:bg-card h-10 px-6 font-bold uppercase tracking-widest text-[10px]">Profile</Button>
                         <Button size="sm" className="flex-[2] sm:flex-initial bg-torqued-red hover:bg-red-700 text-white h-10 px-8 font-bold uppercase tracking-widest text-[10px] shadow-lg shadow-torqued-red/20" onClick={() => {
                           setSelectedMechanic({ ...mechanic, estimatedPrice: totalPrice });
+                          setMechanicPackages([]);
+                          // Fetch this mechanic's packages and recalculate price for the customer's vehicle
+                          fetch(`/api/mechanic/${mechanic.id}/package-price${vehicle?.rego ? `?rego=${vehicle.rego}` : ''}`)
+                            .then(r => r.json())
+                            .then(d => {
+                              const pkgs: any[] = d.packages || [];
+                              setMechanicPackages(pkgs);
+                              if (!pkgs.length) return;
+                              const hasTransmission = selectedServices.includes('transmission');
+                              const standardServices = selectedServices.filter(s => s !== 'transmission');
+                              const standardPkgs = pkgs.filter((p: any) => p.pkg_type === 'standard');
+                              const transPkgs = pkgs.filter((p: any) => p.pkg_type === 'transmission');
+                              let pkgTotal = 0;
+                              if (standardServices.length && standardPkgs.length) pkgTotal += Math.min(...standardPkgs.map((p: any) => p.calculatedPrice || p.price || 0));
+                              else if (standardServices.length) pkgTotal += totalPrice;
+                              if (hasTransmission && transPkgs.length) pkgTotal += transPkgs[0].calculatedPrice || transPkgs[0].price || 0;
+                              else if (hasTransmission) pkgTotal += SERVICES.find(s => s.id === 'transmission')?.basePrice || 0;
+                              if (pkgTotal > 0) setSelectedMechanic(prev => prev ? { ...prev, estimatedPrice: pkgTotal } : null);
+                            })
+                            .catch(() => {});
                           // Diagnostic is booked & paid like any other service — the mechanic quotes after inspecting.
                           setStep(5);
                         }}>{selectedServices.includes('diag_inspection') ? 'Book Diagnostic' : 'Select & Schedule'}</Button>
@@ -2788,31 +2815,76 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                   {selectedServices.map(id => {
                     const service = SERVICES.find(s => s.id === id);
                     if (!service) return null;
+                    const isTransmission = id === 'transmission';
+                    const matchedPkg = mechanicPackages.find((p: any) => isTransmission ? p.pkg_type === 'transmission' : p.pkg_type === 'standard');
+                    const displayPrice = matchedPkg ? (matchedPkg.calculatedPrice || matchedPkg.price) : priceFor(id);
                     return (
                       <div key={id} className="space-y-3 bg-background/50 p-4 rounded-2xl border border-border">
                         <div className="flex justify-between items-center text-foreground">
-                          <span className="text-sm font-black uppercase tracking-tight">{service.name}</span>
-                          <span className="text-sm font-black">${priceFor(id)}</span>
+                          <span className="text-sm font-black uppercase tracking-tight">{matchedPkg ? matchedPkg.name : service.name}</span>
+                          <span className="text-sm font-black">${displayPrice}</span>
                         </div>
-                        {service.parts && (
-                          <div className="pl-0 space-y-1.5 border-t border-border/50 pt-3">
-                            {service.parts.map(p => (
-                              <div key={p.id} className="flex justify-between text-[11px] text-muted font-medium">
-                                <span>{p.name} (x{p.quantity})</span>
-                                <span>${p.total.toFixed(2)}</span>
+                        {matchedPkg ? (
+                          <div className="border-t border-border/50 pt-3 space-y-1.5">
+                            {matchedPkg.base_fee != null && (
+                              <div className="flex justify-between text-[11px] text-muted font-medium">
+                                <span>Labour / base</span><span>${matchedPkg.base_fee}</span>
                               </div>
-                            ))}
-                          </div>
-                        )}
-                        {service.labour && (
-                          <div className="pl-0 space-y-1.5">
-                            {service.labour.map(l => (
-                              <div key={l.id} className="flex justify-between text-[11px] text-muted font-medium">
-                                <span>Labour • {l.name}</span>
-                                <span>${l.cost.toFixed(2)}</span>
+                            )}
+                            {matchedPkg.pkg_type === 'standard' && matchedPkg.oil_cost_per_l != null && (
+                              <div className="flex justify-between text-[11px] text-muted font-medium">
+                                <span>{matchedPkg.vehicleOilCapacity ?? matchedPkg.oil_litres ?? '?'}L {matchedPkg.oil_grade || 'oil'} @${matchedPkg.oil_cost_per_l}/L{matchedPkg.vehicleOilCapacity ? ' (vehicle spec)' : ''}</span>
+                                <span>${((matchedPkg.vehicleOilCapacity ?? matchedPkg.oil_litres ?? 0) * matchedPkg.oil_cost_per_l).toFixed(2)}</span>
                               </div>
-                            ))}
+                            )}
+                            {matchedPkg.filter_cost != null && matchedPkg.pkg_type === 'standard' && (
+                              <div className="flex justify-between text-[11px] text-muted font-medium">
+                                <span>Oil filter</span><span>${matchedPkg.filter_cost}</span>
+                              </div>
+                            )}
+                            {matchedPkg.pkg_type === 'transmission' && matchedPkg.trans_oil_cost_per_l != null && (
+                              <div className="flex justify-between text-[11px] text-muted font-medium">
+                                <span>{matchedPkg.trans_oil_litres ?? '?'}L trans fluid @${matchedPkg.trans_oil_cost_per_l}/L</span>
+                                <span>${((matchedPkg.trans_oil_litres ?? 0) * matchedPkg.trans_oil_cost_per_l).toFixed(2)}</span>
+                              </div>
+                            )}
+                            {matchedPkg.freight != null && <div className="flex justify-between text-[11px] text-muted font-medium"><span>Freight</span><span>${matchedPkg.freight}</span></div>}
+                            {matchedPkg.scan_tool_fee != null && <div className="flex justify-between text-[11px] text-muted font-medium"><span>Scan tool</span><span>${matchedPkg.scan_tool_fee}</span></div>}
+                            {Array.isArray(matchedPkg.included_items) && matchedPkg.included_items.length > 0 && (
+                              <div className="pt-2 border-t border-border/30">
+                                <p className="text-[10px] font-black uppercase text-muted tracking-widest mb-1.5">Included</p>
+                                {matchedPkg.included_items.map((item: string, i: number) => (
+                                  <div key={i} className="flex items-center gap-1.5 text-[11px] text-emerald-400 font-medium">
+                                    <span>✓</span><span>{item}</span>
+                                  </div>
+                                ))}
+                              </div>
+                            )}
+                            {vehicleOilType && matchedPkg.pkg_type === 'standard' && (
+                              <p className="text-[10px] text-torqued-red/70 italic pt-1">Approved oil for your vehicle: {vehicleOilType}</p>
+                            )}
                           </div>
+                        ) : (
+                          <>
+                            {service.parts && (
+                              <div className="pl-0 space-y-1.5 border-t border-border/50 pt-3">
+                                {service.parts.map(p => (
+                                  <div key={p.id} className="flex justify-between text-[11px] text-muted font-medium">
+                                    <span>{p.name} (x{p.quantity})</span><span>${p.total.toFixed(2)}</span>
+                                  </div>
+                                ))}
+                              </div>
+                            )}
+                            {service.labour && (
+                              <div className="pl-0 space-y-1.5">
+                                {service.labour.map(l => (
+                                  <div key={l.id} className="flex justify-between text-[11px] text-muted font-medium">
+                                    <span>Labour • {l.name}</span><span>${l.cost.toFixed(2)}</span>
+                                  </div>
+                                ))}
+                              </div>
+                            )}
+                          </>
                         )}
                       </div>
                     );
