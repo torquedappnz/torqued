@@ -207,7 +207,7 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
   // Service packages
   const [packages, setPackages] = useState<any[]>([]);
   const [newPkg, setNewPkg] = useState({
-    name: '', price: '', durationMin: '60', description: '',
+    name: '', price: '', durationMin: '60', description: '', vehicleRef: '',
     baseFee: '', oilLitres: '', oilCostPerL: '', oilGrade: '', filterCost: '',
     includedItems: [] as string[], newIncludedItem: '',
     type: 'standard' as 'standard' | 'transmission',
@@ -225,6 +225,48 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
     } catch { alert('Oil price lookup failed.'); }
     finally { setOilPriceLookupBusy(false); }
   };
+  const [capacityLookupBusy, setCapacityLookupBusy] = useState(false);
+  const lookupServiceData = async () => {
+    const ref = (newPkg.vehicleRef || newPkg.name).trim();
+    if (!ref) { alert('Enter a vehicle reference or package name first.'); return; }
+    setCapacityLookupBusy(true);
+    try {
+      const r = await fetch('/api/ai/service-lookup', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ query: ref, type: newPkg.type }),
+      });
+      const d = await r.json();
+      if (d.error) { alert(d.error); return; }
+      setNewPkg(p => ({
+        ...p,
+        ...(d.oilCapacityL != null ? { oilLitres: String(d.oilCapacityL) } : {}),
+        ...(d.oilGrade ? { oilGrade: d.oilGrade } : {}),
+        ...(d.oilCostPerL != null ? { oilCostPerL: String(d.oilCostPerL) } : {}),
+        ...(d.filterCostNZD != null ? { filterCost: String(d.filterCostNZD) } : {}),
+        ...(d.transFluidCapacityL != null ? { transOilLitres: String(d.transFluidCapacityL) } : {}),
+        ...(d.transFluidCostPerL != null ? { transOilCostPerL: String(d.transFluidCostPerL) } : {}),
+      }));
+    } catch { alert('Service data lookup failed.'); }
+    finally { setCapacityLookupBusy(false); }
+  };
+
+  // Mechanic availability
+  const [mechAvailability, setMechAvailability] = useState<{ id: string; day_of_week: number; start_time: string; end_time: string }[]>([]);
+  const [closedPeriods, setClosedPeriods] = useState<{ id: string; start_date: string; end_date: string; reason: string }[]>([]);
+  const [addAvailModal, setAddAvailModal] = useState<{ dayIdx: number; startTime: string; endTime: string } | null>(null);
+  const [newClosedPeriod, setNewClosedPeriod] = useState({ startDate: '', endDate: '', reason: '' });
+  const [ohSaving, setOhSaving] = useState(false);
+  const [closedSaving, setClosedSaving] = useState(false);
+  const [operatingHours, setOperatingHours] = useState([
+    { dayOfWeek: 0, label: 'Mon', enabled: true,  startTime: '08:00', endTime: '17:00' },
+    { dayOfWeek: 1, label: 'Tue', enabled: true,  startTime: '08:00', endTime: '17:00' },
+    { dayOfWeek: 2, label: 'Wed', enabled: true,  startTime: '08:00', endTime: '17:00' },
+    { dayOfWeek: 3, label: 'Thu', enabled: true,  startTime: '08:00', endTime: '17:00' },
+    { dayOfWeek: 4, label: 'Fri', enabled: true,  startTime: '08:00', endTime: '17:00' },
+    { dayOfWeek: 5, label: 'Sat', enabled: false, startTime: '08:00', endTime: '12:00' },
+    { dayOfWeek: 6, label: 'Sun', enabled: false, startTime: '08:00', endTime: '12:00' },
+  ]);
+
   const [manualQuoteFilter, setManualQuoteFilter] = useState<'queue' | 'sent'>('queue');
   const [chatPhoto, setChatPhoto] = useState<string | null>(null);
   useEffect(() => {
@@ -492,6 +534,7 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
       .then(({ data }) => {
         if (!data) return;
         setCap(prev => ({ ...prev, technicians: data.technicians ?? 1, parts_lead_days: data.parts_lead_days ?? 1, labour_rate: data.labour_rate ?? 145 }));
+        setQLabourRate(data.labour_rate ?? 145);
         // Cancellation policy is read separately so a not-yet-run migration can't break the profile load.
         supabase.from('profiles').select('cancellation_notice_hours, cancellation_partial_refund_pct').eq('id', user.id).single()
           .then(({ data: cd }: any) => { if (cd) setCap(prev => ({ ...prev, cancellation_notice_hours: cd.cancellation_notice_hours ?? 72, cancellation_partial_refund_pct: cd.cancellation_partial_refund_pct ?? 80 })); });
@@ -514,6 +557,22 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
     fetch(`/api/mechanic/billing?mechanicId=${user.id}`).then(r => r.json()).then(setBilling).catch(() => {});
     // Customers who've interacted with this workshop
     fetch(`/api/mechanic/customers?mechanicId=${user.id}`).then(r => r.json()).then(d => setCustomers(d.customers || [])).catch(() => {});
+    // Mechanic availability slots + closed periods
+    fetch(`/api/mechanic/availability?mechanicId=${user.id}`)
+      .then(r => r.json())
+      .then(d => {
+        const slots = d.slots || [];
+        setMechAvailability(slots);
+        setClosedPeriods(d.closedPeriods || []);
+        if (slots.length) {
+          setOperatingHours(prev => prev.map(oh => {
+            const slot = slots.find((s: any) => s.day_of_week === oh.dayOfWeek);
+            if (!slot) return { ...oh, enabled: false };
+            return { ...oh, enabled: true, startTime: (slot.start_time as string).slice(0, 5), endTime: (slot.end_time as string).slice(0, 5) };
+          }));
+        }
+      })
+      .catch(() => {});
 
     // Incoming jobs from bookings assigned to this mechanic (service role — bypasses RLS)
     fetch(`/api/mechanic/jobs?mechanicId=${user.id}`)
@@ -1786,6 +1845,27 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                 <Input placeholder="Base fee $" type="number" value={newPkg.baseFee} onChange={e => setNewPkg({ ...newPkg, baseFee: e.target.value })} className="bg-background text-foreground" />
               </div>
 
+              {/* Vehicle reference + AI auto-fill */}
+              <div className="flex gap-2 items-end">
+                <div className="flex-1">
+                  <p className="text-[10px] font-black uppercase tracking-widest text-muted mb-1">Vehicle Reference (for AI auto-fill)</p>
+                  <Input
+                    placeholder="e.g. Toyota Camry 2.5L 2018, VW Golf 1.4 TSI, Honda Jazz 1.3…"
+                    value={newPkg.vehicleRef}
+                    onChange={e => setNewPkg({ ...newPkg, vehicleRef: e.target.value })}
+                    className="bg-background text-foreground"
+                  />
+                </div>
+                <button
+                  onClick={lookupServiceData}
+                  disabled={capacityLookupBusy}
+                  className="h-10 px-3 bg-torqued-red/10 border border-torqued-red/30 rounded-xl text-[10px] font-black text-torqued-red uppercase hover:bg-torqued-red/20 disabled:opacity-50 shrink-0 flex items-center gap-1"
+                  title="AI auto-fill: fluid capacity, grade, cost & filter cost"
+                >
+                  {capacityLookupBusy ? '…' : '✦ AI Auto-fill'}
+                </button>
+              </div>
+
               {/* Oil / fluid pricing */}
               {newPkg.type === 'standard' && (
                 <div className="space-y-2">
@@ -1922,7 +2002,7 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                   const d = await r.json();
                   if (d.package) {
                     setPackages([...packages, d.package]);
-                    setNewPkg({ name: '', price: '', durationMin: '60', description: '', baseFee: '', oilLitres: '', oilCostPerL: '', oilGrade: '', filterCost: '', includedItems: [], newIncludedItem: '', type: 'standard', transOilLitres: '', transOilCostPerL: '', freight: '', scanToolFee: '' });
+                    setNewPkg({ name: '', price: '', durationMin: '60', description: '', vehicleRef: '', baseFee: '', oilLitres: '', oilCostPerL: '', oilGrade: '', filterCost: '', includedItems: [], newIncludedItem: '', type: 'standard', transOilLitres: '', transOilCostPerL: '', freight: '', scanToolFee: '' });
                   }
                 }}><Plus size={14} className="mr-1" /> Add Package</Button>
               </div>
@@ -2010,12 +2090,58 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
             {[...Array(7)].map((_, dayIdx) => {
               const dayName = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'][dayIdx];
               return (
-                <div key={dayIdx} className="border-r border-black/5 relative min-h-[1000px]">
+                <div
+                  key={dayIdx}
+                  className="border-r border-black/5 relative min-h-[1000px] cursor-crosshair"
+                  onClick={(e) => {
+                    if ((e.target as HTMLElement).closest('[data-appt]') || (e.target as HTMLElement).closest('[data-avail]')) return;
+                    const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
+                    const scrollContainer = (e.currentTarget as HTMLElement).closest('.overflow-y-auto');
+                    const scrollTop = scrollContainer?.scrollTop || 0;
+                    const clickedY = Math.max(0, e.clientY - rect.top + scrollTop);
+                    const rawHour = Math.floor(clickedY / 96) + 8;
+                    const rawMinFrac = (clickedY % 96) / 96;
+                    const rawMin = Math.round(rawMinFrac * 4) * 15;
+                    const startH = Math.max(6, Math.min(rawHour, 20));
+                    const startM = rawMin >= 60 ? 45 : rawMin;
+                    const endH = Math.min(startH + 1, 21);
+                    const pad = (n: number) => String(n).padStart(2, '0');
+                    setAddAvailModal({ dayIdx, startTime: `${pad(startH)}:${pad(startM)}`, endTime: `${pad(endH)}:${pad(startM)}` });
+                  }}
+                >
+                  {/* Availability blocks */}
+                  {mechAvailability.filter(s => s.day_of_week === dayIdx).map(slot => {
+                    const [sh, sm] = (slot.start_time as string).split(':').map(Number);
+                    const [eh, em] = (slot.end_time as string).split(':').map(Number);
+                    const top = (sh - 8) * 96 + (sm / 60) * 96;
+                    const height = Math.max(16, (eh - sh) * 96 + ((em - sm) / 60) * 96);
+                    return (
+                      <div
+                        key={slot.id}
+                        data-avail="1"
+                        className="absolute left-0 right-0 bg-emerald-400/20 border-l-2 border-emerald-500 z-10 group/avail pointer-events-auto"
+                        style={{ top: `${top}px`, height: `${height}px` }}
+                      >
+                        <div className="flex items-start justify-between px-1 pt-0.5">
+                          <span className="text-[8px] font-bold text-emerald-600">{(slot.start_time as string).slice(0,5)}–{(slot.end_time as string).slice(0,5)}</span>
+                          <button
+                            onClick={async (e) => {
+                              e.stopPropagation();
+                              await fetch(`/api/mechanic/availability/${slot.id}`, { method: 'DELETE' });
+                              setMechAvailability(prev => prev.filter(s => s.id !== slot.id));
+                            }}
+                            className="opacity-0 group-hover/avail:opacity-100 text-red-400 hover:text-red-600 transition-opacity leading-none"
+                          ><X size={8} /></button>
+                        </div>
+                      </div>
+                    );
+                  })}
+
                   {/* Grid lines */}
                   {[...Array(11)].map((_, i) => (
                     <div key={i} className="absolute w-full h-px bg-black/5" style={{ top: `${i * 96}px` }} />
                   ))}
-                  
+
                   {/* Appointments */}
                   {appointments.filter(a => a.day === dayName).map(appt => {
                     const startHour = parseInt(appt.time.split(':')[0]);
@@ -2027,12 +2153,13 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                     const height = (endHour - startHour) * 96 + ((endMin - startMin) / 60) * 96;
                     
                     return (
-                      <motion.div 
+                      <motion.div
+                        data-appt="1"
                         key={appt.id}
                         initial={{ opacity: 0, scale: 0.9 }}
                         animate={{ opacity: 1, scale: 1 }}
                         className={cn(
-                          "absolute left-1 right-1 rounded-lg p-2 text-white shadow-sm cursor-pointer hover:brightness-110 transition-all z-10",
+                          "absolute left-1 right-1 rounded-lg p-2 text-white shadow-sm cursor-pointer hover:brightness-110 transition-all z-20",
                           appt.type === 'maintenance' ? "bg-blue-500" : appt.type === 'repair' ? "bg-torqued-red" : "bg-emerald-500"
                         )}
                         style={{ top: `${top}px`, height: `${height}px` }}
@@ -2121,6 +2248,176 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
             ))}
           </div>
         </Card>
+      )}
+
+      {/* Operating Hours Table */}
+      {calendarView === 'week' && (
+        <Card className="p-6 space-y-4">
+          <div className="flex items-center gap-2 border-b border-black/5 pb-4">
+            <Clock size={18} className="text-torqued-red" />
+            <div>
+              <h3 className="text-lg font-bold">Regular Operating Hours</h3>
+              <p className="text-[10px] text-muted">Click any day column in the calendar above to add a block, or set recurring hours here</p>
+            </div>
+          </div>
+          <div className="space-y-2.5">
+            {operatingHours.map((oh, i) => (
+              <div key={oh.dayOfWeek} className="flex items-center gap-3">
+                <button
+                  onClick={() => setOperatingHours(prev => prev.map((o, idx) => idx === i ? { ...o, enabled: !o.enabled } : o))}
+                  className={cn('w-9 h-5 rounded-full transition-colors relative flex-shrink-0', oh.enabled ? 'bg-emerald-500' : 'bg-black/10')}
+                >
+                  <span className={cn('absolute top-0.5 w-4 h-4 rounded-full bg-white shadow transition-transform', oh.enabled ? 'translate-x-4' : 'translate-x-0.5')} />
+                </button>
+                <span className="text-xs font-bold w-8 text-foreground">{oh.label}</span>
+                <input
+                  type="time"
+                  value={oh.startTime}
+                  disabled={!oh.enabled}
+                  onChange={e => setOperatingHours(prev => prev.map((o, idx) => idx === i ? { ...o, startTime: e.target.value } : o))}
+                  className="bg-background border border-border rounded-lg px-2 py-1.5 text-xs text-foreground disabled:opacity-30 focus:outline-none focus:border-torqued-red"
+                />
+                <span className="text-xs text-muted">to</span>
+                <input
+                  type="time"
+                  value={oh.endTime}
+                  disabled={!oh.enabled}
+                  onChange={e => setOperatingHours(prev => prev.map((o, idx) => idx === i ? { ...o, endTime: e.target.value } : o))}
+                  className="bg-background border border-border rounded-lg px-2 py-1.5 text-xs text-foreground disabled:opacity-30 focus:outline-none focus:border-torqued-red"
+                />
+                {!oh.enabled && <span className="text-[10px] text-muted italic">Closed</span>}
+              </div>
+            ))}
+          </div>
+          <Button
+            disabled={ohSaving || !user}
+            className="bg-torqued-red text-white"
+            onClick={async () => {
+              if (!user) return;
+              setOhSaving(true);
+              try {
+                const r = await fetch('/api/mechanic/availability/replace', {
+                  method: 'POST', headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify({ mechanicId: user.id, slots: operatingHours.filter(o => o.enabled).map(o => ({ day_of_week: o.dayOfWeek, start_time: o.startTime, end_time: o.endTime })) }),
+                });
+                const d = await r.json();
+                if (d.slots) setMechAvailability(d.slots);
+              } finally { setOhSaving(false); }
+            }}
+          >{ohSaving ? 'Saving…' : 'Save Operating Hours'}</Button>
+        </Card>
+      )}
+
+      {/* Closed Periods / Holidays */}
+      {calendarView === 'week' && (
+        <Card className="p-6 space-y-4">
+          <div className="flex items-center gap-2 border-b border-black/5 pb-4">
+            <AlertCircle size={18} className="text-amber-500" />
+            <div>
+              <h3 className="text-lg font-bold">Closed Periods & Public Holidays</h3>
+              <p className="text-[10px] text-muted">Block booking availability for holidays, closures, or leave</p>
+            </div>
+          </div>
+          {closedPeriods.length > 0 && (
+            <div className="space-y-2">
+              {closedPeriods.map(cp => (
+                <div key={cp.id} className="flex items-center gap-3 p-3 bg-amber-500/5 border border-amber-500/20 rounded-xl">
+                  <div className="flex-1">
+                    <p className="text-xs font-bold text-foreground">{cp.start_date === cp.end_date ? cp.start_date : `${cp.start_date} → ${cp.end_date}`}</p>
+                    {cp.reason && <p className="text-[10px] text-muted">{cp.reason}</p>}
+                  </div>
+                  <button
+                    onClick={async () => {
+                      await fetch(`/api/mechanic/closed-periods/${cp.id}`, { method: 'DELETE' });
+                      setClosedPeriods(prev => prev.filter(p => p.id !== cp.id));
+                    }}
+                    className="text-muted hover:text-torqued-red transition-colors"
+                  ><X size={14} /></button>
+                </div>
+              ))}
+            </div>
+          )}
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 items-end">
+            <div>
+              <label className="text-[10px] font-black uppercase tracking-widest text-muted block mb-1">From</label>
+              <input type="date" value={newClosedPeriod.startDate} onChange={e => setNewClosedPeriod(p => ({ ...p, startDate: e.target.value }))} className="w-full bg-background border border-border rounded-xl px-3 py-2 text-xs text-foreground focus:outline-none focus:border-torqued-red" />
+            </div>
+            <div>
+              <label className="text-[10px] font-black uppercase tracking-widest text-muted block mb-1">To (optional)</label>
+              <input type="date" value={newClosedPeriod.endDate} onChange={e => setNewClosedPeriod(p => ({ ...p, endDate: e.target.value }))} className="w-full bg-background border border-border rounded-xl px-3 py-2 text-xs text-foreground focus:outline-none focus:border-torqued-red" />
+            </div>
+            <div className="sm:col-span-2">
+              <label className="text-[10px] font-black uppercase tracking-widest text-muted block mb-1">Reason (optional)</label>
+              <div className="flex gap-2">
+                <input
+                  placeholder="e.g. Christmas closure, Otago Anniversary…"
+                  value={newClosedPeriod.reason}
+                  onChange={e => setNewClosedPeriod(p => ({ ...p, reason: e.target.value }))}
+                  className="flex-1 bg-background border border-border rounded-xl px-3 py-2 text-xs text-foreground focus:outline-none focus:border-torqued-red"
+                />
+                <Button
+                  disabled={closedSaving || !newClosedPeriod.startDate || !user}
+                  className="bg-amber-500 text-white shrink-0 flex items-center gap-1"
+                  onClick={async () => {
+                    if (!user || !newClosedPeriod.startDate) return;
+                    setClosedSaving(true);
+                    try {
+                      const r = await fetch('/api/mechanic/closed-periods', {
+                        method: 'POST', headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ mechanicId: user.id, startDate: newClosedPeriod.startDate, endDate: newClosedPeriod.endDate || newClosedPeriod.startDate, reason: newClosedPeriod.reason }),
+                      });
+                      const d = await r.json();
+                      if (d.period) { setClosedPeriods(prev => [...prev, d.period]); setNewClosedPeriod({ startDate: '', endDate: '', reason: '' }); }
+                    } finally { setClosedSaving(false); }
+                  }}
+                >{closedSaving ? '…' : <><Plus size={12} className="mr-1 inline" />Block</>}</Button>
+              </div>
+            </div>
+          </div>
+          <p className="text-xs text-muted">Customers won't be able to book drop-offs during blocked periods. NZ public holidays are automatically excluded from the cancellation notice window.</p>
+        </Card>
+      )}
+
+      {/* Add Availability Block Modal (week view click) */}
+      {addAvailModal && (
+        <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-50 flex items-center justify-center p-4" onClick={() => setAddAvailModal(null)}>
+          <div className="bg-background border border-border rounded-2xl p-6 shadow-2xl w-full max-w-sm space-y-4" onClick={e => e.stopPropagation()}>
+            <div className="flex items-center justify-between">
+              <h3 className="text-base font-black text-foreground">Add Availability Block</h3>
+              <button onClick={() => setAddAvailModal(null)} className="text-muted hover:text-foreground"><X size={16} /></button>
+            </div>
+            <p className="text-xs text-muted">Adding for <strong className="text-foreground">{['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'][addAvailModal.dayIdx]}</strong> — repeats weekly</p>
+            <div className="grid grid-cols-2 gap-3">
+              <div>
+                <label className="text-[10px] font-black uppercase tracking-widest text-muted block mb-1">From</label>
+                <input type="time" value={addAvailModal.startTime} onChange={e => setAddAvailModal(m => m ? { ...m, startTime: e.target.value } : m)} className="w-full bg-background border border-border rounded-xl px-3 py-2 text-sm text-foreground focus:outline-none focus:border-torqued-red" />
+              </div>
+              <div>
+                <label className="text-[10px] font-black uppercase tracking-widest text-muted block mb-1">To</label>
+                <input type="time" value={addAvailModal.endTime} onChange={e => setAddAvailModal(m => m ? { ...m, endTime: e.target.value } : m)} className="w-full bg-background border border-border rounded-xl px-3 py-2 text-sm text-foreground focus:outline-none focus:border-torqued-red" />
+              </div>
+            </div>
+            <div className="flex gap-2 justify-end">
+              <Button variant="ghost" onClick={() => setAddAvailModal(null)}>Cancel</Button>
+              <Button
+                className="bg-emerald-500 text-white"
+                disabled={!user}
+                onClick={async () => {
+                  if (!user || !addAvailModal) return;
+                  try {
+                    const r = await fetch('/api/mechanic/availability/slot', {
+                      method: 'POST', headers: { 'Content-Type': 'application/json' },
+                      body: JSON.stringify({ mechanicId: user.id, dayOfWeek: addAvailModal.dayIdx, startTime: addAvailModal.startTime, endTime: addAvailModal.endTime }),
+                    });
+                    const d = await r.json();
+                    if (d.slot) { setMechAvailability(prev => [...prev, d.slot]); setAddAvailModal(null); }
+                    else alert(d.error || 'Could not save block.');
+                  } catch { alert('Could not save availability block.'); }
+                }}
+              >Add Block</Button>
+            </div>
+          </div>
+        </div>
       )}
     </div>
   );

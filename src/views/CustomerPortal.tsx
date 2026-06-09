@@ -2510,7 +2510,7 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                       <div className="flex gap-2 w-full sm:w-auto">
                         <Button variant="outline" size="sm" className="flex-1 sm:flex-initial border-border text-foreground hover:bg-card h-10 px-6 font-bold uppercase tracking-widest text-[10px]">Profile</Button>
                         <Button size="sm" className="flex-[2] sm:flex-initial bg-torqued-red hover:bg-red-700 text-white h-10 px-8 font-bold uppercase tracking-widest text-[10px] shadow-lg shadow-torqued-red/20" onClick={() => {
-                          setSelectedMechanic({ ...mechanic, estimatedPrice: totalPrice + (idx * 20) });
+                          setSelectedMechanic({ ...mechanic, estimatedPrice: totalPrice });
                           // Diagnostic is booked & paid like any other service — the mechanic quotes after inspecting.
                           setStep(5);
                         }}>{selectedServices.includes('diag_inspection') ? 'Book Diagnostic' : 'Select & Schedule'}</Button>

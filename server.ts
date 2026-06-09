@@ -448,8 +448,8 @@ app.get('/api/mechanic/jobs', async (req, res) => {
 });
 
 // ── Passkeys (WebAuthn) ─────────────────────────────────────
-const RP_ID = 'torquednz.vercel.app';
-const RP_ORIGIN = 'https://torquednz.vercel.app';
+const RP_ID = 'torqued-psi.vercel.app';
+const RP_ORIGIN = 'https://torqued-psi.vercel.app';
 const RP_NAME = 'Torqued';
 
 // POST /api/passkey/register-options — begin passkey registration
@@ -2610,6 +2610,134 @@ Use a realistic mid-market figure. Do not include $ symbol.`;
   } catch (err: any) {
     console.error('[ai/oil-price]', err);
     res.status(500).json({ error: err?.message || 'Oil price lookup failed' });
+  }
+});
+
+// POST /api/ai/service-lookup — AI lookup for oil/fluid capacity + filter cost given a vehicle or service query
+app.post('/api/ai/service-lookup', async (req, res) => {
+  try {
+    const { query, type } = req.body;
+    if (!query?.trim()) return res.status(400).json({ error: 'query is required (e.g. Toyota Camry 2.5L 2018).' });
+    if (!process.env.OPENAI_API_KEY) return res.status(503).json({ error: 'AI not configured (add OpenAI credit).' });
+
+    const isTransmission = type === 'transmission';
+    const prompt = isTransmission
+      ? `You are a NZ automotive expert. For the vehicle or transmission service: "${query.trim()}"
+Provide the standard transmission fluid (ATF) refill capacity in litres and the approximate NZ retail cost per litre (NZD incl GST) for the correct fluid.
+Return ONLY JSON: {"transFluidCapacityL": <number>, "transFluidCostPerL": <number>, "fluidType": "<fluid spec e.g. Dexron VI>", "note": "<1 sentence>"}`
+      : `You are a NZ automotive expert. For the vehicle: "${query.trim()}"
+Provide: engine oil refill capacity (L), recommended oil grade (e.g. 5W-30), approximate NZ retail oil price per litre (NZD incl GST, mid-market brands like Penrite/Castrol at Repco), and approximate NZ retail price for a compatible oil filter (NZD incl GST).
+Return ONLY JSON: {"oilCapacityL": <number>, "oilGrade": "<grade>", "oilCostPerL": <number>, "filterCostNZD": <number>, "note": "<1 sentence>"}`;
+
+    const text = await callOpenAIChat([{ role: 'user', content: prompt }], 300, true);
+    let parsed: any = {};
+    try { parsed = JSON.parse(text); } catch { return res.status(422).json({ error: 'Could not parse AI response.' }); }
+    res.json(parsed);
+  } catch (err: any) {
+    console.error('[ai/service-lookup]', err);
+    res.status(500).json({ error: err?.message || 'Service lookup failed' });
+  }
+});
+
+// ── Mechanic Availability ──────────────────────────────────────────────────────
+// GET /api/mechanic/availability — list availability slots + closed periods for a mechanic
+app.get('/api/mechanic/availability', async (req, res) => {
+  try {
+    const mechanicId = req.query.mechanicId as string;
+    const supabase = getSupabaseAdmin();
+    if (!supabase || !mechanicId) return res.json({ slots: [], closedPeriods: [] });
+    const [slotsRes, periodsRes] = await Promise.all([
+      supabase.from('mechanic_availability').select('id, day_of_week, start_time, end_time').eq('mechanic_id', mechanicId).order('day_of_week').order('start_time'),
+      supabase.from('mechanic_closed_periods').select('id, start_date, end_date, reason').eq('mechanic_id', mechanicId).order('start_date'),
+    ]);
+    res.json({ slots: slotsRes.data ?? [], closedPeriods: periodsRes.data ?? [] });
+  } catch (err: any) {
+    res.status(500).json({ error: err?.message || 'Failed' });
+  }
+});
+
+// POST /api/mechanic/availability/replace — replace all slots (from operating hours table save)
+app.post('/api/mechanic/availability/replace', async (req, res) => {
+  try {
+    const { mechanicId, slots } = req.body;
+    if (!mechanicId) return res.status(400).json({ error: 'mechanicId required' });
+    const supabase = getSupabaseAdmin();
+    if (!supabase) return res.status(500).json({ error: 'DB unavailable' });
+    await supabase.from('mechanic_availability').delete().eq('mechanic_id', mechanicId);
+    if (Array.isArray(slots) && slots.length > 0) {
+      const rows = slots.map((s: any) => ({
+        mechanic_id: mechanicId,
+        day_of_week: Number(s.day_of_week),
+        start_time: s.start_time,
+        end_time: s.end_time,
+      }));
+      await supabase.from('mechanic_availability').insert(rows);
+    }
+    const { data } = await supabase.from('mechanic_availability').select('id, day_of_week, start_time, end_time').eq('mechanic_id', mechanicId).order('day_of_week').order('start_time');
+    res.json({ slots: data ?? [] });
+  } catch (err: any) {
+    console.error('[availability/replace]', err);
+    res.status(500).json({ error: err?.message || 'Failed' });
+  }
+});
+
+// POST /api/mechanic/availability/slot — add a single availability slot
+app.post('/api/mechanic/availability/slot', async (req, res) => {
+  try {
+    const { mechanicId, dayOfWeek, startTime, endTime } = req.body;
+    if (!mechanicId || dayOfWeek == null || !startTime || !endTime) return res.status(400).json({ error: 'mechanicId, dayOfWeek, startTime, endTime required' });
+    const supabase = getSupabaseAdmin();
+    if (!supabase) return res.status(500).json({ error: 'DB unavailable' });
+    const { data, error } = await supabase.from('mechanic_availability').insert({
+      mechanic_id: mechanicId, day_of_week: Number(dayOfWeek), start_time: startTime, end_time: endTime,
+    }).select('id, day_of_week, start_time, end_time').single();
+    if (error) throw error;
+    res.json({ slot: data });
+  } catch (err: any) {
+    console.error('[availability/slot]', err);
+    res.status(500).json({ error: err?.message || 'Failed' });
+  }
+});
+
+// DELETE /api/mechanic/availability/:id — delete one slot
+app.delete('/api/mechanic/availability/:id', async (req, res) => {
+  try {
+    const supabase = getSupabaseAdmin();
+    if (!supabase) return res.status(500).json({ error: 'DB unavailable' });
+    await supabase.from('mechanic_availability').delete().eq('id', req.params.id);
+    res.json({ success: true });
+  } catch (err: any) {
+    res.status(500).json({ error: err?.message || 'Failed' });
+  }
+});
+
+// POST /api/mechanic/closed-periods — add a closed period
+app.post('/api/mechanic/closed-periods', async (req, res) => {
+  try {
+    const { mechanicId, startDate, endDate, reason } = req.body;
+    if (!mechanicId || !startDate) return res.status(400).json({ error: 'mechanicId and startDate required' });
+    const supabase = getSupabaseAdmin();
+    if (!supabase) return res.status(500).json({ error: 'DB unavailable' });
+    const { data, error } = await supabase.from('mechanic_closed_periods').insert({
+      mechanic_id: mechanicId, start_date: startDate, end_date: endDate || startDate, reason: reason || null,
+    }).select('id, start_date, end_date, reason').single();
+    if (error) throw error;
+    res.json({ period: data });
+  } catch (err: any) {
+    console.error('[closed-periods]', err);
+    res.status(500).json({ error: err?.message || 'Failed' });
+  }
+});
+
+// DELETE /api/mechanic/closed-periods/:id — delete a closed period
+app.delete('/api/mechanic/closed-periods/:id', async (req, res) => {
+  try {
+    const supabase = getSupabaseAdmin();
+    if (!supabase) return res.status(500).json({ error: 'DB unavailable' });
+    await supabase.from('mechanic_closed_periods').delete().eq('id', req.params.id);
+    res.json({ success: true });
+  } catch (err: any) {
+    res.status(500).json({ error: err?.message || 'Failed' });
   }
 });
 
