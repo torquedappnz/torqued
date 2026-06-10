@@ -2747,11 +2747,22 @@ app.get('/api/fleet-prices', async (req, res) => {
     const catIds = cats.map((c: any) => c.id);
 
     // 4. Pull parts_data + labour_times + vehicle_specs + mechanic labour rate in parallel
-    // Oil change constants
-    const OIL_COST_PER_LITRE_LOW  = 18;  // $/L semi-synthetic NZ retail
-    const OIL_COST_PER_LITRE_HIGH = 22;  // $/L full-synthetic NZ retail
+    // ── Pricing constants ────────────────────────────────────────────────────
+    // parts_data was AI-seeded with ex-GST trade prices; multiply by 1.15 to get
+    // customer-facing NZD incl. GST. Oil consumables are quoted at retail (incl. GST).
+    const NZ_GST = 1.15;
+
+    // Oil change
+    const OIL_COST_PER_LITRE_LOW  = 18;  // $/L semi-synthetic NZ retail incl. GST
+    const OIL_COST_PER_LITRE_HIGH = 22;  // $/L full-synthetic NZ retail incl. GST
     const OIL_CHANGE_DEFAULT_LITRES = 4.5;
-    const OIL_CHANGE_SUNDRIES = 10;       // drip trays, rags, sundries
+    const OIL_CHANGE_SUNDRIES = 10;       // drip trays, rags, sundries (incl. GST)
+
+    // Transmission service fixed extras (incl. GST)
+    const TRANS_FREIGHT  = 10;   // freight on fluid/filter kit
+    const TRANS_SUNDRIES = 10;   // gaskets, thread seal, rags
+    const TRANS_SCAN_FEE = 25;   // service-light reset / TCU adaptation scan
+
     const PLATFORM_LABOUR_FALLBACK = 130; // $/hr — used when no mechanic specified
 
     // Optional specific mechanic — when passed the price uses their exact rate
@@ -2793,8 +2804,9 @@ app.get('/api/fleet-prices', async (req, res) => {
       labourByCat[lt.category_id] = { hl: Number(lt.hours_low), hh: Number(lt.hours_high) };
     }
 
-    // Find the oil_filter category id so we can apply special pricing below
-    const oilFilterCatId = cats.find((c: any) => c.slug === 'oil_filter')?.id ?? -1;
+    // Find special-case category ids
+    const oilFilterCatId  = cats.find((c: any) => c.slug === 'oil_filter')?.id          ?? -1;
+    const transCatId       = cats.find((c: any) => c.slug === 'transmission_filter')?.id ?? -1;
 
     const prices: Record<string, { low: number; high: number; midpoint: number }> = {};
     for (const row of (partsRes.data ?? []) as any[]) {
@@ -2802,26 +2814,34 @@ app.get('/api/fleet-prices', async (req, res) => {
       const svcId = slug ? slugToServiceId[slug] : null;
       if (!svcId) continue;
 
-      const filterLow  = Number(row.part_cost_low);
-      const filterHigh = Number(row.part_cost_high);
+      // Apply NZ GST to ex-GST trade parts costs
+      const partsLow  = Math.round(Number(row.part_cost_low)  * NZ_GST);
+      const partsHigh = Math.round(Number(row.part_cost_high) * NZ_GST);
 
       let low: number;
       let high: number;
 
       if (row.category_id === oilFilterCatId) {
-        // Oil Change: consumables (oil) + filter + exactly 1hr labour + sundries
-        // parts_data stores the filter cost only; oil is a separate consumable.
+        // Oil Change: oil consumables (retail incl GST) + filter (incl GST) + 1hr labour + sundries
         const oilLow  = Math.round(oilCapacity * OIL_COST_PER_LITRE_LOW);
         const oilHigh = Math.round(oilCapacity * OIL_COST_PER_LITRE_HIGH);
-        low  = oilLow  + filterLow  + NZD_LABOUR_RATE + OIL_CHANGE_SUNDRIES;
-        high = oilHigh + filterHigh + NZD_LABOUR_RATE + OIL_CHANGE_SUNDRIES;
-      } else {
-        // All other services: parts + labour from labour_times
-        const labour    = labourByCat[row.category_id];
+        low  = oilLow  + partsLow  + NZD_LABOUR_RATE + OIL_CHANGE_SUNDRIES;
+        high = oilHigh + partsHigh + NZD_LABOUR_RATE + OIL_CHANGE_SUNDRIES;
+      } else if (row.category_id === transCatId) {
+        // Transmission Service: parts (incl GST) + labour + freight + sundries + scan fee
+        const labour     = labourByCat[row.category_id];
         const labourLow  = labour ? Math.round(labour.hl * NZD_LABOUR_RATE) : 0;
         const labourHigh = labour ? Math.round(labour.hh * NZD_LABOUR_RATE) : 0;
-        low  = filterLow  + labourLow;
-        high = filterHigh + labourHigh;
+        const extras     = TRANS_FREIGHT + TRANS_SUNDRIES + TRANS_SCAN_FEE; // $45
+        low  = partsLow  + labourLow  + extras;
+        high = partsHigh + labourHigh + extras;
+      } else {
+        // All other services: parts (incl GST) + labour from labour_times
+        const labour     = labourByCat[row.category_id];
+        const labourLow  = labour ? Math.round(labour.hl * NZD_LABOUR_RATE) : 0;
+        const labourHigh = labour ? Math.round(labour.hh * NZD_LABOUR_RATE) : 0;
+        low  = partsLow  + labourLow;
+        high = partsHigh + labourHigh;
       }
 
       prices[svcId] = { low, high, midpoint: Math.round((low + high) / 2) };
