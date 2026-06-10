@@ -2746,15 +2746,18 @@ app.get('/api/fleet-prices', async (req, res) => {
 
     const catIds = cats.map((c: any) => c.id);
 
-    // 4. Pull parts_data + labour_times + vehicle_specs (for oil capacity) in parallel
-    const NZD_LABOUR_RATE = 185;
-    // Oil change constants — consumables calculated separately from the filter
-    const OIL_COST_PER_LITRE_LOW  = 18;  // $/L semi-synthetic
-    const OIL_COST_PER_LITRE_HIGH = 22;  // $/L full-synthetic
+    // 4. Pull parts_data + labour_times + vehicle_specs + mechanic labour rate in parallel
+    // Oil change constants
+    const OIL_COST_PER_LITRE_LOW  = 18;  // $/L semi-synthetic NZ retail
+    const OIL_COST_PER_LITRE_HIGH = 22;  // $/L full-synthetic NZ retail
     const OIL_CHANGE_DEFAULT_LITRES = 4.5;
-    const OIL_CHANGE_SUNDRIES = 10;       // drip trays, rags, etc.
+    const OIL_CHANGE_SUNDRIES = 10;       // drip trays, rags, sundries
+    const PLATFORM_LABOUR_FALLBACK = 130; // $/hr — used when no mechanic specified
 
-    const [partsRes, labourRes, specRes] = await Promise.all([
+    // Optional specific mechanic — when passed the price uses their exact rate
+    const mechanicId = req.query.mechanic ? String(req.query.mechanic) : null;
+
+    const [partsRes, labourRes, specRes, rateRes] = await Promise.all([
       supabase.from('parts_data')
         .select('category_id, part_cost_low, part_cost_high')
         .eq('vehicle_id', vehicleId).in('category_id', catIds),
@@ -2764,7 +2767,23 @@ app.get('/api/fleet-prices', async (req, res) => {
       supabase.from('vehicle_specs')
         .select('oil_capacity_litres')
         .eq('rego', rego).maybeSingle(),
+      // Fetch labour rate: specific mechanic if provided, else platform average
+      mechanicId
+        ? supabase.from('profiles').select('labour_rate').eq('id', mechanicId).maybeSingle()
+        : supabase.from('profiles').select('labour_rate').eq('role', 'mechanic').eq('subscription_active', true).not('labour_rate', 'is', null),
     ]);
+
+    // Resolve labour rate: mechanic-specific, or average of active mechanics, or fallback
+    let NZD_LABOUR_RATE: number;
+    if (mechanicId) {
+      NZD_LABOUR_RATE = Number((rateRes as any).data?.labour_rate) || PLATFORM_LABOUR_FALLBACK;
+    } else {
+      const rates = ((rateRes as any).data as any[] | null) ?? [];
+      const validRates = rates.map((r: any) => Number(r.labour_rate)).filter(n => n > 0);
+      NZD_LABOUR_RATE = validRates.length
+        ? Math.round(validRates.reduce((a: number, b: number) => a + b, 0) / validRates.length)
+        : PLATFORM_LABOUR_FALLBACK;
+    }
 
     const oilCapacity = Number(specRes.data?.oil_capacity_litres) || OIL_CHANGE_DEFAULT_LITRES;
 
