@@ -2384,59 +2384,124 @@ app.post('/api/mechanic/resend', async (req, res) => {
   }
 });
 
-// Helper: call OpenAI chat completions. `content` is the user message content
-// (string, or an array of parts for vision). Returns the assistant text.
-async function callOpenAI(content: any, jsonMode = false): Promise<string> {
-  const apiKey = process.env.OPENAI_API_KEY;
-  if (!apiKey) throw new Error('OPENAI_API_KEY not configured');
+// ── Claude (Anthropic) AI helpers ───────────────────────────────────────────
+// All AI calls now use claude-haiku-4-5 with web search enabled.
+const CLAUDE_MODEL = 'claude-haiku-4-5';
+const ANTHROPIC_API_URL = 'https://api.anthropic.com/v1/messages';
+const ANTHROPIC_HEADERS = (apiKey: string, webSearch = false) => ({
+  'Content-Type': 'application/json',
+  'x-api-key': apiKey,
+  'anthropic-version': '2023-06-01',
+  ...(webSearch ? { 'anthropic-beta': 'web-search-2025-03-05' } : {}),
+});
 
+// Converts OpenAI-style content arrays (image_url, file) to Anthropic format.
+function toAnthropicContent(content: any): any[] {
+  if (typeof content === 'string') return [{ type: 'text', text: content }];
+  if (!Array.isArray(content)) return [{ type: 'text', text: String(content) }];
+  return content.map((block: any) => {
+    if (block.type === 'text') return block;
+    if (block.type === 'image_url') {
+      const url: string = block.image_url?.url ?? '';
+      const mediaType = url.match(/^data:(image\/[a-z+]+);base64,/)?.[1] ?? 'image/jpeg';
+      const data = url.replace(/^data:[^,]+;base64,/, '');
+      return { type: 'image', source: { type: 'base64', media_type: mediaType, data } };
+    }
+    if (block.type === 'file') {
+      const raw: string = block.file?.file_data ?? '';
+      const data = raw.replace(/^data:[^,]+;base64,/, '');
+      return { type: 'document', source: { type: 'base64', media_type: 'application/pdf', data } };
+    }
+    return block;
+  });
+}
+
+// Simple one-shot Claude call — vision-capable (images & PDFs), no web search.
+// Used for receipt parsing and single-prompt tasks.
+async function callClaude(content: any, jsonMode = false): Promise<string> {
+  const apiKey = process.env.ANTHROPIC_API_KEY;
+  if (!apiKey) throw new Error('ANTHROPIC_API_KEY not configured');
   const body: any = {
-    model: 'gpt-4o-mini',
-    messages: [{ role: 'user', content }],
-    max_tokens: 600,
+    model: CLAUDE_MODEL,
+    max_tokens: 1024,
+    messages: [{ role: 'user', content: toAnthropicContent(content) }],
   };
-  if (jsonMode) body.response_format = { type: 'json_object' };
-
-  const r = await fetch('https://api.openai.com/v1/chat/completions', {
+  if (jsonMode) body.system = 'Return only valid JSON. No markdown code fences, no explanation.';
+  const r = await fetch(ANTHROPIC_API_URL, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` },
+    headers: ANTHROPIC_HEADERS(apiKey),
     body: JSON.stringify(body),
   });
   const data = await r.json();
-  if (!r.ok) throw new Error(data?.error?.message || 'OpenAI request failed');
-  return data.choices?.[0]?.message?.content ?? '';
+  if (!r.ok) throw new Error(data?.error?.message || 'Claude request failed');
+  return data.content?.[0]?.text ?? '';
 }
 
-// Chat-style OpenAI call (system + multi-turn). Cheap: gpt-4o-mini, capped tokens.
-// Messages may include { role, content, image } — image is a base64 string (with or without data URI prefix).
-// Those are expanded into vision content arrays automatically.
-async function callOpenAIChat(messages: any[], maxTokens = 500, jsonMode = false): Promise<string> {
-  const apiKey = process.env.OPENAI_API_KEY;
-  if (!apiKey) throw new Error('OPENAI_API_KEY not configured');
+// Chat-style Claude call — system prompt + multi-turn conversation + web search.
+// Messages may include { role, content, image } for vision. System messages are
+// extracted and passed as the top-level `system` field (Anthropic requirement).
+async function callClaudeChat(messages: any[], maxTokens = 500, jsonMode = false): Promise<string> {
+  const apiKey = process.env.ANTHROPIC_API_KEY;
+  if (!apiKey) throw new Error('ANTHROPIC_API_KEY not configured');
 
-  // Expand any message that has an image property into vision content format
-  const expanded = messages.map(m => {
-    if (!m.image) return m;
-    const base64 = String(m.image).replace(/^data:image\/[a-z]+;base64,/, '');
-    const ext = String(m.image).startsWith('data:image/png') ? 'png' : 'jpeg';
+  // Extract system message and build system prompt
+  const systemMsg = messages.find((m: any) => m.role === 'system');
+  const convMsgs  = messages.filter((m: any) => m.role !== 'system');
+  let systemPrompt = (systemMsg?.content ?? systemMsg?.text ?? '') as string;
+  if (jsonMode) systemPrompt += '\nRespond ONLY with valid JSON. No code fences, no explanatory text.';
+
+  // Expand image attachments to Claude vision format
+  const expanded = convMsgs.map((m: any) => {
+    const text = (m.content ?? m.text ?? '') as string;
+    if (!m.image) return { role: m.role, content: text };
+    const raw = String(m.image);
+    const base64 = raw.replace(/^data:image\/[a-z]+;base64,/, '');
+    const mediaType = raw.startsWith('data:image/png') ? 'image/png' : 'image/jpeg';
     return {
       role: m.role,
       content: [
-        { type: 'text', text: m.content || m.text || '' },
-        { type: 'image_url', image_url: { url: `data:image/${ext};base64,${base64}`, detail: 'low' } },
+        { type: 'text', text },
+        { type: 'image', source: { type: 'base64', media_type: mediaType, data: base64 } },
       ],
     };
   });
 
-  const body: any = { model: 'gpt-4o-mini', messages: expanded, max_tokens: maxTokens, temperature: 0.3 };
-  if (jsonMode) body.response_format = { type: 'json_object' };
-  const r = await fetch('https://api.openai.com/v1/chat/completions', {
-    method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` },
+  // Merge consecutive same-role messages (Claude requires strict user/assistant alternation)
+  const normalised: any[] = [];
+  for (const msg of expanded) {
+    const last = normalised[normalised.length - 1];
+    if (last?.role === msg.role && typeof last.content === 'string' && typeof msg.content === 'string') {
+      last.content += '\n' + msg.content;
+    } else {
+      normalised.push({ ...msg });
+    }
+  }
+  if (normalised.length === 0 || normalised[0].role !== 'user') {
+    normalised.unshift({ role: 'user', content: '...' });
+  }
+
+  const body: any = {
+    model: CLAUDE_MODEL,
+    max_tokens: maxTokens,
+    messages: normalised,
+    tools: [{ type: 'web_search_20250305', name: 'web_search' }],
+  };
+  if (systemPrompt) body.system = systemPrompt;
+
+  const r = await fetch(ANTHROPIC_API_URL, {
+    method: 'POST',
+    headers: ANTHROPIC_HEADERS(apiKey, true),
     body: JSON.stringify(body),
   });
   const data = await r.json();
-  if (!r.ok) throw new Error(data?.error?.message || 'OpenAI request failed');
-  return data.choices?.[0]?.message?.content ?? '';
+  if (!r.ok) throw new Error(data?.error?.message || 'Claude request failed');
+
+  // Collect all text blocks (web_search may insert result blocks before the final answer)
+  const text = ((data.content as any[]) ?? [])
+    .filter((b: any) => b.type === 'text')
+    .map((b: any) => b.text as string)
+    .join('');
+  return text;
 }
 
 // POST /api/ai/mechanic-assistant — mechanic data chat with full DB access.
@@ -2444,7 +2509,7 @@ app.post('/api/ai/mechanic-assistant', async (req, res) => {
   try {
     const { messages, vehicle, rego, mechanicId } = req.body;
     if (!Array.isArray(messages) || messages.length === 0) return res.status(400).json({ error: 'messages required' });
-    if (!process.env.OPENAI_API_KEY) return res.status(503).json({ error: 'AI assistant not configured (add OpenAI credit).' });
+    if (!process.env.ANTHROPIC_API_KEY) return res.status(503).json({ error: 'AI assistant not configured (add Anthropic API key).' });
 
     const supabase = getSupabaseAdmin();
     let vehicleCtx = vehicle || '';
@@ -2565,7 +2630,7 @@ When a mechanic asks about a specific rego or customer name, use the vehicle dat
     const normalised = messages.slice(-10).map((m: any) => ({
       role: m.role, content: m.content ?? m.text ?? '', image: m.image || undefined,
     }));
-    const reply = await callOpenAIChat([sys, ...normalised], 600);
+    const reply = await callClaudeChat([sys, ...normalised], 600);
     res.json({ reply: reply.trim() });
   } catch (err: any) {
     console.error('[ai/mechanic-assistant]', err);
@@ -2743,7 +2808,7 @@ app.post('/api/ai/customer-assistant', async (req, res) => {
   try {
     const { messages, ownerId, rego, lat, lng } = req.body;
     if (!Array.isArray(messages) || messages.length === 0) return res.status(400).json({ error: 'messages required' });
-    if (!process.env.OPENAI_API_KEY) return res.status(503).json({ error: 'AI assistant not configured (add OpenAI credit).' });
+    if (!process.env.ANTHROPIC_API_KEY) return res.status(503).json({ error: 'AI assistant not configured (add Anthropic API key).' });
 
     const supabase = getSupabaseAdmin();
     let vehicles: any[] = [];
@@ -2816,7 +2881,7 @@ How to respond:
     const normalised = messages.slice(-10).map((m: any) => ({
       role: m.role, content: m.content ?? m.text ?? '', image: m.image || undefined,
     }));
-    const reply = await callOpenAIChat([sys, ...normalised], 450);
+    const reply = await callClaudeChat([sys, ...normalised], 450);
     res.json({ reply: reply.trim(), mechanicsNearby: mechCount, focusRego: focusRego || null });
   } catch (err: any) {
     console.error('[ai/customer-assistant]', err);
@@ -2828,12 +2893,12 @@ How to respond:
 app.post('/api/ai/health-insights', async (req, res) => {
   try {
     const { rego, make, model, year, mileage, history } = req.body;
-    if (!process.env.OPENAI_API_KEY) return res.status(503).json({ error: 'AI not configured (add OpenAI credit).' });
+    if (!process.env.ANTHROPIC_API_KEY) return res.status(503).json({ error: 'AI not configured (add Anthropic API key).' });
     const prompt = `You are an NZ vehicle maintenance analyst. Vehicle: ${year || ''} ${make || ''} ${model || ''} (${rego || ''}), odometer ${mileage || 'unknown'} km.
 Service history (most recent first): ${JSON.stringify((history || []).slice(0, 20))}.
 Return ONLY JSON: {"insights":[{"title":"short label","detail":"1 sentence, NZ-specific, practical","severity":"good|due|overdue|info"}]}.
 Give 3-5 insights based on typical service intervals for THIS make/model and what the history shows is missing or due soon. Don't invent past services. If history is empty, base it on mileage + typical intervals.`;
-    const text = await callOpenAIChat([{ role: 'user', content: prompt }], 600, true);
+    const text = await callClaudeChat([{ role: 'user', content: prompt }], 600, true);
     let parsed: any = {};
     try { parsed = JSON.parse(text); } catch { return res.status(422).json({ error: 'Could not parse insights' }); }
     res.json({ insights: Array.isArray(parsed.insights) ? parsed.insights : [] });
@@ -2843,18 +2908,18 @@ Give 3-5 insights based on typical service intervals for THIS make/model and wha
   }
 });
 
-// POST /api/ai/oil-price — looks up current NZ retail price per litre for a given oil grade via OpenAI
+// POST /api/ai/oil-price — looks up current NZ retail price per litre for a given oil grade via Claude
 app.post('/api/ai/oil-price', async (req, res) => {
   try {
     const { grade } = req.body;
     if (!grade?.trim()) return res.status(400).json({ error: 'Oil grade is required (e.g. 5W-30).' });
-    if (!process.env.OPENAI_API_KEY) return res.status(503).json({ error: 'AI not configured (add OpenAI credit).' });
+    if (!process.env.ANTHROPIC_API_KEY) return res.status(503).json({ error: 'AI not configured (add Anthropic API key).' });
     const prompt = `You are a NZ automotive parts pricing expert with current market knowledge.
 What is the approximate current retail price per litre (NZD, incl GST) for ${grade.trim()} engine oil sold in New Zealand?
 Consider brands like Castrol, Penrite, Mobil 1, Gulf Western typically stocked at Repco or Supercheap.
 Return ONLY JSON: {"pricePerLitre": <number>, "note": "<1 sentence reasoning>"}
 Use a realistic mid-market figure. Do not include $ symbol.`;
-    const text = await callOpenAIChat([{ role: 'user', content: prompt }], 200, true);
+    const text = await callClaudeChat([{ role: 'user', content: prompt }], 200, true);
     let parsed: any = {};
     try { parsed = JSON.parse(text); } catch { return res.status(422).json({ error: 'Could not parse oil price response.' }); }
     if (typeof parsed.pricePerLitre !== 'number') return res.status(422).json({ error: 'Unexpected response format.' });
@@ -2870,7 +2935,7 @@ app.post('/api/ai/service-lookup', async (req, res) => {
   try {
     const { query, type } = req.body;
     if (!query?.trim()) return res.status(400).json({ error: 'query is required (e.g. Toyota Camry 2.5L 2018).' });
-    if (!process.env.OPENAI_API_KEY) return res.status(503).json({ error: 'AI not configured (add OpenAI credit).' });
+    if (!process.env.ANTHROPIC_API_KEY) return res.status(503).json({ error: 'AI not configured (add Anthropic API key).' });
 
     const isTransmission = type === 'transmission';
     const prompt = isTransmission
@@ -2881,7 +2946,7 @@ Return ONLY JSON: {"transFluidCapacityL": <number>, "transFluidCostPerL": <numbe
 Provide: engine oil refill capacity (L), recommended oil grade (e.g. 5W-30), approximate NZ retail oil price per litre (NZD incl GST, mid-market brands like Penrite/Castrol at Repco), and approximate NZ retail price for a compatible oil filter (NZD incl GST).
 Return ONLY JSON: {"oilCapacityL": <number>, "oilGrade": "<grade>", "oilCostPerL": <number>, "filterCostNZD": <number>, "note": "<1 sentence>"}`;
 
-    const text = await callOpenAIChat([{ role: 'user', content: prompt }], 300, true);
+    const text = await callClaudeChat([{ role: 'user', content: prompt }], 300, true);
     let parsed: any = {};
     try { parsed = JSON.parse(text); } catch { return res.status(422).json({ error: 'Could not parse AI response.' }); }
     res.json(parsed);
@@ -3114,11 +3179,11 @@ app.post('/api/ai/parts-lookup', async (req, res) => {
   try {
     const { query, make, model, year } = req.body;
     if (!query?.trim()) return res.status(400).json({ error: 'query required' });
-    if (!process.env.OPENAI_API_KEY) return res.status(503).json({ error: 'AI not configured (add OpenAI credit).' });
+    if (!process.env.ANTHROPIC_API_KEY) return res.status(503).json({ error: 'AI not configured (add Anthropic API key).' });
     const prompt = `You are an NZ auto parts assistant. The mechanic needs: "${query}" for a ${year || ''} ${make || ''} ${model || ''}.
 Return ONLY JSON: {"name":"clear part name","oemNumber":"OEM/part number or empty if unsure","estPriceNZD":number_or_null,"suppliers":["NZ suppliers likely to stock it, e.g. Repco, Supercheap Auto, BNT, Partmaster, Appco"],"notes":"short fitment note"}.
 Only include an OEM number if you are reasonably confident; otherwise empty string. Price is a rough NZ retail estimate.`;
-    const text = await callOpenAIChat([{ role: 'user', content: prompt }], 350, true);
+    const text = await callClaudeChat([{ role: 'user', content: prompt }], 350, true);
     let parsed: any = {};
     try { parsed = JSON.parse(text); } catch { return res.status(422).json({ error: 'Could not parse result' }); }
     res.json(parsed);
@@ -3128,12 +3193,12 @@ Only include an OEM number if you are reasonably confident; otherwise empty stri
   }
 });
 
-// POST /api/ai/fault-code — translates a diagnostic fault code via OpenAI
+// POST /api/ai/fault-code — translates a diagnostic fault code via Claude
 app.post('/api/ai/fault-code', async (req, res) => {
   try {
     const { code, make, model, year, mileage } = req.body;
     if (!code) return res.status(400).json({ error: 'code is required' });
-    if (!process.env.OPENAI_API_KEY) {
+    if (!process.env.ANTHROPIC_API_KEY) {
       return res.json({ translation: `Interpreting ${code.toUpperCase()}... AI not configured.` });
     }
 
@@ -3142,7 +3207,7 @@ Translate fault code ${String(code).toUpperCase()} for a ${year || ''} ${make ||
 In 1-2 sentences max: what it means, the most likely cause for this vehicle, and what action to take.
 Be direct and practical. No disclaimers.`;
 
-    const text = await callOpenAI(prompt);
+    const text = await callClaude(prompt);
     res.json({ translation: text.trim() || 'Unable to interpret code.' });
   } catch (err) {
     console.error('[AI fault-code]', err);
@@ -3291,11 +3356,11 @@ app.post('/api/ai/summarize', async (req, res) => {
   try {
     const { text, style } = req.body;
     if (!text || String(text).trim().length === 0) return res.status(400).json({ error: 'text is required' });
-    if (!process.env.OPENAI_API_KEY) return res.status(503).json({ error: 'AI summary is not configured yet.' });
+    if (!process.env.ANTHROPIC_API_KEY) return res.status(503).json({ error: 'AI summary is not configured yet.' });
     const system = style === 'title'
       ? 'You turn a vehicle service description into a short headline of the key work, Title Case, max ~8 words, items joined with " & " or ", ". Example: "Cambelt & Water Pump Replaced, Oil & Filter Service". No prices, no dates, no preamble.'
       : 'You summarise a vehicle workshop message for the car owner in 1–2 short, plain sentences. Keep any prices, dates and required actions. No preamble.';
-    const summary = await callOpenAIChat([
+    const summary = await callClaudeChat([
       { role: 'system', content: system },
       { role: 'user', content: String(text).slice(0, 4000) },
     ], style === 'title' ? 40 : 160);
@@ -3527,12 +3592,12 @@ app.post('/api/customer/reschedule', async (req, res) => {
   }
 });
 
-// POST /api/ai/parse-receipt — extracts service history from a receipt image via OpenAI vision
+// POST /api/ai/parse-receipt — extracts service history from a receipt image via Claude vision
 app.post('/api/ai/parse-receipt', async (req, res) => {
   try {
     const { fileData, mimeType } = req.body;
     if (!fileData || !mimeType) return res.status(400).json({ error: 'fileData and mimeType are required' });
-    if (!process.env.OPENAI_API_KEY) return res.status(503).json({ error: 'AI receipt scanning is not configured yet.' });
+    if (!process.env.ANTHROPIC_API_KEY) return res.status(503).json({ error: 'AI receipt scanning is not configured yet.' });
 
     const isPdf = String(mimeType).includes('pdf');
 
@@ -3551,7 +3616,7 @@ Use an empty string for anything you cannot find. Do not guess.`;
       ? { type: 'file', file: { filename: 'receipt.pdf', file_data: `data:application/pdf;base64,${fileData}` } }
       : { type: 'image_url', image_url: { url: `data:${mimeType};base64,${fileData}` } };
 
-    const text = await callOpenAI([
+    const text = await callClaude([
       { type: 'text', text: prompt },
       fileBlock,
     ], true);
