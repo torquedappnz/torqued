@@ -2588,20 +2588,25 @@ app.get('/api/fleet-prices', async (req, res) => {
     const supabase = getSupabaseAdmin();
     if (!supabase) return res.json({ prices: {} });
 
-    // 1. Resolve make/model from the customer's vehicle record
+    // 1. Resolve make/model/year from the customer's vehicle record
     const { data: custVehicle } = await supabase
-      .from('vehicles').select('make, model').eq('rego', rego).single();
+      .from('vehicles').select('make, model, year').eq('rego', rego).single();
     if (!custVehicle?.make) return res.json({ prices: {} });
 
-    // 2. Match to fleet vehicle_models via vehicle_aliases
-    const { data: aliases } = await supabase
-      .from('vehicle_aliases')
-      .select('vehicle_id')
-      .ilike('alias_make', custVehicle.make)
-      .ilike('alias_model', custVehicle.model)
-      .limit(1);
-    if (!aliases || aliases.length === 0) return res.json({ prices: {} });
-    const vehicleId = aliases[0].vehicle_id;
+    // 2. Match directly to vehicle_models by make + model (+ year range if available)
+    let vmQuery = supabase
+      .from('vehicle_models')
+      .select('id')
+      .ilike('make', custVehicle.make)
+      .ilike('model', custVehicle.model);
+    if (custVehicle.year) {
+      vmQuery = vmQuery
+        .lte('year_from', custVehicle.year)
+        .or(`year_to.is.null,year_to.gte.${custVehicle.year}`);
+    }
+    const { data: vmRows } = await vmQuery.limit(1);
+    if (!vmRows || vmRows.length === 0) return res.json({ prices: {} });
+    const vehicleId = vmRows[0].id;
 
     // 3. Fetch all relevant category IDs in one query
     const slugs = Object.values(FLEET_SERVICE_TO_SLUG);

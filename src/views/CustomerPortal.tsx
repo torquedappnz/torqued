@@ -1135,36 +1135,41 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
     transmission: 'transmission_filter',
   };
 
-  // Stub Carjam API call — hardcoded sample. Wire real API key separately.
-  const stubCarjamLookup = (_plate: string) => ({
-    make: 'TOYOTA', model: 'COROLLA', year: 2015, bodyType: 'sedan', fuel: 'petrol',
-  });
-
   const lookupFleetQuote = async () => {
     setFleetQuoteState('loading');
     setFleetQuoteRange(null);
     setFleetVehicleId(null);
     setQuoteFallbackCategoryId(null);
     try {
-      const carjam = stubCarjamLookup(rego);
-      setCarjamVehicle(carjam);
+      // Use the already-loaded vehicle make/model/year from state instead of a Carjam stub
+      const make = vehicle?.make ?? '';
+      const model = vehicle?.model ?? '';
+      const year = vehicle?.year ?? null;
+      if (!make || !model) { setFleetQuoteState(null); return; }
+      const carjamVehicleData = { make, model, year: year ?? 0, bodyType: '', fuel: '' };
+      setCarjamVehicle({ ...carjamVehicleData });
 
-      // 1. Find vehicle match via vehicle_aliases
-      const { data: aliases } = await supabase
-        .from('vehicle_aliases')
-        .select('vehicle_id, vehicle_models(body_type, fuel)')
-        .ilike('alias_make', carjam.make)
-        .ilike('alias_model', carjam.model)
-        .limit(1);
+      // 1. Match directly against vehicle_models (ilike on make + model, optional year range)
+      let vmQuery = supabase
+        .from('vehicle_models')
+        .select('id, body_type, fuel')
+        .ilike('make', make)
+        .ilike('model', model);
+      if (year) {
+        vmQuery = (vmQuery as any)
+          .lte('year_from', year)
+          .or(`year_to.is.null,year_to.gte.${year}`);
+      }
+      const { data: vmRows } = await (vmQuery as any).limit(1);
 
-      if (!aliases || aliases.length === 0) {
-        await _resolveSegmentFallback(null, null, carjam, null);
+      if (!vmRows || vmRows.length === 0) {
+        await _resolveSegmentFallback(null, null, carjamVehicleData, null);
         return;
       }
 
-      const matchedId = aliases[0].vehicle_id;
+      const matchedId = vmRows[0].id;
       setFleetVehicleId(matchedId);
-      const vmData = (aliases[0] as any).vehicle_models as { body_type?: string; fuel?: string } | null;
+      const vmData = { body_type: vmRows[0].body_type, fuel: vmRows[0].fuel } as { body_type?: string; fuel?: string };
 
       // 2. Find first selected service with a category mapping
       const firstSlug = selectedServices.map(id => SERVICE_TO_CATEGORY_SLUG[id]).find(Boolean);
@@ -1172,7 +1177,7 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
 
       const { data: cat } = await supabase
         .from('part_categories').select('id').eq('slug', firstSlug).single();
-      if (!cat) { await _resolveSegmentFallback(matchedId, vmData, carjam, null); return; }
+      if (!cat) { await _resolveSegmentFallback(matchedId, vmData, carjamVehicleData, null); return; }
 
       const catId: number = cat.id;
       setQuoteFallbackCategoryId(catId);
@@ -1185,9 +1190,9 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
         .eq('category_id', catId)
         .single();
 
-      if (!pd) { await _resolveSegmentFallback(matchedId, vmData, carjam, catId); return; }
+      if (!pd) { await _resolveSegmentFallback(matchedId, vmData, carjamVehicleData, catId); return; }
       if (pd.source === 'ai_seed' && pd.confidence <= 1) {
-        await _resolveSegmentFallback(matchedId, vmData, carjam, catId); return;
+        await _resolveSegmentFallback(matchedId, vmData, carjamVehicleData, catId); return;
       }
 
       // Instant quote path
