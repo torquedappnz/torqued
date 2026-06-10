@@ -387,6 +387,14 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
   const [showNewCustomerForm, setShowNewCustomerForm] = useState(false);
   const [newCustomerName, setNewCustomerName] = useState('');
   const [newCustomerEmail, setNewCustomerEmail] = useState('');
+  // Manual vehicle entry fallback when rego lookup returns 404
+  const [showManualVehicle, setShowManualVehicle] = useState(false);
+  const [manualYear, setManualYear] = useState('');
+  const [manualMake, setManualMake] = useState('');
+  const [manualModel, setManualModel] = useState('');
+  const [manualSubmodel, setManualSubmodel] = useState('');
+  const [manualVehicleLoading, setManualVehicleLoading] = useState(false);
+  const [manualVehicleError, setManualVehicleError] = useState<string | null>(null);
   const [newCustomerPhone, setNewCustomerPhone] = useState('');
   const [newCustomerError, setNewCustomerError] = useState<string | null>(null);
   const [newCustomerLoading, setNewCustomerLoading] = useState(false);
@@ -1531,7 +1539,8 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
       });
 
       if (res.status === 404) {
-        setPlateMatchError('Plate not found in our registry. Please check the number and try again.');
+        // Plate not in registry — offer manual entry instead of dead-end error
+        setShowManualVehicle(true);
         return;
       }
 
@@ -3754,38 +3763,6 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                 </div>
               </section>
 
-              {/* Vehicle Photos */}
-              <section className="space-y-4">
-                <div className="flex items-center justify-between">
-                  <h3 className="text-lg font-bold tracking-tight">Vehicle Photos</h3>
-                  <label className="cursor-pointer">
-                    <span className="text-xs font-bold text-torqued-red border border-torqued-red/30 rounded-lg px-3 py-1.5 hover:bg-torqued-red/5 flex items-center gap-1">
-                      <Upload size={12} /> {photoUploading ? 'Uploading…' : 'Upload Photo'}
-                    </span>
-                    <input type="file" accept="image/*" className="hidden" disabled={photoUploading}
-                      onChange={e => { const f = e.target.files?.[0]; if (f) uploadPhoto(f); e.target.value = ''; }} />
-                  </label>
-                </div>
-                <input
-                  className="w-full text-xs bg-card border border-border rounded-lg px-3 py-2 text-foreground focus:outline-none focus:border-torqued-red/50"
-                  placeholder="Photo caption (optional — set before uploading)"
-                  value={photoComment}
-                  onChange={e => setPhotoComment(e.target.value)}
-                />
-                {vehiclePhotos.length === 0 ? (
-                  <Card className="p-6 text-center text-sm text-muted italic bg-card border-border">No photos yet. Upload images of your vehicle for reference.</Card>
-                ) : (
-                  <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
-                    {vehiclePhotos.map(photo => (
-                      <div key={photo.id} className="space-y-1">
-                        <img src={photo.photo_url} alt={photo.comment || 'photo'} className="w-full aspect-square object-cover rounded-xl border border-border" />
-                        {photo.comment && <p className="text-[10px] text-muted truncate">{photo.comment}</p>}
-                        <p className="text-[9px] text-muted/60">{new Date(photo.created_at).toLocaleDateString('en-NZ')}</p>
-                      </div>
-                    ))}
-                  </div>
-                )}
-              </section>
 
           <section className="space-y-6">
             <h3 className="text-2xl font-bold tracking-tight">Active Jobs</h3>
@@ -4295,6 +4272,97 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
               <div className="w-12 h-12 border-4 border-torqued-red border-t-transparent rounded-full animate-spin mx-auto" />
               <p className="text-white/60 font-bold text-sm uppercase tracking-widest">Verifying your link…</p>
             </div>
+          </div>
+        )}
+      </AnimatePresence>
+
+      {/* Manual vehicle entry — shown when rego lookup returns 404 */}
+      <AnimatePresence>
+        {showManualVehicle && (
+          <div className="fixed inset-0 z-[110] flex items-center justify-center p-4 bg-black/70 backdrop-blur-sm">
+            <motion.div
+              initial={{ opacity: 0, scale: 0.95, y: 20 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.95, y: 20 }}
+              className="w-full max-w-md bg-card border border-border rounded-3xl p-8 space-y-6 shadow-2xl"
+            >
+              <div className="space-y-1">
+                <h3 className="text-2xl font-black tracking-tight">Enter your vehicle details</h3>
+                <p className="text-sm text-muted">We couldn't find <span className="font-bold text-foreground">{rego.toUpperCase()}</span> in our registry — no worries, just fill this in and we'll get you sorted.</p>
+              </div>
+              <div className="space-y-3">
+                <input
+                  type="number"
+                  placeholder="Year (e.g. 2018)"
+                  min={1980} max={new Date().getFullYear() + 1}
+                  value={manualYear}
+                  onChange={e => setManualYear(e.target.value)}
+                  className="w-full bg-background border border-border rounded-xl px-4 h-12 text-sm text-foreground placeholder:text-muted focus:outline-none focus:border-torqued-red"
+                />
+                <input
+                  type="text"
+                  placeholder="Make (e.g. Toyota)"
+                  value={manualMake}
+                  onChange={e => setManualMake(e.target.value)}
+                  className="w-full bg-background border border-border rounded-xl px-4 h-12 text-sm text-foreground placeholder:text-muted focus:outline-none focus:border-torqued-red"
+                />
+                <input
+                  type="text"
+                  placeholder="Model (e.g. Corolla)"
+                  value={manualModel}
+                  onChange={e => setManualModel(e.target.value)}
+                  className="w-full bg-background border border-border rounded-xl px-4 h-12 text-sm text-foreground placeholder:text-muted focus:outline-none focus:border-torqued-red"
+                />
+                <input
+                  type="text"
+                  placeholder="Submodel / variant (e.g. GX, Limited — optional)"
+                  value={manualSubmodel}
+                  onChange={e => setManualSubmodel(e.target.value)}
+                  className="w-full bg-background border border-border rounded-xl px-4 h-12 text-sm text-foreground placeholder:text-muted focus:outline-none focus:border-torqued-red"
+                />
+              </div>
+              {manualVehicleError && <p className="text-xs text-torqued-red font-bold">{manualVehicleError}</p>}
+              <div className="flex gap-3">
+                <Button variant="outline" fullWidth onClick={() => { setShowManualVehicle(false); setManualVehicleError(null); }}>Back</Button>
+                <Button
+                  fullWidth
+                  className="bg-torqued-red text-white"
+                  disabled={!manualMake || !manualModel || manualVehicleLoading}
+                  onClick={async () => {
+                    setManualVehicleLoading(true);
+                    setManualVehicleError(null);
+                    try {
+                      const res = await fetch('/api/customer/manual-vehicle', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                          rego: rego.toUpperCase().trim(),
+                          year: manualYear ? Number(manualYear) : null,
+                          make: manualMake.trim(),
+                          model: manualModel.trim(),
+                          submodel: manualSubmodel.trim() || null,
+                        }),
+                      });
+                      const data = await res.json();
+                      if (!res.ok) { setManualVehicleError(data.error || 'Could not save vehicle'); return; }
+                      setShowManualVehicle(false);
+                      // isNew will always be true for manually entered vehicles without an owner
+                      if (customerOwnerId) {
+                        await loadVehicleByRego(rego.toUpperCase().trim());
+                      } else {
+                        setShowNewCustomerForm(true);
+                      }
+                    } catch {
+                      setManualVehicleError('Could not connect. Please try again.');
+                    } finally {
+                      setManualVehicleLoading(false);
+                    }
+                  }}
+                >
+                  {manualVehicleLoading ? 'Saving…' : 'Continue →'}
+                </Button>
+              </div>
+            </motion.div>
           </div>
         )}
       </AnimatePresence>

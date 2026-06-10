@@ -630,6 +630,46 @@ app.post('/api/customer/check-plate', async (req, res) => {
   }
 });
 
+// POST /api/customer/manual-vehicle — create a vehicles row from manually-entered details
+// when the customer's plate can't be found via the automated registry lookup.
+// Returns same shape as check-plate so the frontend can continue to the OTP / register flow.
+app.post('/api/customer/manual-vehicle', async (req, res) => {
+  try {
+    const { rego, year, make, model, submodel } = req.body;
+    if (!rego || !make || !model) return res.status(400).json({ error: 'rego, make and model are required' });
+    const formattedRego = String(rego).toUpperCase().trim();
+    const supabase = getSupabaseAdmin();
+    if (!supabase) return res.status(500).json({ error: 'Database not configured' });
+
+    // Check if already exists (idempotent)
+    const { data: existing } = await supabase
+      .from('vehicles').select('rego, owner_id').eq('rego', formattedRego).single();
+
+    if (existing) {
+      // Already in DB — route as normal check-plate result
+      return res.json({ found: true, isNew: !existing.owner_id });
+    }
+
+    // Insert manually-entered vehicle
+    const { error: insertErr } = await supabase.from('vehicles').insert({
+      rego: formattedRego,
+      year: year ? Number(year) : null,
+      make: String(make).trim(),
+      model: String(model).trim(),
+      variant: submodel ? String(submodel).trim() : null,
+    });
+    if (insertErr) {
+      console.error('[manual-vehicle] insert error:', insertErr);
+      return res.status(500).json({ error: 'Could not register vehicle' });
+    }
+
+    return res.json({ found: true, isNew: true });
+  } catch (err) {
+    console.error('[manual-vehicle]', err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
 // POST /api/customer/login-email — existing customer logs in by email; emails a magic link
 app.post('/api/customer/login-email', async (req, res) => {
   try {
@@ -2639,22 +2679,39 @@ app.get('/api/fleet-prices', async (req, res) => {
       Object.entries(FLEET_SERVICE_TO_SLUG).map(([svcId, slug]) => [slug, svcId])
     );
 
-    // 4. Pull parts_data for this vehicle
-    const { data: rows } = await supabase
-      .from('parts_data')
-      .select('category_id, part_cost_low, part_cost_high')
-      .eq('vehicle_id', vehicleId)
-      .in('category_id', cats.map((c: any) => c.id));
+    const catIds = cats.map((c: any) => c.id);
+
+    // 4. Pull parts_data + labour_times together — NZD total = parts + (hours × labour_rate)
+    // $185/hr is a conservative NZ workshop rate; mechanics can adjust via their packages.
+    const NZD_LABOUR_RATE = 185;
+    const [partsRes, labourRes] = await Promise.all([
+      supabase.from('parts_data')
+        .select('category_id, part_cost_low, part_cost_high')
+        .eq('vehicle_id', vehicleId).in('category_id', catIds),
+      supabase.from('labour_times')
+        .select('category_id, hours_low, hours_high')
+        .eq('vehicle_id', vehicleId).in('category_id', catIds),
+    ]);
+
+    // Index labour by category_id for O(1) lookup
+    const labourByCat: Record<number, { hl: number; hh: number }> = {};
+    for (const lt of (labourRes.data ?? []) as any[]) {
+      labourByCat[lt.category_id] = { hl: Number(lt.hours_low), hh: Number(lt.hours_high) };
+    }
 
     const prices: Record<string, { low: number; high: number; midpoint: number }> = {};
-    for (const row of (rows ?? []) as any[]) {
+    for (const row of (partsRes.data ?? []) as any[]) {
       const slug = catIdToSlug[row.category_id];
       const svcId = slug ? slugToServiceId[slug] : null;
-      if (svcId) {
-        const low = Number(row.part_cost_low);
-        const high = Number(row.part_cost_high);
-        prices[svcId] = { low, high, midpoint: Math.round((low + high) / 2) };
-      }
+      if (!svcId) continue;
+      const partsLow = Number(row.part_cost_low);
+      const partsHigh = Number(row.part_cost_high);
+      const labour = labourByCat[row.category_id];
+      const labourLow  = labour ? Math.round(labour.hl * NZD_LABOUR_RATE) : 0;
+      const labourHigh = labour ? Math.round(labour.hh * NZD_LABOUR_RATE) : 0;
+      const low  = partsLow  + labourLow;
+      const high = partsHigh + labourHigh;
+      prices[svcId] = { low, high, midpoint: Math.round((low + high) / 2) };
     }
     res.json({ prices, timingDrive, vehicleId });
   } catch (err) {
