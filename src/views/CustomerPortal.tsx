@@ -420,6 +420,13 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
   // Real mechanics from the DB (so bookings route to a real mechanic account)
   const [realMechanics, setRealMechanics] = useState<Mechanic[]>([]);
 
+  // Fleet quote lookup state (vehicle_models + parts_data)
+  const [fleetQuoteState, setFleetQuoteState] = useState<'loading' | 'instant' | 'fallback' | null>(null);
+  const [fleetQuoteRange, setFleetQuoteRange] = useState<{ low: number; high: number } | null>(null);
+  const [fleetVehicleId, setFleetVehicleId] = useState<string | null>(null);
+  const [carjamVehicle, setCarjamVehicle] = useState<{ make: string; model: string; year: number; bodyType: string; fuel: string } | null>(null);
+  const [quoteFallbackCategoryId, setQuoteFallbackCategoryId] = useState<number | null>(null);
+
   useEffect(() => {
     fetch('/api/mechanics')
       .then(r => r.json())
@@ -1073,9 +1080,26 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
       setUserName(userProfile?.name || null);
       // Per-vehicle service pricing and oil specs from the DB
       const specs = Array.isArray(data.vehicle_specs) ? data.vehicle_specs[0] : data.vehicle_specs;
-      setVehiclePrices(specs?.service_prices || {});
+      // Start with any legacy vehicle_specs.service_prices, then overlay fleet DB midpoints
+      const legacyPrices: Record<string, number> = specs?.service_prices || {};
+      setVehiclePrices(legacyPrices);
       setVehicleOilCapacity(specs?.oil_capacity_litres ?? null);
       setVehicleOilType(specs?.oil_type ?? null);
+      // Fetch fleet prices in background and overlay onto vehiclePrices so the
+      // Step 2 tally and Step 4 mechanic list reflect real parts_data midpoints.
+      fetch(`/api/fleet-prices?rego=${encodeURIComponent(rego)}`)
+        .then(r => r.json())
+        .then((fp: { prices: Record<string, { low: number; high: number; midpoint: number }> }) => {
+          if (fp?.prices && Object.keys(fp.prices).length > 0) {
+            const fleetMidpoints: Record<string, number> = {};
+            for (const [svcId, p] of Object.entries(fp.prices)) {
+              fleetMidpoints[svcId] = p.midpoint;
+            }
+            // Fleet midpoints win over legacy — they're vehicle-specific real data
+            setVehiclePrices({ ...legacyPrices, ...fleetMidpoints });
+          }
+        })
+        .catch(() => {/* fleet prices are best-effort */});
       // Load any saved/imported service history for this vehicle
       if (Array.isArray(data.history) && data.history.length) {
         setManualHistory(data.history.map((h: any) => ({
@@ -1093,6 +1117,142 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
       setVehicle({ id: rego, rego, make: 'Unknown', model: 'Vehicle', year: 2020, mileage: 0 });
       setMileage('0');
     }
+  };
+
+  // ── Fleet quote lookup (vehicle_models + parts_data) ──────────────────────
+
+  // Maps SERVICES ids to part_categories slugs in migration 018.
+  const SERVICE_TO_CATEGORY_SLUG: Record<string, string> = {
+    oil: 'oil_filter',
+    timing: 'cambelt',
+    brakes_front_pads: 'front_brake_pads',
+    brakes_front_rotors: 'front_rotors',
+    brakes_rear_pads: 'rear_brake_pads',
+    brakes_rear_rotors: 'rear_rotors',
+    battery: 'battery_12v',
+    spark_plugs: 'ignition_coils',
+    cabin_filter: 'cabin_air_filter',
+    transmission: 'transmission_filter',
+  };
+
+  // Stub Carjam API call — hardcoded sample. Wire real API key separately.
+  const stubCarjamLookup = (_plate: string) => ({
+    make: 'TOYOTA', model: 'COROLLA', year: 2015, bodyType: 'sedan', fuel: 'petrol',
+  });
+
+  const lookupFleetQuote = async () => {
+    setFleetQuoteState('loading');
+    setFleetQuoteRange(null);
+    setFleetVehicleId(null);
+    setQuoteFallbackCategoryId(null);
+    try {
+      const carjam = stubCarjamLookup(rego);
+      setCarjamVehicle(carjam);
+
+      // 1. Find vehicle match via vehicle_aliases
+      const { data: aliases } = await supabase
+        .from('vehicle_aliases')
+        .select('vehicle_id, vehicle_models(body_type, fuel)')
+        .ilike('alias_make', carjam.make)
+        .ilike('alias_model', carjam.model)
+        .limit(1);
+
+      if (!aliases || aliases.length === 0) {
+        await _resolveSegmentFallback(null, null, carjam, null);
+        return;
+      }
+
+      const matchedId = aliases[0].vehicle_id;
+      setFleetVehicleId(matchedId);
+      const vmData = (aliases[0] as any).vehicle_models as { body_type?: string; fuel?: string } | null;
+
+      // 2. Find first selected service with a category mapping
+      const firstSlug = selectedServices.map(id => SERVICE_TO_CATEGORY_SLUG[id]).find(Boolean);
+      if (!firstSlug) { setFleetQuoteState(null); return; }
+
+      const { data: cat } = await supabase
+        .from('part_categories').select('id').eq('slug', firstSlug).single();
+      if (!cat) { await _resolveSegmentFallback(matchedId, vmData, carjam, null); return; }
+
+      const catId: number = cat.id;
+      setQuoteFallbackCategoryId(catId);
+
+      // 3. Check parts_data
+      const { data: pd } = await supabase
+        .from('parts_data')
+        .select('part_cost_low, part_cost_high, source, confidence')
+        .eq('vehicle_id', matchedId)
+        .eq('category_id', catId)
+        .single();
+
+      if (!pd) { await _resolveSegmentFallback(matchedId, vmData, carjam, catId); return; }
+      if (pd.source === 'ai_seed' && pd.confidence <= 1) {
+        await _resolveSegmentFallback(matchedId, vmData, carjam, catId); return;
+      }
+
+      // Instant quote path
+      setFleetQuoteRange({ low: Number(pd.part_cost_low), high: Number(pd.part_cost_high) });
+      setFleetQuoteState('instant');
+    } catch {
+      setFleetQuoteState(null);
+    }
+  };
+
+  const _resolveSegmentFallback = async (
+    matchedVehicleId: string | null,
+    vmData: { body_type?: string; fuel?: string } | null,
+    carjam: { make: string; model: string; year: number; bodyType: string; fuel: string },
+    catId: number | null,
+  ) => {
+    let rangeLow = 150;
+    let rangeHigh = 2500;
+    try {
+      if (catId !== null) {
+        const bodyType = vmData?.body_type ?? carjam.bodyType;
+        const fuel = vmData?.fuel ?? carjam.fuel;
+        const { data: segVehicles } = await supabase
+          .from('vehicle_models').select('id').eq('body_type', bodyType).eq('fuel', fuel);
+        const ids = (segVehicles ?? []).map((v: any) => v.id);
+        if (ids.length > 0) {
+          const { data: prices } = await supabase
+            .from('parts_data').select('part_cost_low, part_cost_high')
+            .in('vehicle_id', ids).eq('category_id', catId);
+          if (prices && prices.length > 0) {
+            const avgL = prices.reduce((s: number, r: any) => s + Number(r.part_cost_low), 0) / prices.length;
+            const avgH = prices.reduce((s: number, r: any) => s + Number(r.part_cost_high), 0) / prices.length;
+            rangeLow = Math.round(avgL / 50) * 50 || 150;
+            rangeHigh = Math.round(avgH / 50) * 50 || 2500;
+          }
+        }
+      }
+    } catch {}
+    setFleetQuoteRange({ low: rangeLow, high: rangeHigh });
+    setFleetQuoteState('fallback');
+
+    // Insert quote_requests row + call edge function stub
+    try {
+      const { data: row } = await supabase
+        .from('quote_requests')
+        .insert({
+          vehicle_id: matchedVehicleId,
+          carjam_plate: rego.toUpperCase(),
+          carjam_make: carjam.make,
+          carjam_model: carjam.model,
+          carjam_year: carjam.year,
+          category_id: catId,
+          customer_email: customerEmail || 'unknown@pending.nz',
+          customer_name: userName || returningCustomerName || null,
+          range_low: rangeLow,
+          range_high: rangeHigh,
+        })
+        .select('id')
+        .single();
+      if (row?.id) {
+        supabase.functions.invoke('handle_manual_quote_request', {
+          body: { quoteRequestId: row.id, plate: rego, make: carjam.make, model: carjam.model, rangeLow, rangeHigh },
+        }).catch(() => {});
+      }
+    } catch {}
   };
 
   // Switch the active vehicle in the garage (loads its specs/pricing + history)
@@ -2209,7 +2369,7 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                 </div>
                 <div className="flex gap-4">
                   <Button variant="outline" onClick={() => setQuotePath(null)}>Back</Button>
-                  <Button className="flex-1 bg-torqued-red" onClick={() => setStep(3)}
+                  <Button className="flex-1 bg-torqued-red" onClick={() => { lookupFleetQuote(); setStep(3); }}
                     disabled={selectedServices.length === 0 || (selectedServices.includes('diag_inspection') && !diagnosticComment.trim())}>
                     Continue →
                   </Button>
@@ -2256,7 +2416,7 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                     if (!faultCode) {
                       setIsDiagnosticMode(true);
                     } else {
-                      setStep(3);
+                      lookupFleetQuote(); setStep(3);
                     }
                   }}>Continue →</Button>
                 </div>
@@ -2372,20 +2532,71 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                 </div>
               </div>
 
-              <Card className="p-8 bg-card border-border text-foreground space-y-6 shadow-xl">
-                <div className="flex justify-between items-end">
-                  <div className="space-y-1">
-                    <p className="text-muted text-[10px] font-bold uppercase tracking-widest">Estimated Price Range</p>
-                    <h3 className="text-4xl sm:text-5xl text-torqued-red tracking-tighter font-black">${Math.floor(totalPrice * 0.9)} – ${Math.ceil(totalPrice * 1.2)}</h3>
+              {fleetQuoteState === 'fallback' ? (() => {
+                const greetName = (userName || returningCustomerName || '').split(' ')[0] || 'there';
+                const makeModel = carjamVehicle
+                  ? `${carjamVehicle.make.charAt(0) + carjamVehicle.make.slice(1).toLowerCase()} ${carjamVehicle.model.charAt(0) + carjamVehicle.model.slice(1).toLowerCase()}`
+                  : `${vehicle?.make ?? ''} ${vehicle?.model ?? ''}`.trim() || 'your vehicle';
+                const low = fleetQuoteRange?.low ?? 150;
+                const high = fleetQuoteRange?.high ?? 2500;
+                const hasRange = low !== 150 || high !== 2500;
+                return (
+                  <Card className="p-6 sm:p-8 bg-card border-border text-foreground space-y-5 shadow-xl">
+                    <div className="flex items-center gap-2">
+                      <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-amber-500/10 border border-amber-500/30 text-amber-400 text-[10px] font-bold uppercase tracking-widest">
+                        <Info size={10} /> Indicative estimate · Confirmed quote coming
+                      </span>
+                    </div>
+                    <div className="space-y-1">
+                      <p className="text-muted text-[10px] font-bold uppercase tracking-widest">Estimated Price Range</p>
+                      <h3 className="text-4xl sm:text-5xl text-torqued-red tracking-tighter font-black">${low} – ${high}</h3>
+                      {!hasRange && (
+                        <p className="text-xs text-muted italic">varies significantly by vehicle</p>
+                      )}
+                    </div>
+                    <p className="text-sm text-foreground/80 leading-relaxed border-t border-border pt-4">
+                      Hi {greetName}, we don't have exact pricing for your {makeModel} yet.
+                      Based on similar vehicles, this job typically costs <span className="font-bold text-foreground">${low}–${high}</span>.
+                      We're crunching the exact numbers — you'll get a confirmed quote by email within 2 hours.
+                    </p>
+                  </Card>
+                );
+              })() : fleetQuoteState === 'instant' && fleetQuoteRange ? (
+                <Card className="p-8 bg-card border-border text-foreground space-y-6 shadow-xl">
+                  <div className="flex items-center gap-2">
+                    <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-torqued-red/10 border border-torqued-red/20 text-torqued-red text-[10px] font-bold uppercase tracking-widest">
+                      <Info size={10} /> Indicative estimate
+                    </span>
                   </div>
-                  <div className="text-right">
-                    <p className="text-[10px] text-muted uppercase font-bold tracking-widest">Market data</p>
+                  <div className="flex justify-between items-end">
+                    <div className="space-y-1">
+                      <p className="text-muted text-[10px] font-bold uppercase tracking-widest">Estimated Price Range</p>
+                      <h3 className="text-4xl sm:text-5xl text-torqued-red tracking-tighter font-black">${fleetQuoteRange.low} – ${fleetQuoteRange.high}</h3>
+                    </div>
+                    <div className="text-right">
+                      <p className="text-[10px] text-muted uppercase font-bold tracking-widest">Fleet data</p>
+                    </div>
                   </div>
-                </div>
-                <p className="text-xs text-muted italic border-t border-border pt-4">
-                  *Final price confirmed by your matched mechanic before work begins.
-                </p>
-              </Card>
+                  <p className="text-xs text-muted italic border-t border-border pt-4">
+                    *Final price confirmed by your matched mechanic before work begins.
+                  </p>
+                </Card>
+              ) : (
+                <Card className="p-8 bg-card border-border text-foreground space-y-6 shadow-xl">
+                  <div className="flex justify-between items-end">
+                    <div className="space-y-1">
+                      <p className="text-muted text-[10px] font-bold uppercase tracking-widest">Estimated Price Range</p>
+                      <h3 className="text-4xl sm:text-5xl text-torqued-red tracking-tighter font-black">${Math.floor(totalPrice * 0.9)} – ${Math.ceil(totalPrice * 1.2)}</h3>
+                    </div>
+                    <div className="text-right">
+                      <p className="text-[10px] text-muted uppercase font-bold tracking-widest">Market data</p>
+                    </div>
+                  </div>
+                  <p className="text-xs text-muted italic border-t border-border pt-4">
+                    *Final price confirmed by your matched mechanic before work begins.
+                  </p>
+                </Card>
+              )}
 
               <Button fullWidth size="lg" className="h-16 text-lg rounded-2xl bg-torqued-red text-white shadow-xl shadow-torqued-red/10" onClick={() => setStep(4)}>Match Me with a Mechanic →</Button>
             </div>

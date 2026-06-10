@@ -2567,6 +2567,77 @@ app.get('/api/mechanic/:mechanicId/package-price', async (req, res) => {
   }
 });
 
+// GET /api/fleet-prices?rego=ABC123 — return parts_data low/high/midpoint for every catalog service
+// for the matched vehicle. Uses vehicle_aliases make/model match. Falls back to {} if unknown.
+const FLEET_SERVICE_TO_SLUG: Record<string, string> = {
+  oil:                'oil_filter',
+  timing:             'cambelt',
+  brakes_front_pads:  'front_brake_pads',
+  brakes_front_rotors:'front_rotors',
+  brakes_rear_pads:   'rear_brake_pads',
+  brakes_rear_rotors: 'rear_rotors',
+  battery:            'battery_12v',
+  spark_plugs:        'ignition_coils',
+  cabin_filter:       'cabin_air_filter',
+  transmission:       'transmission_filter',
+};
+app.get('/api/fleet-prices', async (req, res) => {
+  try {
+    const rego = req.query.rego ? String(req.query.rego).toUpperCase().trim() : null;
+    if (!rego) return res.json({ prices: {} });
+    const supabase = getSupabaseAdmin();
+    if (!supabase) return res.json({ prices: {} });
+
+    // 1. Resolve make/model from the customer's vehicle record
+    const { data: custVehicle } = await supabase
+      .from('vehicles').select('make, model').eq('rego', rego).single();
+    if (!custVehicle?.make) return res.json({ prices: {} });
+
+    // 2. Match to fleet vehicle_models via vehicle_aliases
+    const { data: aliases } = await supabase
+      .from('vehicle_aliases')
+      .select('vehicle_id')
+      .ilike('alias_make', custVehicle.make)
+      .ilike('alias_model', custVehicle.model)
+      .limit(1);
+    if (!aliases || aliases.length === 0) return res.json({ prices: {} });
+    const vehicleId = aliases[0].vehicle_id;
+
+    // 3. Fetch all relevant category IDs in one query
+    const slugs = Object.values(FLEET_SERVICE_TO_SLUG);
+    const { data: cats } = await supabase
+      .from('part_categories').select('id, slug').in('slug', slugs);
+    if (!cats || cats.length === 0) return res.json({ prices: {} });
+
+    const catIdToSlug: Record<number, string> = Object.fromEntries(cats.map((c: any) => [c.id, c.slug]));
+    const slugToServiceId: Record<string, string> = Object.fromEntries(
+      Object.entries(FLEET_SERVICE_TO_SLUG).map(([svcId, slug]) => [slug, svcId])
+    );
+
+    // 4. Pull parts_data for this vehicle
+    const { data: rows } = await supabase
+      .from('parts_data')
+      .select('category_id, part_cost_low, part_cost_high')
+      .eq('vehicle_id', vehicleId)
+      .in('category_id', cats.map((c: any) => c.id));
+
+    const prices: Record<string, { low: number; high: number; midpoint: number }> = {};
+    for (const row of (rows ?? []) as any[]) {
+      const slug = catIdToSlug[row.category_id];
+      const svcId = slug ? slugToServiceId[slug] : null;
+      if (svcId) {
+        const low = Number(row.part_cost_low);
+        const high = Number(row.part_cost_high);
+        prices[svcId] = { low, high, midpoint: Math.round((low + high) / 2) };
+      }
+    }
+    res.json({ prices });
+  } catch (err) {
+    console.error('[fleet-prices]', err);
+    res.json({ prices: {} });
+  }
+});
+
 // Indicative all-in Torqued prices (NZD) — mirrors the booking catalog, used for AI price guidance.
 const SERVICE_PRICES: Record<string, { name: string; price: number }> = {
   oil: { name: 'Oil Change', price: 180 }, wof: { name: 'Warrant of Fitness', price: 65 },
