@@ -2593,32 +2593,36 @@ app.get('/api/fleet-prices', async (req, res) => {
       .from('vehicles').select('make, model, year').eq('rego', rego).single();
     if (!custVehicle?.make) return res.json({ prices: {}, timingDrive: null, vehicleId: null });
 
-    // 2. Match vehicle_models: exact model first, then first-word prefix fallback
-    //    (handles "Tiguan R-Line" matching "Tiguan", "Golf GTI" matching "Golf", etc.)
-    const resolveVehicleModel = async (modelStr: string) => {
-      let q = supabase
+    // 2. Match vehicle_models — four-tier fallback:
+    //   1. Exact model + year range
+    //   2. First-word prefix + year range   ("Tiguan R-Line" → "Tiguan%")
+    //   3. Exact model, no year filter      (newer model than fleet DB covers)
+    //   4. First-word prefix, no year       (last resort — same make/platform)
+    const firstWord = String(custVehicle.model).split(' ')[0];
+    const queryVM = async (modelPat: string, withYear: boolean) => {
+      let q = (supabase as any)
         .from('vehicle_models')
         .select('id, timing_drive')
         .ilike('make', custVehicle.make)
-        .ilike('model', modelStr);
-      if (custVehicle.year) {
-        q = (q as any)
-          .lte('year_from', custVehicle.year)
-          .or(`year_to.is.null,year_to.gte.${custVehicle.year}`);
+        .ilike('model', modelPat);
+      if (withYear && custVehicle.year) {
+        q = q.lte('year_from', custVehicle.year)
+             .or(`year_to.is.null,year_to.gte.${custVehicle.year}`);
       }
-      return (q as any).limit(1);
+      const { data } = await q.limit(1);
+      return data as any[] | null;
     };
 
-    let { data: vmRows } = await resolveVehicleModel(custVehicle.model);
-    // Fallback: try first word only (e.g. "Tiguan" from "Tiguan R-Line")
-    if (!vmRows || vmRows.length === 0) {
-      const firstWord = String(custVehicle.model).split(' ')[0];
-      if (firstWord !== custVehicle.model) {
-        const fb = await resolveVehicleModel(firstWord + '%');
-        vmRows = fb.data;
-      }
-    }
-    if (!vmRows || vmRows.length === 0) {
+    let vmRows: any[] | null = null;
+    vmRows = await queryVM(custVehicle.model, true);
+    if (!vmRows?.length && firstWord !== custVehicle.model)
+      vmRows = await queryVM(firstWord + '%', true);
+    if (!vmRows?.length)
+      vmRows = await queryVM(custVehicle.model, false);
+    if (!vmRows?.length && firstWord !== custVehicle.model)
+      vmRows = await queryVM(firstWord + '%', false);
+
+    if (!vmRows?.length) {
       return res.json({ prices: {}, timingDrive: null, vehicleId: null });
     }
     const vehicleId: string = vmRows[0].id;
