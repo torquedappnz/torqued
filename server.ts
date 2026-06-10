@@ -2591,22 +2591,38 @@ app.get('/api/fleet-prices', async (req, res) => {
     // 1. Resolve make/model/year from the customer's vehicle record
     const { data: custVehicle } = await supabase
       .from('vehicles').select('make, model, year').eq('rego', rego).single();
-    if (!custVehicle?.make) return res.json({ prices: {} });
+    if (!custVehicle?.make) return res.json({ prices: {}, timingDrive: null, vehicleId: null });
 
-    // 2. Match directly to vehicle_models by make + model (+ year range if available)
-    let vmQuery = supabase
-      .from('vehicle_models')
-      .select('id')
-      .ilike('make', custVehicle.make)
-      .ilike('model', custVehicle.model);
-    if (custVehicle.year) {
-      vmQuery = vmQuery
-        .lte('year_from', custVehicle.year)
-        .or(`year_to.is.null,year_to.gte.${custVehicle.year}`);
+    // 2. Match vehicle_models: exact model first, then first-word prefix fallback
+    //    (handles "Tiguan R-Line" matching "Tiguan", "Golf GTI" matching "Golf", etc.)
+    const resolveVehicleModel = async (modelStr: string) => {
+      let q = supabase
+        .from('vehicle_models')
+        .select('id, timing_drive')
+        .ilike('make', custVehicle.make)
+        .ilike('model', modelStr);
+      if (custVehicle.year) {
+        q = (q as any)
+          .lte('year_from', custVehicle.year)
+          .or(`year_to.is.null,year_to.gte.${custVehicle.year}`);
+      }
+      return (q as any).limit(1);
+    };
+
+    let { data: vmRows } = await resolveVehicleModel(custVehicle.model);
+    // Fallback: try first word only (e.g. "Tiguan" from "Tiguan R-Line")
+    if (!vmRows || vmRows.length === 0) {
+      const firstWord = String(custVehicle.model).split(' ')[0];
+      if (firstWord !== custVehicle.model) {
+        const fb = await resolveVehicleModel(firstWord + '%');
+        vmRows = fb.data;
+      }
     }
-    const { data: vmRows } = await vmQuery.limit(1);
-    if (!vmRows || vmRows.length === 0) return res.json({ prices: {} });
-    const vehicleId = vmRows[0].id;
+    if (!vmRows || vmRows.length === 0) {
+      return res.json({ prices: {}, timingDrive: null, vehicleId: null });
+    }
+    const vehicleId: string = vmRows[0].id;
+    const timingDrive: string | null = vmRows[0].timing_drive ?? null;
 
     // 3. Fetch all relevant category IDs in one query
     const slugs = Object.values(FLEET_SERVICE_TO_SLUG);
@@ -2636,10 +2652,10 @@ app.get('/api/fleet-prices', async (req, res) => {
         prices[svcId] = { low, high, midpoint: Math.round((low + high) / 2) };
       }
     }
-    res.json({ prices });
+    res.json({ prices, timingDrive, vehicleId });
   } catch (err) {
     console.error('[fleet-prices]', err);
-    res.json({ prices: {} });
+    res.json({ prices: {}, timingDrive: null, vehicleId: null });
   }
 });
 
@@ -2649,7 +2665,7 @@ const SERVICE_PRICES: Record<string, { name: string; price: number }> = {
   full: { name: 'Full Service', price: 350 }, brakes_front_pads: { name: 'Front Brake Pads', price: 220 },
   brakes_front_rotors: { name: 'Front Rotors & Pads', price: 580 }, brakes_rear_pads: { name: 'Rear Brake Pads', price: 190 },
   brakes_rear_rotors: { name: 'Rear Rotors & Pads', price: 480 }, timing: { name: 'Cambelt & Waterpump', price: 2289 },
-  transmission: { name: 'DCT Transmission Service', price: 621 }, battery: { name: 'Battery (12V)', price: 280 },
+  transmission: { name: 'Transmission Service', price: 621 }, battery: { name: 'Battery (12V)', price: 280 },
   diag_inspection: { name: 'Diagnostic Inspection', price: 99 }, spark_plugs: { name: 'Spark Plugs (all four)', price: 240 },
   cabin_filter: { name: 'Cabin Air Filter', price: 110 }, brake_fluid: { name: 'Brake Fluid Flush', price: 145 },
 };

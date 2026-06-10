@@ -57,7 +57,7 @@ export const SERVICES: Service[] = [
   },
   { 
     id: 'timing', 
-    name: 'Cambelt & Waterpump', 
+    name: 'Cambelt / Timing Chain',
     icon: '⚙️', 
     basePrice: 2289,
     category: 'maintenance',
@@ -78,7 +78,7 @@ export const SERVICES: Service[] = [
   },
   { 
     id: 'transmission', 
-    name: 'DCT Transmission Service', 
+    name: 'Transmission Service',
     icon: '⚙️', 
     basePrice: 621,
     category: 'maintenance',

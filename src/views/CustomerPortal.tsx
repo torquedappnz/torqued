@@ -424,6 +424,7 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
   const [fleetQuoteState, setFleetQuoteState] = useState<'loading' | 'instant' | 'fallback' | null>(null);
   const [fleetQuoteRange, setFleetQuoteRange] = useState<{ low: number; high: number } | null>(null);
   const [fleetVehicleId, setFleetVehicleId] = useState<string | null>(null);
+  const [vehicleTimingDrive, setVehicleTimingDrive] = useState<'belt' | 'chain' | 'na' | null>(null);
   const [carjamVehicle, setCarjamVehicle] = useState<{ make: string; model: string; year: number; bodyType: string; fuel: string } | null>(null);
   const [quoteFallbackCategoryId, setQuoteFallbackCategoryId] = useState<number | null>(null);
 
@@ -1007,6 +1008,15 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
     return () => clearInterval(t);
   }, [otpResendCooldown]);
 
+  // Dynamic display name for a service — timing name depends on vehicle's drive type.
+  const serviceDisplayName = (id: string, fallback: string) => {
+    if (id !== 'timing') return fallback;
+    if (vehicleTimingDrive === 'belt') return 'Cambelt & Water Pump';
+    if (vehicleTimingDrive === 'chain') return 'Timing Chain';
+    if (vehicleTimingDrive === 'na') return 'Timing Service'; // electric / no timing job
+    return fallback; // unknown — use the catalog default
+  };
+
   // Price for a service on the ACTIVE vehicle: use the vehicle's real DB pricing
   // (vehicle_specs.service_prices) when available, else fall back to the generic base.
   const priceFor = (id: string) => {
@@ -1089,13 +1099,17 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
       // Step 2 tally and Step 4 mechanic list reflect real parts_data midpoints.
       fetch(`/api/fleet-prices?rego=${encodeURIComponent(rego)}`)
         .then(r => r.json())
-        .then((fp: { prices: Record<string, { low: number; high: number; midpoint: number }> }) => {
+        .then((fp: { prices: Record<string, { low: number; high: number; midpoint: number }>; timingDrive: string | null; vehicleId: string | null }) => {
+          // Store matched fleet vehicle ID (used by lookupFleetQuote to skip re-querying)
+          if (fp?.vehicleId) setFleetVehicleId(fp.vehicleId);
+          // Store timing drive so the booking UI can label the service correctly
+          if (fp?.timingDrive) setVehicleTimingDrive(fp.timingDrive as 'belt' | 'chain' | 'na');
+          // Overlay fleet midpoints onto vehiclePrices
           if (fp?.prices && Object.keys(fp.prices).length > 0) {
             const fleetMidpoints: Record<string, number> = {};
             for (const [svcId, p] of Object.entries(fp.prices)) {
               fleetMidpoints[svcId] = p.midpoint;
             }
-            // Fleet midpoints win over legacy — they're vehicle-specific real data
             setVehiclePrices({ ...legacyPrices, ...fleetMidpoints });
           }
         })
@@ -1138,38 +1152,26 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
   const lookupFleetQuote = async () => {
     setFleetQuoteState('loading');
     setFleetQuoteRange(null);
-    setFleetVehicleId(null);
     setQuoteFallbackCategoryId(null);
     try {
-      // Use the already-loaded vehicle make/model/year from state instead of a Carjam stub
       const make = vehicle?.make ?? '';
       const model = vehicle?.model ?? '';
-      const year = vehicle?.year ?? null;
       if (!make || !model) { setFleetQuoteState(null); return; }
-      const carjamVehicleData = { make, model, year: year ?? 0, bodyType: '', fuel: '' };
-      setCarjamVehicle({ ...carjamVehicleData });
+      const vehicleData = { make, model, year: vehicle?.year ?? 0, bodyType: '', fuel: '' };
+      setCarjamVehicle({ ...vehicleData });
 
-      // 1. Match directly against vehicle_models (ilike on make + model, optional year range)
-      let vmQuery = supabase
-        .from('vehicle_models')
-        .select('id, body_type, fuel')
-        .ilike('make', make)
-        .ilike('model', model);
-      if (year) {
-        vmQuery = (vmQuery as any)
-          .lte('year_from', year)
-          .or(`year_to.is.null,year_to.gte.${year}`);
-      }
-      const { data: vmRows } = await (vmQuery as any).limit(1);
-
-      if (!vmRows || vmRows.length === 0) {
-        await _resolveSegmentFallback(null, null, carjamVehicleData, null);
+      // Reuse the fleet vehicleId already resolved by loadVehicleByRego → /api/fleet-prices
+      // to avoid a redundant vehicle_models query.
+      const matchedId = fleetVehicleId;
+      if (!matchedId) {
+        await _resolveSegmentFallback(null, null, vehicleData, null);
         return;
       }
 
-      const matchedId = vmRows[0].id;
-      setFleetVehicleId(matchedId);
-      const vmData = { body_type: vmRows[0].body_type, fuel: vmRows[0].fuel } as { body_type?: string; fuel?: string };
+      // Fetch body_type + fuel for segment fallback (only needed if parts_data misses)
+      const { data: vmRow } = await supabase
+        .from('vehicle_models').select('body_type, fuel').eq('id', matchedId).single();
+      const vmData = vmRow as { body_type?: string; fuel?: string } | null;
 
       // 2. Find first selected service with a category mapping
       const firstSlug = selectedServices.map(id => SERVICE_TO_CATEGORY_SLUG[id]).find(Boolean);
@@ -1177,7 +1179,7 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
 
       const { data: cat } = await supabase
         .from('part_categories').select('id').eq('slug', firstSlug).single();
-      if (!cat) { await _resolveSegmentFallback(matchedId, vmData, carjamVehicleData, null); return; }
+      if (!cat) { await _resolveSegmentFallback(matchedId, vmData, vehicleData, null); return; }
 
       const catId: number = cat.id;
       setQuoteFallbackCategoryId(catId);
@@ -1190,9 +1192,9 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
         .eq('category_id', catId)
         .single();
 
-      if (!pd) { await _resolveSegmentFallback(matchedId, vmData, carjamVehicleData, catId); return; }
+      if (!pd) { await _resolveSegmentFallback(matchedId, vmData, vehicleData, catId); return; }
       if (pd.source === 'ai_seed' && pd.confidence <= 1) {
-        await _resolveSegmentFallback(matchedId, vmData, carjamVehicleData, catId); return;
+        await _resolveSegmentFallback(matchedId, vmData, vehicleData, catId); return;
       }
 
       // Instant quote path
@@ -2291,7 +2293,7 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                         >
                           <div className="flex items-center gap-2">
                             <span className="text-xl">{service.icon}</span>
-                            <span className="text-xs font-bold uppercase">{service.name}</span>
+                            <span className="text-xs font-bold uppercase">{serviceDisplayName(service.id, service.name)}</span>
                           </div>
                           <Plus size={14} className="text-torqued-red" />
                         </button>
@@ -2341,7 +2343,7 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                       )}
                     >
                       <span className="text-2xl">{service.icon}</span>
-                      <span className="text-xs font-bold uppercase tracking-tight leading-tight">{service.name}</span>
+                      <span className="text-xs font-bold uppercase tracking-tight leading-tight">{serviceDisplayName(service.id, service.name)}</span>
                     </button>
                   ))}
                 </div>
@@ -3037,7 +3039,7 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                     return (
                       <div key={id} className="space-y-3 bg-background/50 p-4 rounded-2xl border border-border">
                         <div className="flex justify-between items-center text-foreground">
-                          <span className="text-sm font-black uppercase tracking-tight">{matchedPkg ? matchedPkg.name : service.name}</span>
+                          <span className="text-sm font-black uppercase tracking-tight">{matchedPkg ? matchedPkg.name : serviceDisplayName(id, service.name)}</span>
                           <span className="text-sm font-black">${displayPrice}</span>
                         </div>
                         {matchedPkg ? (
@@ -4372,7 +4374,7 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
               <div className="rounded-2xl border border-border bg-background p-4 space-y-2">
                 {(quoteReview.serviceIds || []).map((id: string) => (
                   <div key={id} className="flex justify-between text-sm">
-                    <span className="font-medium">{SERVICES.find(s => s.id === id)?.name || id}</span>
+                    <span className="font-medium">{serviceDisplayName(id, SERVICES.find(s => s.id === id)?.name || id)}</span>
                     <span className="text-muted text-xs uppercase font-bold tracking-widest">Included</span>
                   </div>
                 ))}
