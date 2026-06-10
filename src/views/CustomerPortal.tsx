@@ -591,6 +591,14 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
   };
   useEffect(() => { if (garageUnlocked) loadCustomerBookings(); /* eslint-disable-next-line */ }, [garageUnlocked, customerOwnerId, garageVehicles.length]);
 
+  // Auto-select the first non-archived vehicle when the garage opens so service history shows immediately
+  useEffect(() => {
+    if (!garageUnlocked || view !== 'garage') return;
+    const first = garageVehicles.find(gv => !archivedRegos.includes(gv.rego));
+    if (first && !vehicle) loadVehicleByRego(first.rego);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [garageUnlocked, garageVehicles.length, view]);
+
   // Verify a magic link on load (?vt=token)
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
@@ -1273,7 +1281,7 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
   // Switch the active vehicle in the garage (loads its specs/pricing + history)
   const selectGarageVehicle = async (rego: string) => {
     await loadVehicleByRego(rego);
-    setView('quote');
+    // stays in garage view — service history loads below the vehicle cards
   };
 
   // ── Active-job cancellation + reschedule (uses the shared backend policy/refund engine) ──
@@ -3659,28 +3667,44 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                 return (
                   <Card
                     key={gv.rego}
-                    onClick={() => !isArchived && selectGarageVehicle(gv.rego)}
                     className={cn(
-                      "p-4 flex items-center gap-4 transition-all",
-                      isArchived ? "opacity-60 border-border" : "cursor-pointer active:scale-[0.99]",
-                      isActive ? "border-torqued-red ring-2 ring-torqued-red bg-torqued-red/5" : "liquid-glass border-white/10 hover:border-torqued-red/30"
+                      "overflow-hidden transition-all",
+                      isArchived ? "opacity-60 border-border" : "liquid-glass border-white/10",
+                      isActive ? "border-torqued-red ring-2 ring-torqued-red bg-torqued-red/5" : "hover:border-torqued-red/30"
                     )}
                   >
-                    {gv.thumbnail
-                      ? <img src={gv.thumbnail} alt="Car" className="w-20 h-20 rounded-xl object-cover ring-1 ring-white/10" />
-                      : <div className="w-20 h-20 rounded-xl bg-card flex items-center justify-center ring-1 ring-white/10"><Car size={28} className="text-muted" /></div>}
-                    <div className="flex-1 min-w-0">
-                      <div className="flex items-center gap-2 mb-1">
-                        <div className="torqued-badge text-[10px]">{gv.rego}</div>
-                        {isActive && <span className="text-[9px] font-black uppercase bg-torqued-red text-white px-2 py-0.5 rounded-full tracking-widest">✓ Selected</span>}
+                    {/* Vehicle identity row — tap to select & load history */}
+                    <div
+                      onClick={() => !isArchived && selectGarageVehicle(gv.rego)}
+                      className={cn("p-4 flex items-center gap-4", !isArchived && "cursor-pointer active:scale-[0.99]")}
+                    >
+                      {gv.thumbnail
+                        ? <img src={gv.thumbnail} alt="Car" className="w-16 h-16 rounded-xl object-cover ring-1 ring-white/10 shrink-0" />
+                        : <div className="w-16 h-16 rounded-xl bg-card flex items-center justify-center ring-1 ring-white/10 shrink-0"><Car size={24} className="text-muted" /></div>}
+                      <div className="flex-1 min-w-0">
+                        <div className="flex items-center gap-2 mb-1">
+                          <div className="torqued-badge text-[10px]">{gv.rego}</div>
+                          {isActive && <span className="text-[9px] font-black uppercase bg-torqued-red text-white px-2 py-0.5 rounded-full tracking-widest">✓ Viewing</span>}
+                        </div>
+                        <h4 className="text-base leading-tight font-bold truncate">{gv.year} {gv.make} {gv.model}</h4>
+                        {gv.variant && <p className="text-xs text-muted mt-0.5 truncate">{gv.variant}</p>}
                       </div>
-                      <h4 className="text-lg leading-none font-bold truncate">{gv.year} {gv.make} {gv.model}</h4>
-                      <p className="text-xs text-muted mt-1">{gv.variant}</p>
+                      <button
+                        onClick={(e) => { e.stopPropagation(); toggleArchive(gv.rego); }}
+                        className="text-[10px] font-bold uppercase tracking-widest text-muted hover:text-torqued-red shrink-0 px-2"
+                      >{isArchived ? 'Restore' : 'Archive'}</button>
                     </div>
-                    <button
-                      onClick={(e) => { e.stopPropagation(); toggleArchive(gv.rego); }}
-                      className="text-[10px] font-bold uppercase tracking-widest text-muted hover:text-torqued-red shrink-0 px-2"
-                    >{isArchived ? 'Restore' : 'Archive'}</button>
+                    {/* Get a Quote CTA — only on active (non-archived) vehicles */}
+                    {!isArchived && (
+                      <div className="px-4 pb-4">
+                        <button
+                          onClick={async () => { await loadVehicleByRego(gv.rego); setView('quote'); }}
+                          className="w-full py-2.5 rounded-xl bg-torqued-red text-white text-sm font-black tracking-tight hover:bg-red-600 active:scale-[0.98] transition-all flex items-center justify-center gap-2"
+                        >
+                          <Wrench size={14} /> Get a Quote
+                        </button>
+                      </div>
+                    )}
                   </Card>
                 );
                 });
