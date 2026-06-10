@@ -2746,17 +2746,27 @@ app.get('/api/fleet-prices', async (req, res) => {
 
     const catIds = cats.map((c: any) => c.id);
 
-    // 4. Pull parts_data + labour_times together — NZD total = parts + (hours × labour_rate)
-    // $185/hr is a conservative NZ workshop rate; mechanics can adjust via their packages.
+    // 4. Pull parts_data + labour_times + vehicle_specs (for oil capacity) in parallel
     const NZD_LABOUR_RATE = 185;
-    const [partsRes, labourRes] = await Promise.all([
+    // Oil change constants — consumables calculated separately from the filter
+    const OIL_COST_PER_LITRE_LOW  = 18;  // $/L semi-synthetic
+    const OIL_COST_PER_LITRE_HIGH = 22;  // $/L full-synthetic
+    const OIL_CHANGE_DEFAULT_LITRES = 4.5;
+    const OIL_CHANGE_SUNDRIES = 10;       // drip trays, rags, etc.
+
+    const [partsRes, labourRes, specRes] = await Promise.all([
       supabase.from('parts_data')
         .select('category_id, part_cost_low, part_cost_high')
         .eq('vehicle_id', vehicleId).in('category_id', catIds),
       supabase.from('labour_times')
         .select('category_id, hours_low, hours_high')
         .eq('vehicle_id', vehicleId).in('category_id', catIds),
+      supabase.from('vehicle_specs')
+        .select('oil_capacity_litres')
+        .eq('rego', rego).maybeSingle(),
     ]);
+
+    const oilCapacity = Number(specRes.data?.oil_capacity_litres) || OIL_CHANGE_DEFAULT_LITRES;
 
     // Index labour by category_id for O(1) lookup
     const labourByCat: Record<number, { hl: number; hh: number }> = {};
@@ -2764,18 +2774,37 @@ app.get('/api/fleet-prices', async (req, res) => {
       labourByCat[lt.category_id] = { hl: Number(lt.hours_low), hh: Number(lt.hours_high) };
     }
 
+    // Find the oil_filter category id so we can apply special pricing below
+    const oilFilterCatId = cats.find((c: any) => c.slug === 'oil_filter')?.id ?? -1;
+
     const prices: Record<string, { low: number; high: number; midpoint: number }> = {};
     for (const row of (partsRes.data ?? []) as any[]) {
       const slug = catIdToSlug[row.category_id];
       const svcId = slug ? slugToServiceId[slug] : null;
       if (!svcId) continue;
-      const partsLow = Number(row.part_cost_low);
-      const partsHigh = Number(row.part_cost_high);
-      const labour = labourByCat[row.category_id];
-      const labourLow  = labour ? Math.round(labour.hl * NZD_LABOUR_RATE) : 0;
-      const labourHigh = labour ? Math.round(labour.hh * NZD_LABOUR_RATE) : 0;
-      const low  = partsLow  + labourLow;
-      const high = partsHigh + labourHigh;
+
+      const filterLow  = Number(row.part_cost_low);
+      const filterHigh = Number(row.part_cost_high);
+
+      let low: number;
+      let high: number;
+
+      if (row.category_id === oilFilterCatId) {
+        // Oil Change: consumables (oil) + filter + exactly 1hr labour + sundries
+        // parts_data stores the filter cost only; oil is a separate consumable.
+        const oilLow  = Math.round(oilCapacity * OIL_COST_PER_LITRE_LOW);
+        const oilHigh = Math.round(oilCapacity * OIL_COST_PER_LITRE_HIGH);
+        low  = oilLow  + filterLow  + NZD_LABOUR_RATE + OIL_CHANGE_SUNDRIES;
+        high = oilHigh + filterHigh + NZD_LABOUR_RATE + OIL_CHANGE_SUNDRIES;
+      } else {
+        // All other services: parts + labour from labour_times
+        const labour    = labourByCat[row.category_id];
+        const labourLow  = labour ? Math.round(labour.hl * NZD_LABOUR_RATE) : 0;
+        const labourHigh = labour ? Math.round(labour.hh * NZD_LABOUR_RATE) : 0;
+        low  = filterLow  + labourLow;
+        high = filterHigh + labourHigh;
+      }
+
       prices[svcId] = { low, high, midpoint: Math.round((low + high) / 2) };
     }
     res.json({ prices, timingDrive, vehicleId });
