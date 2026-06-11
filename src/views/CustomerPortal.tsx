@@ -3764,44 +3764,44 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
           </section>
 
               {/* Vehicle Health Overview */}
-              <section className=”space-y-4”>
-                <div className=”flex justify-between items-center gap-3”>
+              <section className="space-y-4">
+                <div className="flex justify-between items-center gap-3">
                   <div>
-                    <h3 className=”text-2xl font-bold tracking-tight”>Vehicle Health</h3>
-                    {vehicle && <p className=”text-xs text-muted mt-0.5”>{vehicle.year} {vehicle.make} {vehicle.model}</p>}
+                    <h3 className="text-2xl font-bold tracking-tight">Vehicle Health</h3>
+                    {vehicle && <p className="text-xs text-muted mt-0.5">{vehicle.year} {vehicle.make} {vehicle.model}</p>}
                   </div>
-                  <div className=”flex gap-2”>
-                    <input id=”history-upload-input” type=”file” accept=”image/*,application/pdf” multiple className=”hidden”
+                  <div className="flex gap-2">
+                    <input id="history-upload-input" type="file" accept="image/*,application/pdf" multiple className="hidden"
                       onChange={(e) => { handleMultiUpload(Array.from(e.target.files || [])); e.target.value = ''; }} />
-                    <Button variant=”outline” size=”sm”
-                      className=”text-torqued-red border-torqued-red/20 hover:bg-torqued-red/5”
+                    <Button variant="outline" size="sm"
+                      className="text-torqued-red border-torqued-red/20 hover:bg-torqued-red/5"
                       onClick={() => document.getElementById('history-upload-input')?.click()}>
-                      <Upload size={16} className=”mr-1” /> Upload receipt
+                      <Upload size={16} className="mr-1" /> Upload receipt
                     </Button>
-                    <Button variant=”outline” size=”sm”
-                      className=”text-foreground border-border hover:bg-background”
+                    <Button variant="outline" size="sm"
+                      className="text-foreground border-border hover:bg-background"
                       onClick={() => setShowHistoryEntry(true)}>
-                      <Plus size={16} className=”mr-1” /> Add
+                      <Plus size={16} className="mr-1" /> Add
                     </Button>
                   </div>
                 </div>
 
                 {/* AI health cards */}
                 {!vehicle ? (
-                  <Card className=”p-6 bg-card border-border text-center text-sm text-muted italic”>Select a vehicle above to see its health overview.</Card>
+                  <Card className="p-6 bg-card border-border text-center text-sm text-muted italic">Select a vehicle above to see its health overview.</Card>
                 ) : healthLoading ? (
-                  <div className=”grid grid-cols-1 sm:grid-cols-2 gap-3”>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                     {[...Array(5)].map((_, i) => (
-                      <div key={i} className=”h-16 rounded-2xl bg-white/5 animate-pulse” />
+                      <div key={i} className="h-16 rounded-2xl bg-white/5 animate-pulse" />
                     ))}
                   </div>
                 ) : healthInsights.length === 0 ? (
-                  <Card className=”p-6 bg-card border-border text-center space-y-2”>
-                    <p className=”text-sm text-muted”>No service records on file yet.</p>
-                    <p className=”text-xs text-muted/60”>Upload a receipt or add a record to get an AI health overview.</p>
+                  <Card className="p-6 bg-card border-border text-center space-y-2">
+                    <p className="text-sm text-muted">No service records on file yet.</p>
+                    <p className="text-xs text-muted/60">Upload a receipt or add a record to get an AI health overview.</p>
                   </Card>
                 ) : (
-                  <div className=”grid grid-cols-1 sm:grid-cols-2 gap-3”>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                     {healthInsights.map((insight, i) => {
                       const isGood     = insight.severity === 'good';
                       const isDue      = insight.severity === 'due';
@@ -3810,35 +3810,35 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                         <Card
                           key={i}
                           className={cn(
-                            “p-4 flex items-start gap-3 border transition-all”,
-                            isGood    && “border-emerald-500/20 bg-emerald-500/5”,
-                            isDue     && “border-amber-500/20 bg-amber-500/5”,
-                            isOverdue && “border-torqued-red/30 bg-torqued-red/5”,
-                            !isGood && !isDue && !isOverdue && “border-border bg-card”
+                            "p-4 flex items-start gap-3 border transition-all",
+                            isGood    && "border-emerald-500/20 bg-emerald-500/5",
+                            isDue     && "border-amber-500/20 bg-amber-500/5",
+                            isOverdue && "border-torqued-red/30 bg-torqued-red/5",
+                            !isGood && !isDue && !isOverdue && "border-border bg-card"
                           )}
                         >
                           <div className={cn(
-                            “w-8 h-8 rounded-xl flex items-center justify-center shrink-0 text-base”,
-                            isGood    && “bg-emerald-500/15”,
-                            isDue     && “bg-amber-500/15”,
-                            isOverdue && “bg-torqued-red/15”,
-                            !isGood && !isDue && !isOverdue && “bg-white/5”
+                            "w-8 h-8 rounded-xl flex items-center justify-center shrink-0 text-base",
+                            isGood    && "bg-emerald-500/15",
+                            isDue     && "bg-amber-500/15",
+                            isOverdue && "bg-torqued-red/15",
+                            !isGood && !isDue && !isOverdue && "bg-white/5"
                           )}>
                             {isGood ? '✓' : isOverdue ? '⚠' : isDue ? '🔔' : 'ℹ'}
                           </div>
-                          <div className=”min-w-0 flex-1”>
+                          <div className="min-w-0 flex-1">
                             <p className={cn(
-                              “text-sm font-bold leading-tight”,
-                              isGood    && “text-emerald-400”,
-                              isDue     && “text-amber-400”,
-                              isOverdue && “text-torqued-red”,
+                              "text-sm font-bold leading-tight",
+                              isGood    && "text-emerald-400",
+                              isDue     && "text-amber-400",
+                              isOverdue && "text-torqued-red",
                             )}>{insight.title}</p>
-                            <p className=”text-xs text-muted mt-0.5 leading-snug”>{insight.detail}</p>
+                            <p className="text-xs text-muted mt-0.5 leading-snug">{insight.detail}</p>
                           </div>
                           {(isDue || isOverdue) && (
                             <button
                               onClick={async () => { await loadVehicleByRego(vehicle.rego); setView('quote'); }}
-                              className=”shrink-0 text-[10px] font-black uppercase tracking-widest text-torqued-red hover:underline”
+                              className="shrink-0 text-[10px] font-black uppercase tracking-widest text-torqued-red hover:underline"
                             >Book →</button>
                           )}
                         </Card>
@@ -3849,27 +3849,27 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
 
                 {/* History log (collapsed by default if AI insights loaded) */}
                 {manualHistory.length > 0 && (
-                  <details className=”group”>
-                    <summary className=”cursor-pointer text-xs font-bold text-muted hover:text-foreground py-1 list-none flex items-center gap-1”>
-                      <span className=”group-open:hidden”>▸</span>
-                      <span className=”hidden group-open:inline”>▾</span>
+                  <details className="group">
+                    <summary className="cursor-pointer text-xs font-bold text-muted hover:text-foreground py-1 list-none flex items-center gap-1">
+                      <span className="group-open:hidden">▸</span>
+                      <span className="hidden group-open:inline">▾</span>
                       View full service log ({manualHistory.length} record{manualHistory.length !== 1 ? 's' : ''})
                     </summary>
-                    <div className=”space-y-2 mt-3”>
+                    <div className="space-y-2 mt-3">
                       {manualHistory.map((history, idx) => {
                         const headline = histSummaries[history.service] || history.service;
                         return (
-                          <Card key={idx} className=”p-3 bg-card border-border flex items-start justify-between gap-4”>
-                            <div className=”flex items-start gap-3 min-w-0”>
-                              <Clock size={14} className=”text-muted shrink-0 mt-0.5” />
-                              <div className=”min-w-0”>
-                                <p className=”text-xs font-bold truncate”>{headline}</p>
-                                <p className=”text-[10px] text-muted”>{history.date}{history.provider ? ` · ${history.provider}` : ''}</p>
+                          <Card key={idx} className="p-3 bg-card border-border flex items-start justify-between gap-4">
+                            <div className="flex items-start gap-3 min-w-0">
+                              <Clock size={14} className="text-muted shrink-0 mt-0.5" />
+                              <div className="min-w-0">
+                                <p className="text-xs font-bold truncate">{headline}</p>
+                                <p className="text-[10px] text-muted">{history.date}{history.provider ? ` · ${history.provider}` : ''}</p>
                               </div>
                             </div>
-                            <div className=”text-right shrink-0”>
-                              {history.mileage && <p className=”text-[10px] font-mono text-muted”>{Number(history.mileage).toLocaleString()} km</p>}
-                              {history.price && <p className=”text-xs font-bold text-torqued-red”>{String(history.price).startsWith('$') ? history.price : `$${history.price}`}</p>}
+                            <div className="text-right shrink-0">
+                              {history.mileage && <p className="text-[10px] font-mono text-muted">{Number(history.mileage).toLocaleString()} km</p>}
+                              {history.price && <p className="text-xs font-bold text-torqued-red">{String(history.price).startsWith('$') ? history.price : `$${history.price}`}</p>}
                             </div>
                           </Card>
                         );
