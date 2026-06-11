@@ -432,6 +432,7 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
   const [fleetQuoteState, setFleetQuoteState] = useState<'loading' | 'instant' | 'fallback' | null>(null);
   const [fleetQuoteRange, setFleetQuoteRange] = useState<{ low: number; high: number } | null>(null);
   const [fleetVehicleId, setFleetVehicleId] = useState<string | null>(null);
+  const [fleetPricesRaw, setFleetPricesRaw] = useState<Record<string, { low: number; high: number; midpoint: number }>>({});
   const [vehicleTimingDrive, setVehicleTimingDrive] = useState<'belt' | 'chain' | 'na' | null>(null);
   const [carjamVehicle, setCarjamVehicle] = useState<{ make: string; model: string; year: number; bodyType: string; fuel: string } | null>(null);
   const [quoteFallbackCategoryId, setQuoteFallbackCategoryId] = useState<number | null>(null);
@@ -1127,6 +1128,7 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
               fleetMidpoints[svcId] = p.midpoint;
             }
             setVehiclePrices({ ...legacyPrices, ...fleetMidpoints });
+            setFleetPricesRaw(fp.prices);
           }
         })
         .catch(() => {/* fleet prices are best-effort */});
@@ -1176,46 +1178,29 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
       const vehicleData = { make, model, year: vehicle?.year ?? 0, bodyType: '', fuel: '' };
       setCarjamVehicle({ ...vehicleData });
 
-      // Reuse the fleet vehicleId already resolved by loadVehicleByRego → /api/fleet-prices
-      // to avoid a redundant vehicle_models query.
-      const matchedId = fleetVehicleId;
-      if (!matchedId) {
-        await _resolveSegmentFallback(null, null, vehicleData, null);
+      // Use the first selected service's pre-computed low/high from fleet-prices
+      // (which already includes parts + labour + GST — no parts-only DB query needed)
+      const firstSvcId = selectedServices.find(id => fleetPricesRaw[id]);
+      if (firstSvcId && fleetPricesRaw[firstSvcId]) {
+        const { low, high } = fleetPricesRaw[firstSvcId];
+        setFleetQuoteRange({ low, high });
+        setFleetQuoteState('instant');
         return;
       }
 
-      // Fetch body_type + fuel for segment fallback (only needed if parts_data misses)
-      const { data: vmRow } = await supabase
-        .from('vehicle_models').select('body_type, fuel').eq('id', matchedId).single();
-      const vmData = vmRow as { body_type?: string; fuel?: string } | null;
-
-      // 2. Find first selected service with a category mapping
+      // Fallback: no pre-computed price — use segment average
+      const matchedId = fleetVehicleId;
       const firstSlug = selectedServices.map(id => SERVICE_TO_CATEGORY_SLUG[id]).find(Boolean);
-      if (!firstSlug) { setFleetQuoteState(null); return; }
-
-      const { data: cat } = await supabase
-        .from('part_categories').select('id').eq('slug', firstSlug).single();
-      if (!cat) { await _resolveSegmentFallback(matchedId, vmData, vehicleData, null); return; }
-
-      const catId: number = cat.id;
-      setQuoteFallbackCategoryId(catId);
-
-      // 3. Check parts_data
-      const { data: pd } = await supabase
-        .from('parts_data')
-        .select('part_cost_low, part_cost_high, source, confidence')
-        .eq('vehicle_id', matchedId)
-        .eq('category_id', catId)
-        .single();
-
-      if (!pd) { await _resolveSegmentFallback(matchedId, vmData, vehicleData, catId); return; }
-      if (pd.source === 'ai_seed' && pd.confidence <= 1) {
-        await _resolveSegmentFallback(matchedId, vmData, vehicleData, catId); return;
+      const vmData = matchedId
+        ? ((await supabase.from('vehicle_models').select('body_type, fuel').eq('id', matchedId).single()).data as { body_type?: string; fuel?: string } | null)
+        : null;
+      if (firstSlug) {
+        const { data: cat } = await supabase.from('part_categories').select('id').eq('slug', firstSlug).single();
+        if (cat) setQuoteFallbackCategoryId((cat as any).id);
+        await _resolveSegmentFallback(matchedId, vmData, vehicleData, cat ? (cat as any).id : null);
+      } else {
+        await _resolveSegmentFallback(matchedId, vmData, vehicleData, null);
       }
-
-      // Instant quote path
-      setFleetQuoteRange({ low: Number(pd.part_cost_low), high: Number(pd.part_cost_high) });
-      setFleetQuoteState('instant');
     } catch {
       setFleetQuoteState(null);
     }
