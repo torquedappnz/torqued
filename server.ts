@@ -2522,7 +2522,7 @@ async function callClaude(content: any, jsonMode = false): Promise<string> {
 // Chat-style Claude call — system prompt + multi-turn conversation + web search.
 // Messages may include { role, content, image } for vision. System messages are
 // extracted and passed as the top-level `system` field (Anthropic requirement).
-async function callClaudeChat(messages: any[], maxTokens = 500, jsonMode = false): Promise<string> {
+async function callClaudeChat(messages: any[], maxTokens = 500, jsonMode = false, webSearch = true): Promise<string> {
   const apiKey = process.env.ANTHROPIC_API_KEY;
   if (!apiKey) throw new Error('ANTHROPIC_API_KEY not configured');
 
@@ -2566,13 +2566,13 @@ async function callClaudeChat(messages: any[], maxTokens = 500, jsonMode = false
     model: CLAUDE_MODEL,
     max_tokens: maxTokens,
     messages: normalised,
-    tools: [{ type: 'web_search_20250305', name: 'web_search' }],
   };
+  if (webSearch) body.tools = [{ type: 'web_search_20250305', name: 'web_search' }];
   if (systemPrompt) body.system = systemPrompt;
 
   const r = await fetch(ANTHROPIC_API_URL, {
     method: 'POST',
-    headers: ANTHROPIC_HEADERS(apiKey, true),
+    headers: ANTHROPIC_HEADERS(apiKey, webSearch),
     body: JSON.stringify(body),
   });
   const data = await r.json();
@@ -3064,9 +3064,10 @@ For each, use severity:
 
 Return ONLY valid JSON (no markdown): {"insights":[{"title":"short label","detail":"1 NZ-specific practical sentence mentioning km or months","severity":"good|due|overdue|info"}]}`;
 
-    const text = await callClaudeChat([{ role: 'user', content: prompt }], 600, true);
+    const raw = await callClaudeChat([{ role: 'user', content: prompt }], 800, true, false);
+    const text = raw.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/,'').trim();
     let parsed: any = {};
-    try { parsed = JSON.parse(text); } catch { return res.status(422).json({ error: 'Could not parse insights' }); }
+    try { parsed = JSON.parse(text); } catch { return res.status(422).json({ error: 'Could not parse insights', raw: text.slice(0, 200) }); }
     res.json({ insights: Array.isArray(parsed.insights) ? parsed.insights : [] });
   } catch (err: any) {
     console.error('[ai/health-insights]', err);
