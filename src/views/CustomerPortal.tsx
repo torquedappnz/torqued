@@ -1370,9 +1370,9 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
         history: manualHistory.slice(0, 20),
       }),
     })
-      .then(r => r.json())
+      .then(async r => { const d = await r.json(); if (!r.ok) throw new Error(d?.error); return d; })
       .then(d => { if (Array.isArray(d.insights)) setHealthInsights(d.insights); })
-      .catch(() => {})
+      .catch((err) => { console.warn('[health-insights]', err?.message); })
       .finally(() => setHealthLoading(false));
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [vehicle?.rego, manualHistory.length]);
@@ -3797,8 +3797,8 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                   </div>
                 ) : healthInsights.length === 0 ? (
                   <Card className="p-6 bg-card border-border text-center space-y-2">
-                    <p className="text-sm text-muted">No service records on file yet.</p>
-                    <p className="text-xs text-muted/60">Upload a receipt or add a record to get an AI health overview.</p>
+                    <p className="text-sm text-muted">Could not load health overview.</p>
+                    <p className="text-xs text-muted/60">This may be a temporary issue — try refreshing the page.</p>
                   </Card>
                 ) : (
                   <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
