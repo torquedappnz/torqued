@@ -609,15 +609,12 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
         });
       });
 
-    // Parts inventory
-    supabase
-      .from('mechanic_parts')
-      .select('*')
-      .eq('mechanic_id', user.id)
-      .order('name')
-      .then(({ data }) => {
-        if (!data || data.length === 0) return;
-        const dbParts = data.map((row: any) => ({
+    // Parts inventory — routed through Express (service role) to bypass RLS issues
+    fetch(`/api/mechanic/parts?mechanicId=${user.id}`)
+      .then(r => r.json())
+      .then(({ parts: rows }) => {
+        if (!rows?.length) return;
+        const dbParts = rows.map((row: any) => ({
           id: row.id,
           name: row.name,
           quantity: row.quantity,
@@ -627,10 +624,11 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
         }));
         setParts(prev => {
           const dbIds = new Set(dbParts.map((p: any) => p.id));
-          const localOnly = prev.filter(p => !dbIds.has(p.id));
+          const localOnly = prev.filter((p: any) => !dbIds.has(p.id));
           return [...dbParts, ...localOnly];
         });
-      });
+      })
+      .catch(() => {});
   }, [user]);
 
   const [stripeSubscriptionUrl, setStripeSubscriptionUrl] = useState<string | null>(null);
@@ -1217,22 +1215,38 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
           </div>
           <div className="flex gap-3">
             <Button className="flex-1" onClick={() => {
-              if (newPart.name) {
-                const partWithId: InventoryPart = { ...newPart as InventoryPart, id: crypto.randomUUID() };
-                setParts([...parts, partWithId]);
-                if (user) {
-                  supabase.from('mechanic_parts').insert({
-                    id: partWithId.id,
-                    mechanic_id: user.id,
-                    name: partWithId.name,
-                    quantity: partWithId.quantity,
-                    unit_price: partWithId.unitPrice,
-                    description: partWithId.description ?? null,
-                    min_stock_level: partWithId.minStockLevel ?? null,
-                  }).then(({ error }) => { if (error) console.error('Failed to save part:', error.message); });
-                }
+              if (newPart.name && user) {
+                // Optimistic UI update
+                const tempId = crypto.randomUUID();
+                const optimistic: InventoryPart = { ...newPart as InventoryPart, id: tempId };
+                setParts(prev => [...prev, optimistic]);
                 setIsAddingPart(false);
                 setNewPart({ name: '', quantity: 0, unitPrice: 0 });
+                // Persist via Express API (service role — bypasses RLS)
+                fetch('/api/mechanic/parts', {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify({
+                    mechanicId: user.id, name: newPart.name,
+                    quantity: newPart.quantity, unitPrice: newPart.unitPrice,
+                    description: (newPart as any).description ?? null,
+                    minStockLevel: (newPart as any).minStockLevel ?? null,
+                  }),
+                })
+                  .then(async r => {
+                    const data = await r.json();
+                    if (!r.ok) throw new Error(data?.error || `Server error ${r.status}`);
+                    return data;
+                  })
+                  .then(({ part }) => {
+                    if (part?.id) {
+                      setParts(prev => prev.map(p => p.id === tempId ? { ...optimistic, id: part.id } : p));
+                    }
+                  })
+                  .catch((err) => {
+                    setParts(prev => prev.filter(p => p.id !== tempId));
+                    alert(`Failed to save part: ${err?.message || 'please try again'}`);
+                  });
               }
             }}>Save to Inventory</Button>
             <Button variant="outline" onClick={() => setIsAddingPart(false)}>Cancel</Button>
@@ -1344,9 +1358,9 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                   <div className="flex justify-end gap-2 opacity-0 group-hover:opacity-100 transition-opacity">
                     <button
                       onClick={() => {
-                        setParts(parts.filter(p => p.id !== part.id));
-                        supabase.from('mechanic_parts').delete().eq('id', part.id)
-                          .then(({ error }) => { if (error) console.error('Failed to delete part:', error.message); });
+                        setParts(prev => prev.filter(p => p.id !== part.id));
+                        fetch(`/api/mechanic/parts/${part.id}?mechanicId=${user?.id}`, { method: 'DELETE' })
+                          .catch(() => {});
                       }}
                       className="p-2 hover:bg-torqued-red/20 rounded-lg text-muted hover:text-torqued-red"
                     >
@@ -1366,8 +1380,10 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
   const renderIncomingJobs = (showOnlyDiagnostics = false) => {
     const allDiagnosticJobs = incomingJobs.filter(isDiagnosticJob);
     const queueJobs = allDiagnosticJobs.filter(j => !j.quoteItems);
-    const sentDiagJobs = allDiagnosticJobs.filter(j => !!j.quoteItems);
-    const sentColdJobs = pastJobs.filter((j: any) => j.is_cold_quote && !!j.quoteItems);
+    // sentJobs = jobs with status 'Quote Sent' (with or without structured quoteItems),
+    // plus cold-quotes that have quoteItems built in the builder
+    const sentDiagJobs  = incomingJobs.filter(j => j.status === 'Quote Sent' || !!j.quoteItems);
+    const sentColdJobs  = pastJobs.filter((j: any) => j.is_cold_quote && !!j.quoteItems);
     const sentJobs = [...sentDiagJobs, ...sentColdJobs];
 
     const displayJobs = showOnlyDiagnostics

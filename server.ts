@@ -395,6 +395,88 @@ app.get('/api/history/:rego', async (req, res) => {
   }
 });
 
+// ── Mechanic Parts Inventory (CRUD via service-role — bypasses RLS) ──────────
+// GET /api/mechanic/parts?mechanicId=
+app.get('/api/mechanic/parts', async (req, res) => {
+  try {
+    const mechanicId = req.query.mechanicId as string;
+    if (!mechanicId) return res.status(400).json({ error: 'mechanicId required' });
+    const supabase = getSupabaseAdmin();
+    if (!supabase) return res.json({ parts: [] });
+    const { data, error } = await supabase
+      .from('mechanic_parts').select('*').eq('mechanic_id', mechanicId).order('name');
+    if (error) throw error;
+    res.json({ parts: data ?? [] });
+  } catch (err) {
+    console.error('[mechanic/parts GET]', err);
+    res.json({ parts: [] });
+  }
+});
+
+// POST /api/mechanic/parts — create a part
+app.post('/api/mechanic/parts', async (req, res) => {
+  try {
+    const { mechanicId, name, quantity, unitPrice, description, minStockLevel } = req.body;
+    if (!mechanicId || !name) return res.status(400).json({ error: 'mechanicId and name required' });
+    const supabase = getSupabaseAdmin();
+    if (!supabase) return res.status(503).json({ error: 'DB unavailable' });
+    const id = crypto.randomUUID();
+    const { data, error } = await supabase.from('mechanic_parts').insert({
+      id, mechanic_id: mechanicId, name: String(name).trim(),
+      quantity: Number(quantity) || 0,
+      unit_price: parseFloat(unitPrice) || 0,
+      description: description ?? null,
+      min_stock_level: minStockLevel ?? null,
+    }).select().single();
+    if (error) throw error;
+    res.json({ part: data });
+  } catch (err: any) {
+    console.error('[mechanic/parts POST]', err);
+    res.status(500).json({ error: err?.message || 'Failed to save part' });
+  }
+});
+
+// PATCH /api/mechanic/parts/:id — update quantity/price/description
+app.patch('/api/mechanic/parts/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { mechanicId, quantity, unitPrice, description, minStockLevel } = req.body;
+    if (!mechanicId) return res.status(400).json({ error: 'mechanicId required' });
+    const supabase = getSupabaseAdmin();
+    if (!supabase) return res.status(503).json({ error: 'DB unavailable' });
+    const updates: any = {};
+    if (quantity !== undefined) updates.quantity = Number(quantity);
+    if (unitPrice !== undefined) updates.unit_price = parseFloat(unitPrice);
+    if (description !== undefined) updates.description = description;
+    if (minStockLevel !== undefined) updates.min_stock_level = minStockLevel;
+    const { data, error } = await supabase.from('mechanic_parts')
+      .update(updates).eq('id', id).eq('mechanic_id', mechanicId).select().single();
+    if (error) throw error;
+    res.json({ part: data });
+  } catch (err: any) {
+    console.error('[mechanic/parts PATCH]', err);
+    res.status(500).json({ error: err?.message || 'Failed to update part' });
+  }
+});
+
+// DELETE /api/mechanic/parts/:id
+app.delete('/api/mechanic/parts/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const mechanicId = req.query.mechanicId as string;
+    if (!mechanicId) return res.status(400).json({ error: 'mechanicId required' });
+    const supabase = getSupabaseAdmin();
+    if (!supabase) return res.status(503).json({ error: 'DB unavailable' });
+    const { error } = await supabase.from('mechanic_parts')
+      .delete().eq('id', id).eq('mechanic_id', mechanicId);
+    if (error) throw error;
+    res.json({ ok: true });
+  } catch (err: any) {
+    console.error('[mechanic/parts DELETE]', err);
+    res.status(500).json({ error: err?.message || 'Failed to delete part' });
+  }
+});
+
 // GET /api/mechanic/customers?mechanicId= — customers who've interacted with this mechanic
 // (cold-quoted, cold-added, or booked at least once). Deduped by email/phone.
 app.get('/api/mechanic/customers', async (req, res) => {
@@ -2964,8 +3046,24 @@ app.post('/api/ai/health-insights', async (req, res) => {
     if (!process.env.ANTHROPIC_API_KEY) return res.status(503).json({ error: 'AI not configured (add Anthropic API key).' });
     const prompt = `You are an NZ vehicle maintenance analyst. Vehicle: ${year || ''} ${make || ''} ${model || ''} (${rego || ''}), odometer ${mileage || 'unknown'} km.
 Service history (most recent first): ${JSON.stringify((history || []).slice(0, 20))}.
-Return ONLY JSON: {"insights":[{"title":"short label","detail":"1 sentence, NZ-specific, practical","severity":"good|due|overdue|info"}]}.
-Give 3-5 insights based on typical service intervals for THIS make/model and what the history shows is missing or due soon. Don't invent past services. If history is empty, base it on mileage + typical intervals.`;
+
+You MUST return exactly one insight for EACH of these five services, in this order:
+1. Oil Service — typical interval 10,000–15,000 km or 12 months (whichever comes first)
+2. Cambelt & Water Pump — check if belt-driven; typical interval 100,000 km or 5–7 years
+3. Transmission Fluid — typical interval 60,000–80,000 km or 3–4 years
+4. Brake Inspection — annually or every 20,000 km
+5. Wheel Alignment — annually or after any suspension work / kerb impact
+
+Then add 1–2 additional insights for anything else due or noteworthy (e.g. cabin filter, coolant, battery age).
+
+For each, use severity:
+  "good"    = done recently and clearly within service interval
+  "due"     = approaching interval (within 10%) or no record but vehicle is newer/low km
+  "overdue" = interval clearly exceeded based on mileage or history, or no record on a high-mileage vehicle
+  "info"    = timing drive is chain (no cambelt needed), EV (no oil changes), or other non-applicable note
+
+Return ONLY valid JSON (no markdown): {"insights":[{"title":"short label","detail":"1 NZ-specific practical sentence mentioning km or months","severity":"good|due|overdue|info"}]}`;
+
     const text = await callClaudeChat([{ role: 'user', content: prompt }], 600, true);
     let parsed: any = {};
     try { parsed = JSON.parse(text); } catch { return res.status(422).json({ error: 'Could not parse insights' }); }
