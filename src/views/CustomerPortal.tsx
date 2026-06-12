@@ -3141,7 +3141,7 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
 
                 <div className="flex justify-between items-center py-6 border-t border-b border-border">
                   <span className="text-[10px] font-black uppercase text-muted tracking-widest">Total Estimate (incl. GST)</span>
-                  <span className="text-4xl font-black text-torqued-red tracking-tighter">${selectedMechanic?.estimatedPrice}</span>
+                  <span className="text-4xl font-black text-torqued-red tracking-tighter">${selectedMechanic?.estimatedPrice || totalPrice}</span>
                 </div>
                 {isRepairFromDiagnostic && (
                   <div className="pt-2">

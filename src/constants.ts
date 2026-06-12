@@ -1,18 +1,7 @@
 import { Mechanic, Service, Vehicle } from './types';
 
 export const SERVICES: Service[] = [
-  { 
-    id: 'oil', 
-    name: 'Oil Change', 
-    icon: '🔧', 
-    basePrice: 180,
-    category: 'maintenance',
-    parts: [
-      { id: 'p1', name: 'Edge 5w30 LL 5L Oil', quantity: 1, unitPrice: 73.60, total: 73.60 },
-      { id: 'p2', name: 'Oil Filter', quantity: 1, unitPrice: 23.63, total: 23.63 }
-    ],
-    labour: [{ id: 'l1', name: 'Oil & Filter Service Labour', cost: 80.00 }]
-  },
+  { id: 'oil', name: 'Oil Change', icon: '🔧', basePrice: 180, category: 'maintenance' },
   { 
     id: 'wof', 
     name: 'Warrant of Fitness', 
@@ -55,43 +44,8 @@ export const SERVICES: Service[] = [
     basePrice: 480,
     category: 'repair'
   },
-  { 
-    id: 'timing', 
-    name: 'Cambelt / Timing Chain',
-    icon: '⚙️', 
-    basePrice: 2289,
-    category: 'maintenance',
-    parts: [
-      { id: 'p3', name: 'Water Pump & Thermostat Housing VAG', quantity: 1, unitPrice: 517.62, total: 517.62 },
-      { id: 'p4', name: 'Cambelt Kit VAG INA', quantity: 1, unitPrice: 215.27, total: 215.27 },
-      { id: 'p5', name: 'Model Specific Tooling Hire', quantity: 1, unitPrice: 119.97, total: 119.97 },
-      { id: 'p6', name: 'Volkswagen Antifreeze 4L', quantity: 4, unitPrice: 24.65, total: 98.60 },
-      { id: 'p7', name: 'Toothed Water Pump Belt VAG', quantity: 1, unitPrice: 52.19, total: 52.19 },
-      { id: 'p8', name: 'Cam Gear Sealing Plug VAG', quantity: 1, unitPrice: 20.99, total: 20.99 },
-      { id: 'p9', name: 'Cam Gear Bolt', quantity: 1, unitPrice: 14.62, total: 14.62 }
-    ],
-    labour: [{ id: 'l2', name: 'Engine Service Labour', cost: 802.50 }],
-    otherCosts: [
-      { name: 'Cleaning & Sundries', cost: 11.50 },
-      { name: 'Freight Courier OE Parts', cost: 40.00 }
-    ]
-  },
-  { 
-    id: 'transmission', 
-    name: 'Transmission Service',
-    icon: '⚙️', 
-    basePrice: 621,
-    category: 'maintenance',
-    parts: [
-      { id: 'p10', name: 'VW DCT Transmission Oil', quantity: 8, unitPrice: 48.50, total: 388.00 }
-    ],
-    labour: [{ id: 'l3', name: 'Transmission Service Labour', cost: 107.00 }],
-    otherCosts: [
-      { name: 'Cleaning & Sundries', cost: 11.50 },
-      { name: 'Freight Courier', cost: 9.00 },
-      { name: 'Service Light Health Scan', cost: 25.00 }
-    ]
-  },
+  { id: 'timing', name: 'Cambelt / Timing Chain', icon: '⚙️', basePrice: 2289, category: 'maintenance' },
+  { id: 'transmission', name: 'Transmission Service', icon: '⚙️', basePrice: 621, category: 'maintenance' },
   { id: 'battery', name: 'Battery (12V)', icon: '🔋', basePrice: 280, category: 'repair' },
   { id: 'diag_inspection', name: 'Diagnostic Inspection', icon: '🔍', basePrice: 99, category: 'inspection' },
   { id: 'spark_plugs', name: 'Spark Plugs', icon: '🔌', basePrice: 240, category: 'maintenance' },
