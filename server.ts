@@ -2830,12 +2830,12 @@ app.get('/api/fleet-prices', async (req, res) => {
       const wpMakes = ['volkswagen', 'vw', 'skoda', 'seat', 'audi'];
       const wpRec = fallbackTimingDrive === 'belt' &&
         wpMakes.some(m => (custVehicle.make || '').toLowerCase().includes(m));
-      const wpLabourFallback = Math.round(0.5 * 130);
+      const wpLabourFallback = Math.round(1.0 * 130);
       return res.json({
         prices: {}, timingDrive: fallbackTimingDrive, vehicleId: null,
         waterPumpRecommended: wpRec,
-        waterPump: wpRec ? { partsLow: 150, partsHigh: 250, labourExtra: wpLabourFallback,
-          low: 150 + wpLabourFallback, high: 250 + wpLabourFallback } : null,
+        waterPump: wpRec ? { partsLow: 280, partsHigh: 420, labourExtra: wpLabourFallback,
+          low: 280 + wpLabourFallback, high: 420 + wpLabourFallback } : null,
       });
     }
     const vehicleId: string = vmRows[0].id;
@@ -2936,6 +2936,12 @@ app.get('/api/fleet-prices', async (req, res) => {
 
       let low: number, high: number, lLow = 0, lHigh = 0, lHours: string | null = null;
 
+      // Round hours_high UP to nearest 0.25hr — charge the top of the range
+      const roundUpQtr = (h: number) => Math.ceil(h * 4) / 4;
+      const chargedHrs = lt ? roundUpQtr(lt.hh) : 0;
+      const labourAmt  = chargedHrs > 0 ? Math.round(chargedHrs * NZD_LABOUR_RATE) : 0;
+      const hrsLabel   = chargedHrs > 0 ? String(chargedHrs % 1 === 0 ? chargedHrs.toFixed(0) : chargedHrs.toFixed(2).replace(/0+$/, '')) : null;
+
       if (row.category_id === oilFilterCatId) {
         // Oil Change: oil consumables (retail incl GST) + filter (incl GST) + 1hr labour + sundries
         const oilLow  = Math.round(oilCapacity * OIL_COST_PER_LITRE_LOW);
@@ -2943,22 +2949,20 @@ app.get('/api/fleet-prices', async (req, res) => {
         lLow = lHigh = NZD_LABOUR_RATE;
         low  = oilLow  + pLow  + NZD_LABOUR_RATE + OIL_CHANGE_SUNDRIES;
         high = oilHigh + pHigh + NZD_LABOUR_RATE + OIL_CHANGE_SUNDRIES;
-        lHours = '1.0–1.0';
+        lHours = '1';
       } else if (row.category_id === transCatId) {
-        // Transmission Service: parts (incl GST) + labour + freight + sundries + scan fee
-        lLow  = lt ? Math.round(lt.hl * NZD_LABOUR_RATE) : 0;
-        lHigh = lt ? Math.round(lt.hh * NZD_LABOUR_RATE) : 0;
-        lHours = lt ? `${lt.hl.toFixed(1)}–${lt.hh.toFixed(1)}` : null;
+        // Transmission Service: parts (incl GST) + labour (top of range, rounded up) + freight + sundries + scan fee
+        lLow = lHigh = labourAmt;
+        lHours = hrsLabel;
         const extras = TRANS_FREIGHT + TRANS_SUNDRIES + TRANS_SCAN_FEE;
-        low  = pLow  + lLow  + extras;
-        high = pHigh + lHigh + extras;
+        low  = pLow  + labourAmt + extras;
+        high = pHigh + labourAmt + extras;
       } else {
-        // All other services: parts (incl GST) + labour from labour_times
-        lLow  = lt ? Math.round(lt.hl * NZD_LABOUR_RATE) : 0;
-        lHigh = lt ? Math.round(lt.hh * NZD_LABOUR_RATE) : 0;
-        lHours = lt ? `${lt.hl.toFixed(1)}–${lt.hh.toFixed(1)}` : null;
-        low  = pLow  + lLow;
-        high = pHigh + lHigh;
+        // All other services: parts (incl GST) + labour (top of range, rounded up to 0.25hr)
+        lLow = lHigh = labourAmt;
+        lHours = hrsLabel;
+        low  = pLow  + labourAmt;
+        high = pHigh + labourAmt;
       }
 
       prices[svcId] = {
@@ -2975,10 +2979,11 @@ app.get('/api/fleet-prices', async (req, res) => {
     const wpMakes = ['volkswagen', 'vw', 'skoda', 'seat', 'audi'];
     const waterPumpRecommended = timingDrive === 'belt' &&
       wpMakes.some(m => (custVehicle.make || '').toLowerCase().includes(m));
-    // Indicative water pump add-on (NZD incl GST): ~$150–250 parts, 0.5 hr extra labour
-    const wpPartsLow  = 150;
-    const wpPartsHigh = 250;
-    const wpLabour    = Math.round(0.5 * NZD_LABOUR_RATE);
+    // Water pump add-on (NZD incl GST): $280–$420 parts + 1hr extra labour
+    // VW EA211/EA888 pump + thermostat housing kit runs $300–$400 NZ retail; 1hr for coolant purge
+    const wpPartsLow  = 280;
+    const wpPartsHigh = 420;
+    const wpLabour    = Math.round(1.0 * NZD_LABOUR_RATE);
     res.json({
       prices, timingDrive, vehicleId,
       waterPumpRecommended,
@@ -2991,6 +2996,43 @@ app.get('/api/fleet-prices', async (req, res) => {
     console.error('[fleet-prices]', err);
     res.json({ prices: {}, timingDrive: null, vehicleId: null });
   }
+});
+
+// GET /api/services/search?q=text — fuzzy search service catalog for "something else" booking flow
+app.get('/api/services/search', async (req, res) => {
+  const q = String(req.query.q || '').toLowerCase().trim();
+  if (!q) return res.json({ results: [] });
+
+  // Extended service catalog with aliases for fuzzy matching
+  const EXTENDED: Array<{ id: string; name: string; aliases: string[]; indicativePrice: number }> = [
+    { id: 'oil', name: 'Oil & Filter Change', aliases: ['oil change', 'oil service', 'engine oil', 'lube'], indicativePrice: 180 },
+    { id: 'timing', name: 'Cambelt Replacement', aliases: ['cambelt', 'timing belt', 'cam belt', 'timing kit', 'tensioner', 'idler'], indicativePrice: 1200 },
+    { id: 'transmission', name: 'Transmission Service', aliases: ['gearbox', 'gearbox oil', 'dsg', 'dct', 'cvt', 'auto trans', 'transmission fluid', 'diff oil'], indicativePrice: 620 },
+    { id: 'brakes_front_pads', name: 'Front Brake Pads', aliases: ['front brakes', 'brake pads front', 'disc pads'], indicativePrice: 220 },
+    { id: 'brakes_front_rotors', name: 'Front Rotors & Pads', aliases: ['front rotors', 'front discs', 'disc rotors front'], indicativePrice: 580 },
+    { id: 'brakes_rear_pads', name: 'Rear Brake Pads', aliases: ['rear brakes', 'back brakes', 'rear pads'], indicativePrice: 190 },
+    { id: 'brakes_rear_rotors', name: 'Rear Rotors & Pads', aliases: ['rear rotors', 'rear discs', 'back rotors'], indicativePrice: 480 },
+    { id: 'alignment', name: 'Wheel Alignment', aliases: ['alignment', 'tracking', 'toe in', 'camber', 'steering pull'], indicativePrice: 130 },
+    { id: 'spark_plugs', name: 'Spark Plugs', aliases: ['plugs', 'iridium', 'ignition', 'misfires', 'rough idle'], indicativePrice: 240 },
+    { id: 'diag_inspection', name: 'Diagnostic Inspection', aliases: ['check', 'inspect', 'fault', 'warning light', 'engine light', 'scan', 'code', 'ecu', 'obd'], indicativePrice: 99 },
+    { id: 'brake_fluid', name: 'Brake Fluid Flush', aliases: ['brake fluid', 'dot 4', 'dot4', 'bleeding brakes'], indicativePrice: 145 },
+    { id: 'cabin_filter', name: 'Cabin Air Filter', aliases: ['cabin filter', 'pollen filter', 'air con filter', 'hvac filter'], indicativePrice: 110 },
+    { id: 'coolant', name: 'Coolant Flush', aliases: ['coolant', 'antifreeze', 'radiator flush', 'coolant service', 'overheating'], indicativePrice: 220 },
+    { id: 'ac_regas', name: 'Air Conditioning Re-gas', aliases: ['air con', 'ac regas', 'aircon', 'air conditioning', 'a/c', 'ac gas', 'cold air', 'ac not cold'], indicativePrice: 180 },
+    { id: 'battery', name: 'Battery Replacement', aliases: ['battery', '12v', 'flat battery', 'wont start', "won't start", 'dead battery'], indicativePrice: 280 },
+    { id: 'wiper_blades', name: 'Wiper Blades', aliases: ['wipers', 'wiper blade', 'windscreen wipers', 'smearing'], indicativePrice: 60 },
+    { id: 'power_steering_fluid', name: 'Power Steering Fluid', aliases: ['power steering', 'steering fluid', 'stiff steering'], indicativePrice: 120 },
+  ];
+
+  const CATALOG_IDS = new Set(['oil', 'timing', 'transmission', 'brakes_front_pads', 'brakes_front_rotors', 'brakes_rear_pads', 'brakes_rear_rotors', 'alignment', 'spark_plugs', 'diag_inspection']);
+
+  const results = EXTENDED.filter(s => {
+    if (CATALOG_IDS.has(s.id)) return false; // already shown in main catalog
+    const haystack = [s.name, ...s.aliases].join(' ').toLowerCase();
+    return q.split(/\s+/).every(word => haystack.includes(word));
+  }).slice(0, 4).map(s => ({ id: s.id, name: s.name, indicativePrice: s.indicativePrice }));
+
+  res.json({ results });
 });
 
 // Indicative all-in Torqued prices (NZD) — mirrors the booking catalog, used for AI price guidance.

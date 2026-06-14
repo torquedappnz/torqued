@@ -2382,7 +2382,7 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                         {selected && fp && (fp.partsLow > 0 || fp.labourLow > 0) && (
                           <div className="w-full border-t border-white/10 pt-2 space-y-0.5">
                             {fp.partsLow > 0 && <div className="flex justify-between text-[10px] opacity-60"><span>Parts</span><span>${fp.partsLow}–${fp.partsHigh}</span></div>}
-                            {fp.labourLow > 0 && <div className="flex justify-between text-[10px] opacity-60"><span>Labour{fp.labourHours ? ` (${fp.labourHours}h)` : ''}</span><span>${fp.labourLow}–${fp.labourHigh}</span></div>}
+                            {fp.labourLow > 0 && <div className="flex justify-between text-[10px] opacity-60"><span>Labour{fp.labourHours ? ` (${fp.labourHours} hrs)` : ''}</span><span>${fp.labourLow}</span></div>}
                           </div>
                         )}
                       </button>
@@ -3186,7 +3186,7 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                               {fp.labourLow > 0 && (
                                 <div className="flex justify-between text-[11px] text-muted font-medium">
                                   <span>Labour{fp.labourHours ? ` (${fp.labourHours} hrs)` : ''}</span>
-                                  <span>${Math.round((fp.labourLow + fp.labourHigh) / 2)}</span>
+                                  <span>${fp.labourLow}</span>
                                 </div>
                               )}
                             </div>
