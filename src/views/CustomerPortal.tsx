@@ -185,7 +185,7 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
     doc.text('Name:', 110, 115);
     doc.setFont('Helvetica', 'bold');
     doc.setTextColor(21, 4, 2);
-    const cName = job.customerName || userProfile?.name || cardName || 'Sri Test Owner';
+    const cName = job.customerName || userProfile?.name || cardName || '';
     doc.text(cName, 126, 115);
 
     doc.setFont('Helvetica', 'normal');
@@ -374,7 +374,6 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
   const [mbiStatus, setMbiStatus] = useState<'none' | 'pre-approved' | 'not-claimed'>('none');
   const [claimNumber, setClaimNumber] = useState('');
   const [dob, setDob] = useState('');
-  const [isRAH190, setIsRAH190] = useState(false);
   const [userName, setUserName] = useState<string | null>(null);
   const [isClaimApproved, setIsClaimApproved] = useState(false);
 
@@ -432,8 +431,11 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
   const [fleetQuoteState, setFleetQuoteState] = useState<'loading' | 'instant' | 'fallback' | null>(null);
   const [fleetQuoteRange, setFleetQuoteRange] = useState<{ low: number; high: number } | null>(null);
   const [fleetVehicleId, setFleetVehicleId] = useState<string | null>(null);
-  const [fleetPricesRaw, setFleetPricesRaw] = useState<Record<string, { low: number; high: number; midpoint: number }>>({});
+  const [fleetPricesRaw, setFleetPricesRaw] = useState<Record<string, { low: number; high: number; midpoint: number; partsLow: number; partsHigh: number; labourLow: number; labourHigh: number; labourHours: string | null }>>({});
   const [vehicleTimingDrive, setVehicleTimingDrive] = useState<'belt' | 'chain' | 'na' | null>(null);
+  const [waterPumpRecommended, setWaterPumpRecommended] = useState(false);
+  const [waterPump, setWaterPump] = useState<{ partsLow: number; partsHigh: number; labourExtra: number; low: number; high: number } | null>(null);
+  const [addWaterPump, setAddWaterPump] = useState(false);
   const [carjamVehicle, setCarjamVehicle] = useState<{ make: string; model: string; year: number; bodyType: string; fuel: string } | null>(null);
   const [quoteFallbackCategoryId, setQuoteFallbackCategoryId] = useState<number | null>(null);
 
@@ -749,8 +751,8 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
         date: job.date,
         time: selectedTime || '09:00 AM',
         readyTime: estimatedReadyTime || '04:30 PM',
-        vehicle: vehicle ? `${vehicle.year} ${vehicle.make} ${vehicle.model}` : 'Volkswagen Golf GTE',
-        plate: vehicle?.plate || 'RAH190',
+        vehicle: vehicle ? `${vehicle.year} ${vehicle.make} ${vehicle.model}` : '',
+        plate: vehicle?.plate || vehicle?.rego || '',
         mechanicName: mechanic?.name || 'R&D European',
         mechanicAddress: mechanic?.address || 'your mechanics address',
         paymentMethod: job.paymentMethod || 'Credit / Debit',
@@ -800,13 +802,13 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
         recipient: testEmailAddress,
         templateType: selectedEmailTab,
         bookingData: {
-          customerName: userProfile?.name || cardName || 'Sri Test Owner',
-          bookingId: latestBooking?.id || 'TQ-TEST-998A',
+          customerName: userProfile?.name || cardName || '',
+          bookingId: latestBooking?.id || '',
           date: latestBooking?.date || selectedDate,
           time: selectedTime || '09:00 AM',
           readyTime: estimatedReadyTime || '04:30 PM',
-          vehicle: vehicle ? `${vehicle.year} ${vehicle.make} ${vehicle.model}` : 'Volkswagen Golf GTE',
-          plate: vehicle?.rego || 'RAH190',
+          vehicle: vehicle ? `${vehicle.year} ${vehicle.make} ${vehicle.model}` : '',
+          plate: vehicle?.rego || '',
           mechanicName: selectedMechanic?.name || 'your selected mechanic',
           mechanicAddress: selectedMechanic?.address || 'your mechanics address',
           paymentMethod: latestBooking?.paymentMethod || paymentMethod || 'Credit / Debit',
@@ -871,10 +873,7 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
   const [cardPostalCode, setCardPostalCode] = useState('');
   const [cardError, setCardError] = useState('');
 
-  const DUMMY_PROVIDERS = ["RD European", "ATS Cumberland", "Precision Mechanical", "Anthony Motors", "Dave Ward Mechanical"];
-  const filteredProviders = entryProvider.length > 0 
-    ? DUMMY_PROVIDERS.filter(p => p.toLowerCase().includes(entryProvider.toLowerCase()) && p !== entryProvider)
-    : [];
+  const filteredProviders: string[] = [];
 
   // Suggest jobs based on mileage and vehicle type
   useEffect(() => {
@@ -1028,7 +1027,7 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
   // Dynamic display name for a service — timing name depends on vehicle's drive type.
   const serviceDisplayName = (id: string, fallback: string) => {
     if (id !== 'timing') return fallback;
-    if (vehicleTimingDrive === 'belt') return 'Cambelt & Water Pump';
+    if (vehicleTimingDrive === 'belt') return 'Cambelt';
     if (vehicleTimingDrive === 'chain') return 'Timing Chain';
     if (vehicleTimingDrive === 'na') return 'Timing Service'; // electric / no timing job
     return fallback; // unknown — use the catalog default
@@ -1044,8 +1043,12 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
 
   // Calculate total price based on selected services (per-vehicle pricing)
   const totalPrice = useMemo(() => {
-    return selectedServices.reduce((sum, id) => sum + priceFor(id), 0);
-  }, [selectedServices, vehiclePrices]);
+    let t = selectedServices.reduce((sum, id) => sum + priceFor(id), 0);
+    if (addWaterPump && waterPump && selectedServices.includes('timing')) {
+      t += Math.round((waterPump.low + waterPump.high) / 2);
+    }
+    return t;
+  }, [selectedServices, vehiclePrices, addWaterPump, waterPump]);
 
   const handleConfirmOTP = async () => {
     if (otpCode.trim().length !== 6) {
@@ -1103,7 +1106,7 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
       };
       setVehicle(v);
       setMileage((data.mileage ?? 0).toString());
-      setIsRAH190(rego === 'RAH190');
+
       setUserName(userProfile?.name || null);
       // Per-vehicle service pricing and oil specs from the DB
       const specs = Array.isArray(data.vehicle_specs) ? data.vehicle_specs[0] : data.vehicle_specs;
@@ -1116,15 +1119,15 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
       // Step 2 tally and Step 4 mechanic list reflect real parts_data midpoints.
       fetch(`/api/fleet-prices?rego=${encodeURIComponent(rego)}`)
         .then(r => r.json())
-        .then((fp: { prices: Record<string, { low: number; high: number; midpoint: number }>; timingDrive: string | null; vehicleId: string | null }) => {
-          // Store matched fleet vehicle ID (used by lookupFleetQuote to skip re-querying)
+        .then((fp: any) => {
           if (fp?.vehicleId) setFleetVehicleId(fp.vehicleId);
-          // Store timing drive so the booking UI can label the service correctly
           if (fp?.timingDrive) setVehicleTimingDrive(fp.timingDrive as 'belt' | 'chain' | 'na');
-          // Overlay fleet midpoints onto vehiclePrices
+          setWaterPumpRecommended(!!fp?.waterPumpRecommended);
+          setWaterPump(fp?.waterPump ?? null);
+          setAddWaterPump(false);
           if (fp?.prices && Object.keys(fp.prices).length > 0) {
             const fleetMidpoints: Record<string, number> = {};
-            for (const [svcId, p] of Object.entries(fp.prices)) {
+            for (const [svcId, p] of Object.entries(fp.prices as Record<string, any>)) {
               fleetMidpoints[svcId] = p.midpoint;
             }
             setVehiclePrices({ ...legacyPrices, ...fleetMidpoints });
@@ -1338,11 +1341,13 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
   type HealthInsight = { title: string; detail: string; severity: 'good' | 'due' | 'overdue' | 'info' };
   const [healthInsights, setHealthInsights] = useState<HealthInsight[]>([]);
   const [healthLoading, setHealthLoading] = useState(false);
+  const [healthHasHistory, setHealthHasHistory] = useState(true);
 
   useEffect(() => {
     if (!vehicle?.rego || !garageUnlocked) return;
     setHealthInsights([]);
     setHealthLoading(true);
+    // Backend now fetches authoritative history from DB by rego — no need to pass manualHistory.
     fetch('/api/ai/health-insights', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -1352,15 +1357,15 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
         model: vehicle.model,
         year: vehicle.year,
         mileage: vehicle.mileage,
-        history: manualHistory.slice(0, 20),
       }),
     })
       .then(async r => { const d = await r.json(); if (!r.ok) throw new Error(d?.error); return d; })
-      .then(d => { if (Array.isArray(d.insights)) setHealthInsights(d.insights); })
+      .then(d => { if (Array.isArray(d.insights)) { setHealthInsights(d.insights); setHealthHasHistory(d.hasHistory ?? true); } })
       .catch((err) => { console.warn('[health-insights]', err?.message); })
       .finally(() => setHealthLoading(false));
+  // Depend only on vehicle.rego — backend fetches its own history, so manualHistory.length no longer needed.
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [vehicle?.rego, manualHistory.length]);
+  }, [vehicle?.rego]);
 
   // Vehicle photos
   const [vehiclePhotos, setVehiclePhotos] = useState<{ id: string; photo_url: string; comment: string; uploaded_by: string; created_at: string }[]>([]);
@@ -1868,12 +1873,12 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
           >
             <div className="space-y-4">
               <h2 className="text-3xl sm:text-4xl md:text-5xl tracking-tighter">
-                {isRAH190 ? `Welcome Back, ${userName} 👋` : 'Step 1: Enter Your Car'}
+                Step 1: Enter Your Car
               </h2>
-              {isRAH190 ? (
+              {manualHistory.length > 0 ? (
                 <div className="space-y-4">
                   <p className="text-muted">
-                    Your Golf GTE is tracked. We have <span className="text-torqued-red font-bold">{manualHistory.length} service records</span> on file spanning back to {manualHistory[manualHistory.length - 1]?.date}.
+                    We have <span className="text-torqued-red font-bold">{manualHistory.length} service records</span> on file for this vehicle.
                   </p>
                   
                   <div className="space-y-3">
@@ -2113,8 +2118,7 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                   />
                   
                   {/* New Customer / Service History Section */}
-                  {!isRAH190 && (
-                    <div className="pt-4 border-t border-border space-y-4">
+                  <div className="pt-4 border-t border-border space-y-4">
                       <div className="flex items-center justify-between">
                          <label className="text-sm font-bold">New to Torqued?</label>
                          <button 
@@ -2268,7 +2272,6 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                         </motion.div>
                       )}
                     </div>
-                  )}
 
                   <Button fullWidth onClick={() => setStep(2)} disabled={!mileage} className="bg-torqued-red">Continue to Services →</Button>
                 </div>
@@ -2278,10 +2281,6 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
         );
 
       case 2:
-        const isCurrentlyRAH190 = rego === 'RAH190';
-        const rah190Suggestions = ['spark_plugs', 'brakes_front_pads', 'oil'];
-        const displaySuggestions = isCurrentlyRAH190 ? rah190Suggestions : suggestedJobs;
-
         return (
           <motion.div 
             initial={{ opacity: 0, x: 20 }}
@@ -2294,22 +2293,22 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                 <ArrowLeft size={24} />
               </button>
               <div className="space-y-1">
-                <h2 className="text-2xl sm:text-3xl md:text-4xl">{isRAH190 ? 'Step 2: What Are You After?' : 'Step 2: What Do You Need?'}</h2>
+                <h2 className="text-2xl sm:text-3xl md:text-4xl">Step 2: What Do You Need?</h2>
                 <p className="text-sm sm:text-base text-white/60">
-                  {isRAH190 ? 'Your service history looks great -- what are you after today?' : 'Select a standard service or describe a problem.'}
+                  Select a standard service or describe a problem.
                 </p>
               </div>
             </div>
 
             {!quotePath ? (
               <div className="space-y-6">
-              {displaySuggestions.length > 0 && (
+              {suggestedJobs.length > 0 && (
                 <div className="p-4 bg-torqued-red/5 border border-torqued-red/10 rounded-2xl space-y-3">
                   <div className="flex items-center gap-2 text-torqued-red font-bold uppercase tracking-widest text-[10px]">
-                    <AlertTriangle size={14} /> {isRAH190 ? 'Top maintenance picks for your Golf GTE' : `Recommended for your mileage (${mileage} km)`}
+                    <AlertTriangle size={14} /> {`Recommended for your mileage (${mileage} km)`}
                   </div>
                   <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-                    {displaySuggestions.map(id => {
+                    {suggestedJobs.map(id => {
                       const service = SERVICES.find(s => s.id === id);
                       if (!service) return null;
                       return (
@@ -2361,26 +2360,88 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
             ) : quotePath === 'service' ? (
               <div className="space-y-6">
                 <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-3">
-                  {SERVICES.map(service => (
-                    <button
-                      key={service.id}
-                      onClick={() => toggleService(service.id)}
-                      className={cn(
-                        "p-4 rounded-xl border text-center transition-all flex flex-col items-center gap-2",
-                        selectedServices.includes(service.id) 
-                          ? "border-torqued-red bg-torqued-red/10 text-torqued-red" 
-                          : "border-white/10 bg-white/5 hover:border-white/20"
-                      )}
-                    >
-                      <span className="text-2xl">{service.icon}</span>
-                      <span className="text-xs font-bold uppercase tracking-tight leading-tight">{serviceDisplayName(service.id, service.name)}</span>
-                    </button>
-                  ))}
+                  {SERVICES.map(service => {
+                    const fp = fleetPricesRaw[service.id];
+                    const selected = selectedServices.includes(service.id);
+                    return (
+                      <button
+                        key={service.id}
+                        onClick={() => toggleService(service.id)}
+                        className={cn(
+                          "p-4 rounded-xl border text-left transition-all flex flex-col gap-2",
+                          selected
+                            ? "border-torqued-red bg-torqued-red/10 text-torqued-red"
+                            : "border-white/10 bg-white/5 hover:border-white/20"
+                        )}
+                      >
+                        <div className="flex flex-col items-center gap-1 w-full text-center">
+                          <span className="text-2xl">{service.icon}</span>
+                          <span className="text-xs font-bold uppercase tracking-tight leading-tight">{serviceDisplayName(service.id, service.name)}</span>
+                          {fp && <span className="text-[10px] opacity-70">${fp.low}–${fp.high}</span>}
+                        </div>
+                        {selected && fp && (fp.partsLow > 0 || fp.labourLow > 0) && (
+                          <div className="w-full border-t border-white/10 pt-2 space-y-0.5">
+                            {fp.partsLow > 0 && <div className="flex justify-between text-[10px] opacity-60"><span>Parts</span><span>${fp.partsLow}–${fp.partsHigh}</span></div>}
+                            {fp.labourLow > 0 && <div className="flex justify-between text-[10px] opacity-60"><span>Labour{fp.labourHours ? ` (${fp.labourHours}h)` : ''}</span><span>${fp.labourLow}–${fp.labourHigh}</span></div>}
+                          </div>
+                        )}
+                      </button>
+                    );
+                  })}
                 </div>
+
+                {/* Water pump recommendation card — belt-driven VW/Audi/Skoda/Seat */}
+                {waterPumpRecommended && waterPump && selectedServices.includes('timing') && (
+                  <div className="p-4 bg-orange-500/10 border border-orange-500/30 rounded-xl space-y-3">
+                    <div className="flex items-start gap-3">
+                      <AlertTriangle size={16} className="text-orange-400 mt-0.5 shrink-0" />
+                      <div className="flex-1 space-y-1">
+                        <p className="text-sm font-bold text-orange-300">Water Pump strongly recommended</p>
+                        <p className="text-[11px] text-orange-200/70">On this engine the water pump is belt-driven. Replacing both together avoids a second belt removal and saves significant labour cost later.</p>
+                        <div className="flex justify-between items-center pt-1">
+                          <div className="text-[11px] text-orange-200/60">
+                            Parts ${waterPump.partsLow}–${waterPump.partsHigh} + ${waterPump.labourExtra} labour
+                          </div>
+                          <button
+                            onClick={() => setAddWaterPump(v => !v)}
+                            className={cn(
+                              "px-3 py-1 rounded-lg text-[11px] font-bold transition-all",
+                              addWaterPump
+                                ? "bg-orange-500 text-white"
+                                : "bg-orange-500/20 text-orange-300 hover:bg-orange-500/30"
+                            )}
+                          >
+                            {addWaterPump ? '✓ Added' : 'Add to booking'}
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                )}
+
                 {totalPrice > 0 && (
-                  <div className="p-4 bg-white/5 rounded-xl border border-white/10 flex justify-between items-center">
-                    <span className="text-xs font-bold uppercase text-white/40">Estimated Total</span>
-                    <span className="text-xl font-bold text-torqued-red">${totalPrice}</span>
+                  <div className="p-4 bg-white/5 rounded-xl border border-white/10 space-y-2">
+                    {selectedServices.map(id => {
+                      const fp = fleetPricesRaw[id];
+                      const svc = SERVICES.find(s => s.id === id);
+                      if (!fp || !svc) return null;
+                      return (
+                        <div key={id} className="flex justify-between text-xs text-white/60">
+                          <span>{serviceDisplayName(id, svc.name)}</span>
+                          <span>${Math.round((fp.low + fp.high) / 2)}</span>
+                        </div>
+                      );
+                    })}
+                    {addWaterPump && waterPump && selectedServices.includes('timing') && (
+                      <div className="flex justify-between text-xs text-orange-300/80">
+                        <span>Water Pump</span>
+                        <span>${Math.round((waterPump.low + waterPump.high) / 2)}</span>
+                      </div>
+                    )}
+                    <div className="flex justify-between items-center pt-2 border-t border-white/10">
+                      <span className="text-xs font-bold uppercase text-white/40">Estimated Total</span>
+                      <span className="text-xl font-bold text-torqued-red">${totalPrice}</span>
+                    </div>
                   </div>
                 )}
                 <div className="space-y-2">
@@ -3112,31 +3173,48 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                               <p className="text-[10px] text-torqued-red/70 italic pt-1">Approved oil for your vehicle: {vehicleOilType}</p>
                             )}
                           </div>
-                        ) : (
-                          <>
-                            {service.parts && (
-                              <div className="pl-0 space-y-1.5 border-t border-border/50 pt-3">
-                                {service.parts.map(p => (
-                                  <div key={p.id} className="flex justify-between text-[11px] text-muted font-medium">
-                                    <span>{p.name} (x{p.quantity})</span><span>${p.total.toFixed(2)}</span>
-                                  </div>
-                                ))}
-                              </div>
-                            )}
-                            {service.labour && (
-                              <div className="pl-0 space-y-1.5">
-                                {service.labour.map(l => (
-                                  <div key={l.id} className="flex justify-between text-[11px] text-muted font-medium">
-                                    <span>Labour • {l.name}</span><span>${l.cost.toFixed(2)}</span>
-                                  </div>
-                                ))}
-                              </div>
-                            )}
-                          </>
-                        )}
+                        ) : (() => {
+                          const fp = fleetPricesRaw[id];
+                          return fp && (fp.partsLow > 0 || fp.labourLow > 0) ? (
+                            <div className="border-t border-border/50 pt-3 space-y-1.5">
+                              {fp.partsLow > 0 && (
+                                <div className="flex justify-between text-[11px] text-muted font-medium">
+                                  <span>Parts (indicative)</span>
+                                  <span>${Math.round((fp.partsLow + fp.partsHigh) / 2)}</span>
+                                </div>
+                              )}
+                              {fp.labourLow > 0 && (
+                                <div className="flex justify-between text-[11px] text-muted font-medium">
+                                  <span>Labour{fp.labourHours ? ` (${fp.labourHours} hrs)` : ''}</span>
+                                  <span>${Math.round((fp.labourLow + fp.labourHigh) / 2)}</span>
+                                </div>
+                              )}
+                            </div>
+                          ) : null;
+                        })()}
                       </div>
                     );
                   })}
+
+                  {/* Water pump add-on line item */}
+                  {addWaterPump && waterPump && selectedServices.includes('timing') && (
+                    <div className="space-y-3 bg-orange-500/5 p-4 rounded-2xl border border-orange-500/20">
+                      <div className="flex justify-between items-center text-foreground">
+                        <span className="text-sm font-black uppercase tracking-tight text-orange-300">Water Pump</span>
+                        <span className="text-sm font-black">${Math.round((waterPump.low + waterPump.high) / 2)}</span>
+                      </div>
+                      <div className="border-t border-orange-500/20 pt-3 space-y-1.5">
+                        <div className="flex justify-between text-[11px] text-muted font-medium">
+                          <span>Parts (indicative)</span>
+                          <span>${Math.round((waterPump.partsLow + waterPump.partsHigh) / 2)}</span>
+                        </div>
+                        <div className="flex justify-between text-[11px] text-muted font-medium">
+                          <span>Labour (extra 0.5 hrs)</span>
+                          <span>${waterPump.labourExtra}</span>
+                        </div>
+                      </div>
+                    </div>
+                  )}
                 </div>
 
                 <div className="flex justify-between items-center py-6 border-t border-b border-border">
@@ -3499,6 +3577,22 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
       return next;
     });
   };
+  const [removingRego, setRemovingRego] = useState<string | null>(null);
+  const removeVehicle = async (rego: string) => {
+    if (!customerOwnerId) return;
+    if (!window.confirm(`Remove ${rego} from your account?\n\nYour service history for this vehicle will be preserved — a new owner can claim the plate and access it.`)) return;
+    setRemovingRego(rego);
+    try {
+      const r = await fetch('/api/customer/remove-vehicle', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ownerId: customerOwnerId, rego }),
+      });
+      if (!r.ok) { const d = await r.json(); alert(d.error || 'Could not remove vehicle'); return; }
+      setGarageVehicles(prev => prev.filter(v => v.rego !== rego));
+      if (vehicle?.rego === rego) setVehicle(null);
+    } catch { alert('Could not remove vehicle — try again.'); }
+    finally { setRemovingRego(null); }
+  };
 
   const renderDashboard = () => {
     // Gate: My Garage requires a verification (passkey or magic link) within the last 48h, on this browser
@@ -3702,10 +3796,17 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                         <h4 className="text-base leading-tight font-bold truncate">{gv.year} {gv.make} {gv.model}</h4>
                         {gv.variant && <p className="text-xs text-muted mt-0.5 truncate">{gv.variant}</p>}
                       </div>
-                      <button
-                        onClick={(e) => { e.stopPropagation(); toggleArchive(gv.rego); }}
-                        className="text-[10px] font-bold uppercase tracking-widest text-muted hover:text-torqued-red shrink-0 px-2"
-                      >{isArchived ? 'Restore' : 'Archive'}</button>
+                      <div className="flex items-center gap-1 shrink-0">
+                        <button
+                          onClick={(e) => { e.stopPropagation(); toggleArchive(gv.rego); }}
+                          className="text-[10px] font-bold uppercase tracking-widest text-muted hover:text-torqued-red px-2"
+                        >{isArchived ? 'Restore' : 'Archive'}</button>
+                        <button
+                          onClick={(e) => { e.stopPropagation(); removeVehicle(gv.rego); }}
+                          disabled={removingRego === gv.rego}
+                          className="text-[10px] font-bold uppercase tracking-widest text-muted hover:text-torqued-red px-2 disabled:opacity-40"
+                        >{removingRego === gv.rego ? '…' : 'Remove'}</button>
+                      </div>
                     </div>
                     {/* Get a Quote CTA — only on active (non-archived) vehicles */}
                     {!isArchived && (
@@ -3786,6 +3887,12 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                     <p className="text-xs text-muted/60">This may be a temporary issue — try refreshing the page.</p>
                   </Card>
                 ) : (
+                  <div className="space-y-3">
+                  {!healthHasHistory && (
+                    <Card className="p-4 border-amber-500/20 bg-amber-500/5">
+                      <p className="text-sm text-amber-400 font-medium">No service history on file for this vehicle — insights are estimated from vehicle age and mileage. <button onClick={() => document.getElementById('history-upload-input')?.click()} className="underline font-bold">Scan a receipt</button> to improve accuracy.</p>
+                    </Card>
+                  )}
                   <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                     {healthInsights.map((insight, i) => {
                       const isGood     = insight.severity === 'good';
@@ -3829,6 +3936,7 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                         </Card>
                       );
                     })}
+                  </div>
                   </div>
                 )}
 
@@ -5172,7 +5280,7 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                           </div>
                         </div>
                         <div className="bg-zinc-900/80 border border-zinc-800/50 rounded-2xl p-3.5 text-xs text-zinc-200 leading-relaxed font-semibold self-end shadow-md max-w-[90%] relative">
-                          {emittedSmsText || `TORQUED: Booking Ref #${latestBooking?.id || 'TQ-TEST-998A'} is confirmed for vehicle (${vehicle ? `${vehicle.year} ${vehicle.make} ${vehicle.model}` : 'Volkswagen Golf GTE'} - ${vehicle?.rego || 'RAH190'}). Drop off date is ${latestBooking?.date || selectedDate} @ ${selectedTime}.`}
+                          {emittedSmsText || (latestBooking ? `TORQUED: Booking Ref #${latestBooking.id} is confirmed for vehicle (${vehicle ? `${vehicle.year} ${vehicle.make} ${vehicle.model}` : vehicle?.rego || ''} - ${vehicle?.rego || ''}). Drop off date is ${latestBooking.date} @ ${selectedTime}.` : 'Booking confirmation SMS will appear here.')}
                         </div>
                         <div className="text-[8px] text-zinc-600 text-center font-mono mt-4">Authorized Otago Dispatch Hub</div>
                       </div>

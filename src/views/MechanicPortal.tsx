@@ -1,18 +1,18 @@
 import React, { useState, useMemo } from 'react';
 import { jsPDF } from 'jspdf';
 import { motion, AnimatePresence } from 'motion/react';
-import { 
-  LayoutDashboard, 
-  Inbox, 
-  Calendar as CalendarIcon, 
-  Package, 
-  CreditCard, 
-  User, 
-  Star, 
-  TrendingUp, 
-  Clock, 
-  CheckCircle2, 
-  X, 
+import {
+  LayoutDashboard,
+  Inbox,
+  Calendar as CalendarIcon,
+  Package,
+  CreditCard,
+  User,
+  Star,
+  TrendingUp,
+  Clock,
+  CheckCircle2,
+  X,
   MoreVertical,
   ChevronRight,
   ChevronLeft,
@@ -36,7 +36,8 @@ import {
   Monitor,
   Activity,
   Camera,
-  Sparkles
+  Sparkles,
+  HeartPulse
 } from 'lucide-react';
 import { Logo } from '../components/Logo';
 import { Button } from '../components/Button';
@@ -60,112 +61,98 @@ import {
   DeliveryItem
 } from '../types';
 
-const INITIAL_PARTS: InventoryPart[] = [
-  { id: '1', name: 'VW DCT Transmission Oil', quantity: 24, unitPrice: 48.50, description: 'High performance DCT fluid' },
-  { id: '2', name: '0W-30 Synthetic Oil (1L)', quantity: 45, unitPrice: 22.00 },
-  { id: '3', name: 'VW Timing Belt Kit (INA)', quantity: 3, unitPrice: 345.00 },
-  { id: '4', name: 'Water Pump & Thermostat Housing VAG', quantity: 2, unitPrice: 517.62 },
-  { id: '5', name: 'Brake Pads (Front) - VW Golf', quantity: 8, unitPrice: 85.00 },
-  { id: '6', name: 'Oil Filter - VAG 1.4 TSI', quantity: 12, unitPrice: 28.50 },
-  { id: '7', name: 'VW Antifreeze 4L (G13)', quantity: 15, unitPrice: 24.65 },
-];
+const SUPPLIERS: Supplier[] = [];
+const PART_OFFERS: PartOffer[] = [];
 
-const INITIAL_JOB_REQUESTS = [
-  {
-    id: 'req1',
-    reg: 'RAH190',
-    model: '2017 Volkswagen Golf GTE',
-    details: '1.4TSI/6DSG DQ400e • 108,500 km',
-    suggestedQuote: 99.00,
-    services: ['Diagnostic Inspection'],
-    description: '"Gears feel a bit clunky specifically when transitioning from EV to ICE. Dashboard showing Hybrid System Fault alternatively."',
-    status: 'Booked via Torqued',
-    partsMatch: 0,
-    profit: 85.00,
-    requiredParts: []
-  },
-  {
-    id: 'req2',
-    reg: 'HMT921',
-    model: '2020 Subaru Outback',
-    details: '2.5i Limited • 42,500 km • Mosgiel',
-    suggestedQuote: 450.00,
-    services: ['Basic Service', 'WOF'],
-    description: '"Annual service and WOF renewal required."',
-    status: 'Inspection Clear',
-    partsMatch: 20,
-    profit: 215.00,
-    requiredParts: [
-      { id: 'p4', name: '0W-20 Mineral Oil', oemNumber: 'CAST-0W20', quantity: 5 },
-      { id: 'p5', name: 'Ryco Z411 Oil Filter', oemNumber: 'Z411', quantity: 1 }
-    ]
-  },
-  {
-    id: 'req3',
-    reg: 'CGA689',
-    model: '2004 Toyota Yaris',
-    details: '1.3L Petrol Manual • 220,000 km',
-    suggestedQuote: 99.00,
-    services: ['Diagnostic Inspection'],
-    description: '"Noticed some grinding noises from the front of the car when braking. Need a professional look."',
-    status: 'Booked via Torqued',
-    partsMatch: 0,
-    profit: 85.00,
-    manualHistory: [
-      { date: '2025-10-10', service: 'Oil Change', provider: 'Local Shop', mileage: '215,000' },
-      { date: '2024-05-05', service: 'Brake Check', provider: 'Precision Mech', mileage: '200,000' }
-    ]
-  }
-];
 
-const SUPPLIERS: Supplier[] = [
-  { id: 'sup1', name: 'EuroParts VAG Specialists', logo: '🇪🇺', rating: 4.8, deliveryEstimate: 'Tomorrow 9:00 AM' },
-  { id: 'sup2', name: 'Repco Commercial', logo: '🛠️', rating: 4.5, deliveryEstimate: 'Tomorrow 10:30 AM' },
-  { id: 'sup3', name: 'BNT Automotive', logo: '⚙️', rating: 4.2, deliveryEstimate: 'Tomorrow 1:00 PM' },
-  { id: 'sup4', name: 'GNZ Warehouse', logo: '📦', rating: 4.0, deliveryEstimate: '2 Days' },
-];
+// ── Vehicle Health Lookup (mechanic side) ─────────────────────────────────────
+type HealthInsight = { title: string; detail: string; severity: 'good' | 'due' | 'overdue' | 'info' };
+const VehicleHealthLookup: React.FC<{ mechanicId?: string }> = ({ mechanicId }) => {
+  const [rego, setRego] = React.useState('');
+  const [loading, setLoading] = React.useState(false);
+  const [insights, setInsights] = React.useState<HealthInsight[] | null>(null);
+  const [hasHistory, setHasHistory] = React.useState(true);
+  const [error, setError] = React.useState<string | null>(null);
 
-const PART_OFFERS: PartOffer[] = [
-  // For Cambelt Kit (p1)
-  { id: 'off1', partId: 'p1', supplierId: 'sup1', price: 425.00, availability: 'in-stock', deliveryTime: '9:00 AM' },
-  { id: 'off2', partId: 'p1', supplierId: 'sup2', price: 465.00, availability: 'in-stock', deliveryTime: '10:30 AM' },
-  { id: 'off3', partId: 'p1', supplierId: 'sup3', price: 410.00, availability: 'to-order', deliveryTime: '1:00 PM' },
-  
-  // For Waterpump (p2)
-  { id: 'off4', partId: 'p2', supplierId: 'sup1', price: 215.00, availability: 'in-stock', deliveryTime: '9:00 AM' },
-  { id: 'off5', partId: 'p2', supplierId: 'sup2', price: 198.00, availability: 'in-stock', deliveryTime: '10:30 AM' },
-  
-  // For DSG Service Kit (p3)
-  { id: 'off6', partId: 'p3', supplierId: 'sup1', price: 320.00, availability: 'in-stock', deliveryTime: '9:00 AM' },
-  { id: 'off7', partId: 'p3', supplierId: 'sup4', price: 285.00, availability: 'in-stock', deliveryTime: '2 Days' },
+  const lookup = async () => {
+    const plate = rego.toUpperCase().trim();
+    if (!plate) return;
+    setLoading(true); setInsights(null); setError(null);
+    try {
+      const r = await fetch('/api/ai/health-insights', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ rego: plate, mechanic_id: mechanicId }),
+      });
+      const d = await r.json();
+      if (!r.ok) { setError(d.error || 'Could not load vehicle health'); return; }
+      setInsights(d.insights || []);
+      setHasHistory(d.hasHistory ?? true);
+    } catch { setError('Could not connect — please try again.'); }
+    finally { setLoading(false); }
+  };
 
-  // For Subaru Oil (p4)
-  { id: 'off8', partId: 'p4', supplierId: 'sup2', price: 18.00, availability: 'in-stock', deliveryTime: '10:30 AM' },
-  { id: 'off9', partId: 'p4', supplierId: 'sup3', price: 19.50, availability: 'in-stock', deliveryTime: '1:00 PM' },
+  const severityColor = (s: string) =>
+    s === 'good' ? 'border-emerald-500/20 bg-emerald-500/5' :
+    s === 'due'  ? 'border-amber-500/20 bg-amber-500/5' :
+    s === 'overdue' ? 'border-torqued-red/30 bg-torqued-red/5' : 'border-border bg-card';
+  const severityIcon = (s: string) => s === 'good' ? '✓' : s === 'overdue' ? '⚠' : s === 'due' ? '🔔' : 'ℹ';
+  const severityText = (s: string) =>
+    s === 'good' ? 'text-emerald-400' : s === 'due' ? 'text-amber-400' : s === 'overdue' ? 'text-torqued-red' : 'text-muted';
 
-  // For Subaru Filter (p5)
-  { id: 'off10', partId: 'p5', supplierId: 'sup2', price: 15.00, availability: 'in-stock', deliveryTime: '10:30 AM' },
-  { id: 'off11', partId: 'p5', supplierId: 'sup3', price: 13.50, availability: 'in-stock', deliveryTime: '1:00 PM' },
-];
+  return (
+    <div className="space-y-6 max-w-2xl">
+      <Card className="p-6 bg-card border-border space-y-4">
+        <div>
+          <h3 className="text-lg font-black tracking-tight">Vehicle Health Lookup</h3>
+          <p className="text-xs text-muted mt-1">Only available for vehicles that have come through your system — cold quotes, bookings, or past jobs.</p>
+        </div>
+        <div className="flex gap-3">
+          <input
+            value={rego} onChange={e => setRego(e.target.value.toUpperCase())}
+            onKeyDown={e => e.key === 'Enter' && lookup()}
+            placeholder="e.g. ABC123"
+            className="flex-1 bg-background border border-border rounded-xl px-4 py-2.5 text-sm font-mono tracking-widest outline-none focus:border-torqued-red/50 text-foreground placeholder:text-muted"
+          />
+          <Button onClick={lookup} disabled={loading || !rego.trim()} className="bg-torqued-red text-white shrink-0">
+            {loading ? 'Analysing…' : 'Look up'}
+          </Button>
+        </div>
+        {error && <p className="text-sm text-torqued-red font-bold">{error}</p>}
+      </Card>
 
-const INITIAL_APPOINTMENTS = [
-  { id: '1', day: 'Mon', time: '09:00', endTime: '10:00', car: 'Sri Berry: VW Golf GTE (RAH190)', service: 'Diagnostic Inspection', status: 'Waiting', type: 'inspection' },
-  { id: '3', day: 'Tue', time: '08:30', endTime: '10:00', car: 'Toyota Hilux (RJK123)', service: 'Standard Oil Service', status: 'Queued', type: 'maintenance' },
-  { id: '4', day: 'Wed', time: '13:00', endTime: '15:00', car: 'BMW 320i (BMW777)', service: 'Brake Pads & Rotors', status: 'Waiting', type: 'repair' },
-  { id: '5', day: 'Fri', time: '15:30', endTime: '17:00', car: 'Audi A3 (AUD101)', service: 'Diagnostics & Health Scan', status: 'Waiting', type: 'inspection' },
-  { id: '6', day: 'Mon', time: '11:00', endTime: '12:00', car: 'Toyota Yaris (CGA689)', service: 'Diagnostic Inspection', status: 'Waiting', type: 'inspection' },
-];
-
-const REVENUE_DATA = [
-  { day: 'Mon', amount: 3450 },
-  { day: 'Tue', amount: 1800 },
-  { day: 'Wed', amount: 2400 },
-  { day: 'Thu', amount: 1600 },
-  { day: 'Fri', amount: 3200 },
-  { day: 'Sat', amount: 800 },
-  { day: 'Sun', amount: 0 },
-];
-
+      {insights !== null && (
+        <div className="space-y-4">
+          {!hasHistory && (
+            <Card className="p-4 border-amber-500/20 bg-amber-500/5 text-sm text-amber-400 font-medium">
+              No service history on file for this vehicle — insights are based on vehicle age and mileage estimates only. Encourage the customer to scan past receipts to improve accuracy.
+            </Card>
+          )}
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+            {insights.map((insight, i) => (
+              <Card key={i} className={cn('p-4 flex items-start gap-3 border', severityColor(insight.severity))}>
+                <div className={cn('w-8 h-8 rounded-xl flex items-center justify-center shrink-0 text-base font-bold',
+                  insight.severity === 'good' ? 'bg-emerald-500/15' :
+                  insight.severity === 'due'  ? 'bg-amber-500/15' :
+                  insight.severity === 'overdue' ? 'bg-torqued-red/15' : 'bg-white/5')}>
+                  {severityIcon(insight.severity)}
+                </div>
+                <div className="min-w-0 flex-1">
+                  <p className={cn('text-sm font-bold leading-tight', severityText(insight.severity))}>{insight.title}</p>
+                  <p className="text-xs text-muted mt-0.5 leading-snug">{insight.detail}</p>
+                </div>
+                {(insight.severity === 'due' || insight.severity === 'overdue') && (
+                  <span className="shrink-0 text-[10px] font-black uppercase tracking-widest text-torqued-red">
+                    {insight.severity === 'overdue' ? 'URGENT' : 'SOON'}
+                  </span>
+                )}
+              </Card>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+};
 
 export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) => {
   const { theme, setTheme } = useTheme();
@@ -649,8 +636,8 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
   const [selectedJobId, setSelectedJobId] = useState<string | null>(null);
   const [calendarView, setCalendarView] = useState<'day' | 'week' | 'month'>('week');
   const [parts, setParts] = useState<InventoryPart[]>([]);
-  const [appointments, setAppointments] = useState<typeof INITIAL_APPOINTMENTS>([]);
-  const [incomingJobs, setIncomingJobs] = useState<typeof INITIAL_JOB_REQUESTS>([]);
+  const [appointments, setAppointments] = useState<any[]>([]);
+  const [incomingJobs, setIncomingJobs] = useState<any[]>([]);
   const [weekRevenue, setWeekRevenue] = useState(0);
   const [pastJobs, setPastJobs] = useState<any[]>([]);
   const [jobHistory, setJobHistory] = useState<any[]>([]);
@@ -941,6 +928,7 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
     { id: 'jobs', label: 'My Jobs', icon: Inbox, badge: pendingJobsCount > 0 ? pendingJobsCount : undefined },
     { id: 'manual-quotes', label: 'Manual Quotes', icon: PenSquare, badge: manualQuotesCount > 0 ? manualQuotesCount : undefined },
     { id: 'customers', label: 'Customers', icon: User },
+    { id: 'vehicle-health', label: 'Vehicle Health', icon: HeartPulse },
     { id: 'assistant', label: 'Assistant', icon: MessageCircle },
     { id: 'calendar', label: 'Calendar', icon: CalendarIcon },
     { id: 'parts', label: 'Parts', icon: Package },
@@ -1788,246 +1776,6 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
         </div>
 
         <Button fullWidth size="lg" className="h-16 text-lg" onClick={handleSaveProfile}>Save Profile Updates</Button>
-
-        {/* Service Packages */}
-        <Card className="p-6 space-y-5 md:col-span-2">
-          <div className="flex items-center gap-2 border-b border-black/5 pb-4">
-            <Package size={20} className="text-torqued-red" />
-            <h3 className="text-xl">Service Packages</h3>
-            <span className="text-[10px] text-muted ml-auto">Up to 5 fixed-price bundles customers can book</span>
-            <span className={cn("text-[10px] font-black uppercase px-2 py-0.5 rounded", packages.length >= 5 ? "bg-torqued-red/15 text-torqued-red" : "bg-emerald-500/10 text-emerald-500")}>{packages.length}/5</span>
-          </div>
-
-          <div className="space-y-3">
-            {packages.map(p => (
-              <div key={p.id} className="bg-background/50 border border-border rounded-xl p-4 space-y-2">
-                <div className="flex items-start justify-between gap-3">
-                  <div className="flex-1">
-                    <div className="flex items-center gap-2">
-                      <p className="font-bold text-sm text-foreground">{p.name}</p>
-                      <span className="text-[10px] text-muted">· {p.duration_min}min</span>
-                      {p.pkg_type === 'transmission' && <span className="text-[10px] font-black uppercase px-1.5 py-0.5 rounded bg-blue-500/15 text-blue-400">Transmission</span>}
-                    </div>
-                    {p.description && <p className="text-xs text-muted mt-0.5">{p.description}</p>}
-                    {/* Price breakdown */}
-                    {p.pkg_type === 'standard' && (p.oil_litres || p.base_fee || p.filter_cost) ? (
-                      <div className="flex flex-wrap gap-x-3 gap-y-0.5 mt-1">
-                        {p.base_fee > 0 && <span className="text-[10px] text-muted">Service fee: <span className="font-bold text-foreground">${Number(p.base_fee).toFixed(0)}</span></span>}
-                        {p.oil_litres > 0 && p.oil_cost_per_l > 0 && <span className="text-[10px] text-muted">{p.oil_litres}L {p.oil_grade || 'oil'} @ ${Number(p.oil_cost_per_l).toFixed(2)}/L = <span className="font-bold text-foreground">${(p.oil_litres * p.oil_cost_per_l).toFixed(2)}</span></span>}
-                        {p.filter_cost > 0 && <span className="text-[10px] text-muted">Filter: <span className="font-bold text-foreground">${Number(p.filter_cost).toFixed(2)}</span></span>}
-                      </div>
-                    ) : p.pkg_type === 'transmission' && (p.trans_oil_litres || p.freight || p.scan_tool_fee) ? (
-                      <div className="flex flex-wrap gap-x-3 gap-y-0.5 mt-1">
-                        {p.base_fee > 0 && <span className="text-[10px] text-muted">Labour 1hr: <span className="font-bold text-foreground">${Number(p.base_fee).toFixed(0)}</span></span>}
-                        {p.trans_oil_litres > 0 && p.trans_oil_cost_per_l > 0 && <span className="text-[10px] text-muted">{p.trans_oil_litres}L fluid @ ${Number(p.trans_oil_cost_per_l).toFixed(2)}/L = <span className="font-bold text-foreground">${(p.trans_oil_litres * p.trans_oil_cost_per_l).toFixed(2)}</span></span>}
-                        {p.freight > 0 && <span className="text-[10px] text-muted">Freight: <span className="font-bold text-foreground">${Number(p.freight).toFixed(2)}</span></span>}
-                        {p.scan_tool_fee > 0 && <span className="text-[10px] text-muted">Scan tool: <span className="font-bold text-foreground">${Number(p.scan_tool_fee).toFixed(2)}</span></span>}
-                      </div>
-                    ) : null}
-                    {p.included_items?.length > 0 && (
-                      <div className="flex flex-wrap gap-1 mt-1.5">
-                        {p.included_items.map((item: string, i: number) => (
-                          <span key={i} className="text-[10px] bg-card border border-border px-2 py-0.5 rounded text-muted">✓ {item}</span>
-                        ))}
-                      </div>
-                    )}
-                  </div>
-                  <div className="flex items-center gap-3 shrink-0">
-                    <span className="font-black text-torqued-red">${Number(p.price).toFixed(0)}</span>
-                    <button onClick={async () => {
-                      await fetch('/api/mechanic/packages/delete', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id: p.id, mechanicId: user!.id }) });
-                      setPackages(packages.filter(x => x.id !== p.id));
-                    }} className="text-muted hover:text-torqued-red"><Trash2 size={15} /></button>
-                  </div>
-                </div>
-              </div>
-            ))}
-            {packages.length === 0 && <p className="text-sm text-muted italic">No packages yet. Add up to 5 below.</p>}
-          </div>
-
-          {packages.length < 5 && (
-            <div className="space-y-4 pt-2 border-t border-border">
-              <p className="text-[10px] font-black uppercase tracking-widest text-muted">New Package</p>
-
-              {/* Package type toggle */}
-              <div className="flex gap-1 p-1 bg-background border border-border rounded-xl w-fit">
-                <button onClick={() => setNewPkg(p => ({ ...p, type: 'standard' }))} className={cn("px-3 py-1.5 rounded-lg text-xs font-black uppercase transition-all", newPkg.type === 'standard' ? 'bg-torqued-red text-white' : 'text-muted hover:text-foreground')}>Standard Service</button>
-                <button onClick={() => setNewPkg(p => ({ ...p, type: 'transmission' }))} className={cn("px-3 py-1.5 rounded-lg text-xs font-black uppercase transition-all", newPkg.type === 'transmission' ? 'bg-blue-600 text-white' : 'text-muted hover:text-foreground')}>Transmission Service</button>
-              </div>
-
-              <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
-                <Input placeholder="Package name" value={newPkg.name} onChange={e => setNewPkg({ ...newPkg, name: e.target.value })} className="sm:col-span-2 bg-background text-foreground" />
-                <Input placeholder="Duration (min)" type="number" value={newPkg.durationMin} onChange={e => setNewPkg({ ...newPkg, durationMin: e.target.value })} className="bg-background text-foreground" />
-                <Input placeholder="Base fee $" type="number" value={newPkg.baseFee} onChange={e => setNewPkg({ ...newPkg, baseFee: e.target.value })} className="bg-background text-foreground" />
-              </div>
-
-              {/* Vehicle reference + AI auto-fill */}
-              <div className="flex gap-2 items-end">
-                <div className="flex-1">
-                  <p className="text-[10px] font-black uppercase tracking-widest text-muted mb-1">Vehicle Reference (for AI auto-fill)</p>
-                  <Input
-                    placeholder="e.g. Toyota Camry 2.5L 2018, VW Golf 1.4 TSI, Honda Jazz 1.3…"
-                    value={newPkg.vehicleRef}
-                    onChange={e => setNewPkg({ ...newPkg, vehicleRef: e.target.value })}
-                    className="bg-background text-foreground"
-                  />
-                </div>
-                <button
-                  onClick={lookupServiceData}
-                  disabled={capacityLookupBusy}
-                  className="h-10 px-3 bg-torqued-red/10 border border-torqued-red/30 rounded-xl text-[10px] font-black text-torqued-red uppercase hover:bg-torqued-red/20 disabled:opacity-50 shrink-0 flex items-center gap-1"
-                  title="AI auto-fill: fluid capacity, grade, cost & filter cost"
-                >
-                  {capacityLookupBusy ? '…' : '✦ AI Auto-fill'}
-                </button>
-              </div>
-
-              {/* Oil / fluid pricing */}
-              {newPkg.type === 'standard' && (
-                <div className="space-y-2">
-                  <p className="text-[10px] font-black uppercase tracking-widest text-muted">Engine Oil (match vehicle refill capacity)</p>
-                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 items-end">
-                    <Input placeholder="Oil refill capacity (L)" type="number" value={newPkg.oilLitres} onChange={e => setNewPkg({ ...newPkg, oilLitres: e.target.value })} className="bg-background text-foreground" />
-                    <div className="flex gap-1.5 items-end">
-                      <Input placeholder="Oil grade e.g. 5W-30" value={newPkg.oilGrade} onChange={e => setNewPkg({ ...newPkg, oilGrade: e.target.value })} className="bg-background text-foreground flex-1" />
-                      <button
-                        onClick={() => lookupOilPrice(newPkg.oilGrade)}
-                        disabled={oilPriceLookupBusy}
-                        className="h-10 px-2.5 bg-torqued-red/10 border border-torqued-red/30 rounded-xl text-[10px] font-black text-torqued-red uppercase hover:bg-torqued-red/20 disabled:opacity-50 shrink-0 flex items-center gap-1"
-                        title="AI oil price lookup"
-                      >
-                        {oilPriceLookupBusy ? '…' : '✦ AI'}
-                      </button>
-                    </div>
-                    <Input placeholder="$ per litre" type="number" value={newPkg.oilCostPerL} onChange={e => setNewPkg({ ...newPkg, oilCostPerL: e.target.value })} className="bg-background text-foreground" />
-                    {(() => {
-                      const oilCost = (parseFloat(newPkg.oilLitres) || 0) * (parseFloat(newPkg.oilCostPerL) || 0);
-                      const filterCost = parseFloat(newPkg.filterCost) || 0;
-                      const base = parseFloat(newPkg.baseFee) || 0;
-                      const total = base + oilCost + filterCost;
-                      return (
-                        <div className="flex items-center gap-3 flex-wrap">
-                          {oilCost > 0 && <span className="text-xs text-muted">Oil: <span className="font-bold text-foreground">${oilCost.toFixed(2)}</span></span>}
-                          {filterCost > 0 && <span className="text-xs text-muted">Filter: <span className="font-bold text-foreground">${filterCost.toFixed(2)}</span></span>}
-                          {total > 0 && (
-                            <span className="text-xs font-bold text-torqued-red">= ${total.toFixed(2)} total</span>
-                          )}
-                          {total > 0 && (
-                            <button onClick={() => setNewPkg(p => {
-                              const o = (parseFloat(p.oilLitres)||0)*(parseFloat(p.oilCostPerL)||0);
-                              const f = parseFloat(p.filterCost)||0;
-                              return { ...p, price: String(parseFloat(p.baseFee||'0') + o + f) };
-                            })} className="text-[10px] font-bold text-torqued-red underline">Set as price</button>
-                          )}
-                        </div>
-                      );
-                    })()}
-                  </div>
-                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 mt-2">
-                    <Input placeholder="Oil filter cost $" type="number" value={newPkg.filterCost} onChange={e => setNewPkg({ ...newPkg, filterCost: e.target.value })} className="bg-background text-foreground" />
-                  </div>
-                </div>
-              )}
-
-              {/* Transmission service specific fields */}
-              {newPkg.type === 'transmission' && (
-                <div className="space-y-2">
-                  <p className="text-[10px] font-black uppercase tracking-widest text-muted">Transmission Service Costs</p>
-                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
-                    <Input placeholder="Trans fluid capacity (L)" type="number" value={newPkg.transOilLitres} onChange={e => setNewPkg({ ...newPkg, transOilLitres: e.target.value })} className="bg-background text-foreground" />
-                    <Input placeholder="$ per litre trans fluid" type="number" value={newPkg.transOilCostPerL} onChange={e => setNewPkg({ ...newPkg, transOilCostPerL: e.target.value })} className="bg-background text-foreground" />
-                    <Input placeholder="Freight $" type="number" value={newPkg.freight} onChange={e => setNewPkg({ ...newPkg, freight: e.target.value })} className="bg-background text-foreground" />
-                    <Input placeholder="Scan tool fee $" type="number" value={newPkg.scanToolFee} onChange={e => setNewPkg({ ...newPkg, scanToolFee: e.target.value })} className="bg-background text-foreground" />
-                  </div>
-                  {(() => {
-                    const labourCost = (parseFloat(newPkg.baseFee) || cap.labour_rate || 145);
-                    const fluidCost = (parseFloat(newPkg.transOilLitres) || 0) * (parseFloat(newPkg.transOilCostPerL) || 0);
-                    const freight = parseFloat(newPkg.freight) || 0;
-                    const scanTool = parseFloat(newPkg.scanToolFee) || 0;
-                    const total = labourCost + fluidCost + freight + scanTool;
-                    return total > 0 ? (
-                      <div className="p-3 bg-blue-500/5 border border-blue-500/20 rounded-xl space-y-1.5">
-                        <p className="text-[10px] font-black uppercase text-blue-400">Price Breakdown</p>
-                        <div className="space-y-1 text-xs text-muted">
-                          <div className="flex justify-between"><span>Labour (1hr)</span><span className="font-bold text-foreground">${labourCost.toFixed(2)}</span></div>
-                          {fluidCost > 0 && <div className="flex justify-between"><span>Trans fluid ({newPkg.transOilLitres}L × ${newPkg.transOilCostPerL}/L)</span><span className="font-bold text-foreground">${fluidCost.toFixed(2)}</span></div>}
-                          {freight > 0 && <div className="flex justify-between"><span>Freight</span><span className="font-bold text-foreground">${freight.toFixed(2)}</span></div>}
-                          {scanTool > 0 && <div className="flex justify-between"><span>Scan tool fee</span><span className="font-bold text-foreground">${scanTool.toFixed(2)}</span></div>}
-                          <div className="flex justify-between pt-1 border-t border-border font-black text-foreground"><span>Total</span><span className="text-torqued-red">${total.toFixed(2)}</span></div>
-                        </div>
-                        <button onClick={() => setNewPkg(p => ({ ...p, price: String(total) }))} className="text-[10px] font-bold text-torqued-red underline">Set as price</button>
-                      </div>
-                    ) : null;
-                  })()}
-                </div>
-              )}
-
-              {/* Package description */}
-              <div className="space-y-1">
-                <p className="text-[10px] font-black uppercase tracking-widest text-muted">Package Description</p>
-                <textarea
-                  value={newPkg.description}
-                  onChange={e => setNewPkg(p => ({ ...p, description: e.target.value }))}
-                  placeholder="Describe what this service covers…"
-                  rows={2}
-                  className="w-full bg-background border border-border rounded-xl px-3 py-2 text-xs text-foreground focus:outline-none focus:border-torqued-red resize-none"
-                />
-              </div>
-
-              {/* Included items checklist */}
-              <div className="space-y-2">
-                <p className="text-[10px] font-black uppercase tracking-widest text-muted">What's Included / Checked</p>
-                <div className="flex flex-wrap gap-1.5">
-                  {newPkg.includedItems.map((item, i) => (
-                    <span key={i} className="flex items-center gap-1 text-[10px] bg-card border border-border px-2 py-1 rounded-lg text-foreground">
-                      ✓ {item}
-                      <button onClick={() => setNewPkg(p => ({ ...p, includedItems: p.includedItems.filter((_, idx) => idx !== i) }))} className="text-muted hover:text-torqued-red ml-0.5"><X size={10} /></button>
-                    </span>
-                  ))}
-                </div>
-                <div className="flex gap-2">
-                  <input
-                    value={newPkg.newIncludedItem}
-                    onChange={e => setNewPkg(p => ({ ...p, newIncludedItem: e.target.value }))}
-                    onKeyDown={e => { if (e.key === 'Enter' && newPkg.newIncludedItem.trim()) { setNewPkg(p => ({ ...p, includedItems: [...p.includedItems, p.newIncludedItem.trim()], newIncludedItem: '' })); } }}
-                    placeholder="e.g. Engine oil & filter, Tyre pressures, Brake inspection…"
-                    className="flex-1 bg-background border border-border rounded-xl px-3 h-9 text-xs text-foreground focus:outline-none focus:border-torqued-red"
-                  />
-                  <button onClick={() => { if (newPkg.newIncludedItem.trim()) setNewPkg(p => ({ ...p, includedItems: [...p.includedItems, p.newIncludedItem.trim()], newIncludedItem: '' })); }} className="h-9 px-3 bg-card border border-border rounded-xl text-xs font-bold text-foreground hover:border-torqued-red">Add</button>
-                </div>
-              </div>
-
-              {/* Final price field + add button */}
-              <div className="flex gap-3 items-end pt-1">
-                <div className="flex-1">
-                  <Input label="Final Package Price $" type="number" value={newPkg.price} onChange={e => setNewPkg({ ...newPkg, price: e.target.value })} className="bg-background text-foreground" />
-                </div>
-                <Button className="bg-torqued-red text-white h-10 shrink-0" disabled={!newPkg.name || !newPkg.price} onClick={async () => {
-                  const r = await fetch('/api/mechanic/packages', {
-                    method: 'POST', headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({
-                      mechanicId: user!.id, name: newPkg.name, price: parseFloat(newPkg.price),
-                      durationMin: parseInt(newPkg.durationMin) || 60, description: newPkg.description,
-                      pkgType: newPkg.type, includedItems: newPkg.includedItems,
-                      baseFee: newPkg.baseFee, oilGrade: newPkg.oilGrade, oilLitres: newPkg.oilLitres,
-                      oilCostPerL: newPkg.oilCostPerL, filterCost: newPkg.filterCost,
-                      transOilLitres: newPkg.transOilLitres, transOilCostPerL: newPkg.transOilCostPerL,
-                      freight: newPkg.freight, scanToolFee: newPkg.scanToolFee,
-                    }),
-                  });
-                  const d = await r.json();
-                  if (d.package) {
-                    setPackages([...packages, d.package]);
-                    setNewPkg({ name: '', price: '', durationMin: '60', description: '', vehicleRef: '', baseFee: '', oilLitres: '', oilCostPerL: '', oilGrade: '', filterCost: '', includedItems: [], newIncludedItem: '', type: 'standard', transOilLitres: '', transOilCostPerL: '', freight: '', scanToolFee: '' });
-                  }
-                }}><Plus size={14} className="mr-1" /> Add Package</Button>
-              </div>
-            </div>
-          )}
-          {packages.length >= 5 && (
-            <p className="text-xs text-muted italic">Maximum of 5 packages reached. Remove one to add another.</p>
-          )}
-        </Card>
       </div>
     </div>
   );
@@ -3105,12 +2853,15 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
     );
   };
 
+  const renderVehicleHealth = () => <VehicleHealthLookup mechanicId={user?.id} />;
+
   const renderContent = () => {
     switch (activeTab) {
       case 'dashboard': return renderDashboard();
       case 'jobs': return renderMyJobs();
       case 'manual-quotes': return renderIncomingJobs(true);
       case 'customers': return renderCustomers();
+      case 'vehicle-health': return renderVehicleHealth();
       case 'assistant': return renderAssistant();
       case 'payments': return renderPayments();
       case 'parts': return renderParts();

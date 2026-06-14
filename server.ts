@@ -568,8 +568,11 @@ app.post('/api/passkey/register-verify', async (req, res) => {
     const data = challengeToken ? readSigned(challengeToken) : null;
     if (!data || data.kind !== 'pk-reg') return res.status(400).json({ error: 'Registration session expired.' });
     const { verifyRegistrationResponse } = await import('@simplewebauthn/server');
+    const reqOrigin = getOrigin(req);
     const verification = await verifyRegistrationResponse({
-      response, expectedChallenge: data.challenge, expectedOrigin: RP_ORIGIN, expectedRPID: RP_ID,
+      response, expectedChallenge: data.challenge,
+      expectedOrigin: reqOrigin && reqOrigin !== RP_ORIGIN ? [RP_ORIGIN, reqOrigin] : RP_ORIGIN,
+      expectedRPID: RP_ID,
     });
     if (!verification.verified || !verification.registrationInfo) return res.status(400).json({ error: 'Verification failed' });
     const cred = verification.registrationInfo.credential;
@@ -625,8 +628,11 @@ app.post('/api/passkey/auth-verify', async (req, res) => {
     if (!cred) return res.status(404).json({ error: 'Passkey not recognised.' });
 
     const { verifyAuthenticationResponse } = await import('@simplewebauthn/server');
+    const authReqOrigin = getOrigin(req);
     const verification = await verifyAuthenticationResponse({
-      response, expectedChallenge: data.challenge, expectedOrigin: RP_ORIGIN, expectedRPID: RP_ID,
+      response, expectedChallenge: data.challenge,
+      expectedOrigin: authReqOrigin && authReqOrigin !== RP_ORIGIN ? [RP_ORIGIN, authReqOrigin] : RP_ORIGIN,
+      expectedRPID: RP_ID,
       credential: { id: cred.credential_id, publicKey: Buffer.from(cred.public_key, 'base64url'), counter: Number(cred.counter) || 0 },
     });
     if (!verification.verified) return res.status(400).json({ error: 'Verification failed' });
@@ -2810,10 +2816,30 @@ app.get('/api/fleet-prices', async (req, res) => {
       vmRows = await queryVM(firstWord + '%', false);
 
     if (!vmRows?.length) {
-      return res.json({ prices: {}, timingDrive: null, vehicleId: null });
+      // No vehicle_models match — still try to return timing drive from vehicle_specs
+      // so water pump recommendation works even without parts data
+      const { data: specFallback } = await supabase.from('vehicle_specs')
+        .select('cambelt_or_chain').eq('rego', rego).maybeSingle();
+      let fallbackTimingDrive: string | null = null;
+      if (specFallback?.cambelt_or_chain) {
+        const raw = String(specFallback.cambelt_or_chain).toLowerCase();
+        if (raw.includes('belt')) fallbackTimingDrive = 'belt';
+        else if (raw.includes('chain')) fallbackTimingDrive = 'chain';
+        else fallbackTimingDrive = 'na';
+      }
+      const wpMakes = ['volkswagen', 'vw', 'skoda', 'seat', 'audi'];
+      const wpRec = fallbackTimingDrive === 'belt' &&
+        wpMakes.some(m => (custVehicle.make || '').toLowerCase().includes(m));
+      const wpLabourFallback = Math.round(0.5 * 130);
+      return res.json({
+        prices: {}, timingDrive: fallbackTimingDrive, vehicleId: null,
+        waterPumpRecommended: wpRec,
+        waterPump: wpRec ? { partsLow: 150, partsHigh: 250, labourExtra: wpLabourFallback,
+          low: 150 + wpLabourFallback, high: 250 + wpLabourFallback } : null,
+      });
     }
     const vehicleId: string = vmRows[0].id;
-    const timingDrive: string | null = vmRows[0].timing_drive ?? null;
+    let timingDrive: string | null = vmRows[0].timing_drive ?? null;
 
     // 3. Fetch all relevant category IDs in one query
     const slugs = Object.values(FLEET_SERVICE_TO_SLUG);
@@ -2858,7 +2884,7 @@ app.get('/api/fleet-prices', async (req, res) => {
         .select('category_id, hours_low, hours_high')
         .eq('vehicle_id', vehicleId).in('category_id', catIds),
       supabase.from('vehicle_specs')
-        .select('oil_capacity_litres')
+        .select('oil_capacity_litres, cambelt_or_chain')
         .eq('rego', rego).maybeSingle(),
       // Fetch labour rate: specific mechanic if provided, else platform average
       mechanicId
@@ -2879,6 +2905,13 @@ app.get('/api/fleet-prices', async (req, res) => {
     }
 
     const oilCapacity = Number(specRes.data?.oil_capacity_litres) || OIL_CHANGE_DEFAULT_LITRES;
+    // Fall back to vehicle_specs.cambelt_or_chain if vehicle_models didn't carry timing_drive
+    if (!timingDrive && specRes.data?.cambelt_or_chain) {
+      const raw = String(specRes.data.cambelt_or_chain).toLowerCase();
+      if (raw.includes('belt')) timingDrive = 'belt';
+      else if (raw.includes('chain')) timingDrive = 'chain';
+      else timingDrive = 'na';
+    }
 
     // Index labour by category_id for O(1) lookup
     const labourByCat: Record<number, { hl: number; hh: number }> = {};
@@ -2890,45 +2923,70 @@ app.get('/api/fleet-prices', async (req, res) => {
     const oilFilterCatId  = cats.find((c: any) => c.slug === 'oil_filter')?.id          ?? -1;
     const transCatId       = cats.find((c: any) => c.slug === 'transmission_filter')?.id ?? -1;
 
-    const prices: Record<string, { low: number; high: number; midpoint: number }> = {};
+    const prices: Record<string, any> = {};
     for (const row of (partsRes.data ?? []) as any[]) {
       const slug = catIdToSlug[row.category_id];
       const svcId = slug ? slugToServiceId[slug] : null;
       if (!svcId) continue;
 
       // Apply NZ GST to ex-GST trade parts costs
-      const partsLow  = Math.round(Number(row.part_cost_low)  * NZ_GST);
-      const partsHigh = Math.round(Number(row.part_cost_high) * NZ_GST);
+      const pLow  = Math.round(Number(row.part_cost_low)  * NZ_GST);
+      const pHigh = Math.round(Number(row.part_cost_high) * NZ_GST);
+      const lt = labourByCat[row.category_id];
 
-      let low: number;
-      let high: number;
+      let low: number, high: number, lLow = 0, lHigh = 0, lHours: string | null = null;
 
       if (row.category_id === oilFilterCatId) {
         // Oil Change: oil consumables (retail incl GST) + filter (incl GST) + 1hr labour + sundries
         const oilLow  = Math.round(oilCapacity * OIL_COST_PER_LITRE_LOW);
         const oilHigh = Math.round(oilCapacity * OIL_COST_PER_LITRE_HIGH);
-        low  = oilLow  + partsLow  + NZD_LABOUR_RATE + OIL_CHANGE_SUNDRIES;
-        high = oilHigh + partsHigh + NZD_LABOUR_RATE + OIL_CHANGE_SUNDRIES;
+        lLow = lHigh = NZD_LABOUR_RATE;
+        low  = oilLow  + pLow  + NZD_LABOUR_RATE + OIL_CHANGE_SUNDRIES;
+        high = oilHigh + pHigh + NZD_LABOUR_RATE + OIL_CHANGE_SUNDRIES;
+        lHours = '1.0–1.0';
       } else if (row.category_id === transCatId) {
         // Transmission Service: parts (incl GST) + labour + freight + sundries + scan fee
-        const labour     = labourByCat[row.category_id];
-        const labourLow  = labour ? Math.round(labour.hl * NZD_LABOUR_RATE) : 0;
-        const labourHigh = labour ? Math.round(labour.hh * NZD_LABOUR_RATE) : 0;
-        const extras     = TRANS_FREIGHT + TRANS_SUNDRIES + TRANS_SCAN_FEE; // $45
-        low  = partsLow  + labourLow  + extras;
-        high = partsHigh + labourHigh + extras;
+        lLow  = lt ? Math.round(lt.hl * NZD_LABOUR_RATE) : 0;
+        lHigh = lt ? Math.round(lt.hh * NZD_LABOUR_RATE) : 0;
+        lHours = lt ? `${lt.hl.toFixed(1)}–${lt.hh.toFixed(1)}` : null;
+        const extras = TRANS_FREIGHT + TRANS_SUNDRIES + TRANS_SCAN_FEE;
+        low  = pLow  + lLow  + extras;
+        high = pHigh + lHigh + extras;
       } else {
         // All other services: parts (incl GST) + labour from labour_times
-        const labour     = labourByCat[row.category_id];
-        const labourLow  = labour ? Math.round(labour.hl * NZD_LABOUR_RATE) : 0;
-        const labourHigh = labour ? Math.round(labour.hh * NZD_LABOUR_RATE) : 0;
-        low  = partsLow  + labourLow;
-        high = partsHigh + labourHigh;
+        lLow  = lt ? Math.round(lt.hl * NZD_LABOUR_RATE) : 0;
+        lHigh = lt ? Math.round(lt.hh * NZD_LABOUR_RATE) : 0;
+        lHours = lt ? `${lt.hl.toFixed(1)}–${lt.hh.toFixed(1)}` : null;
+        low  = pLow  + lLow;
+        high = pHigh + lHigh;
       }
 
-      prices[svcId] = { low, high, midpoint: Math.round((low + high) / 2) };
+      prices[svcId] = {
+        low, high, midpoint: Math.round((low + high) / 2),
+        partsLow: pLow, partsHigh: pHigh,
+        labourLow: lLow, labourHigh: lHigh,
+        labourHours: lHours,
+      };
     }
-    res.json({ prices, timingDrive, vehicleId });
+
+    // Water pump recommendation: true when timing_drive is 'belt' and make is VW/Skoda/Seat/Audi
+    // (belt-driven water pump engines where replacement is standard practice alongside cambelt).
+    // This list expands as we get better engine-family data.
+    const wpMakes = ['volkswagen', 'vw', 'skoda', 'seat', 'audi'];
+    const waterPumpRecommended = timingDrive === 'belt' &&
+      wpMakes.some(m => (custVehicle.make || '').toLowerCase().includes(m));
+    // Indicative water pump add-on (NZD incl GST): ~$150–250 parts, 0.5 hr extra labour
+    const wpPartsLow  = 150;
+    const wpPartsHigh = 250;
+    const wpLabour    = Math.round(0.5 * NZD_LABOUR_RATE);
+    res.json({
+      prices, timingDrive, vehicleId,
+      waterPumpRecommended,
+      waterPump: waterPumpRecommended
+        ? { partsLow: wpPartsLow, partsHigh: wpPartsHigh, labourExtra: wpLabour,
+            low: wpPartsLow + wpLabour, high: wpPartsHigh + wpLabour }
+        : null,
+    });
   } catch (err) {
     console.error('[fleet-prices]', err);
     res.json({ prices: {}, timingDrive: null, vehicleId: null });
@@ -3039,36 +3097,114 @@ How to respond:
   }
 });
 
-// POST /api/ai/health-insights — live vehicle health insights from real mileage + history
+// POST /api/ai/health-insights — live vehicle health insights from real mileage + history.
+// Also accepts ?mechanic_id=<uuid> to restrict to vehicles that have come through that mechanic.
 app.post('/api/ai/health-insights', async (req, res) => {
   try {
-    const { rego, make, model, year, mileage, history } = req.body;
+    const { rego, make, model, year, mileage, history: clientHistory, mechanic_id } = req.body;
     if (!process.env.ANTHROPIC_API_KEY) return res.status(503).json({ error: 'AI not configured (add Anthropic API key).' });
-    const prompt = `You are an NZ vehicle maintenance analyst. Vehicle: ${year || ''} ${make || ''} ${model || ''} (${rego || ''}), odometer ${mileage || 'unknown'} km.
-Service history (most recent first): ${JSON.stringify((history || []).slice(0, 20))}.
+
+    const supabase = getSupabaseAdmin();
+    const formattedRego = rego ? String(rego).toUpperCase().trim() : null;
+
+    // When called from the mechanic portal: verify the vehicle has come through this mechanic
+    // (cold quote recipient, future booking, or completed job).
+    if (mechanic_id && formattedRego && supabase) {
+      const { data: rel } = await supabase
+        .from('bookings')
+        .select('id')
+        .eq('mechanic_id', mechanic_id)
+        .eq('vehicle_rego', formattedRego)
+        .limit(1).maybeSingle();
+      if (!rel) return res.status(403).json({ error: 'This vehicle has not come through your system.' });
+    }
+
+    // Fetch authoritative history from the DB for the given rego (ignores stale client-provided history).
+    let history = clientHistory ?? [];
+    if (supabase && formattedRego) {
+      const [histRes, jobsRes] = await Promise.all([
+        supabase.from('vehicle_history')
+          .select('service_date, work_done, mileage, provider')
+          .eq('rego', formattedRego)
+          .order('service_date', { ascending: false }).limit(20),
+        supabase.from('bookings')
+          .select('service_ids, completed_at, mileage_out')
+          .eq('vehicle_rego', formattedRego)
+          .eq('status', 'completed')
+          .order('completed_at', { ascending: false }).limit(10),
+      ]);
+      const dbHistory: any[] = histRes.data ?? [];
+      const jobHistory = (jobsRes.data ?? []).map((j: any) => ({
+        service_date: j.completed_at?.slice(0, 10) || null,
+        work_done: ((j.service_ids || []) as string[]).map((id: string) => SERVICE_NAMES[id] || id).join(', ') || 'Torqued service',
+        mileage: j.mileage_out ?? null,
+        provider: 'Torqued',
+      }));
+      const combined = [...dbHistory, ...jobHistory]
+        .sort((a, b) => (b.service_date || '').localeCompare(a.service_date || ''))
+        .slice(0, 20);
+      if (combined.length > 0) history = combined;
+    }
+
+    // Also look up the vehicle record for make/model/year/mileage if not supplied
+    let resolvedMake = make, resolvedModel = model, resolvedYear = year, resolvedMileage = mileage;
+    if (supabase && formattedRego && (!make || !model)) {
+      const { data: veh } = await supabase.from('vehicles')
+        .select('make, model, year, mileage').eq('rego', formattedRego).single();
+      if (veh) {
+        resolvedMake = resolvedMake || veh.make;
+        resolvedModel = resolvedModel || veh.model;
+        resolvedYear = resolvedYear || veh.year;
+        resolvedMileage = resolvedMileage || veh.mileage;
+      }
+    }
+
+    const hasHistory = history.length > 0;
+    const historyNote = hasHistory
+      ? `Service history (most recent first): ${JSON.stringify(history.slice(0, 20))}.`
+      : `No service history on file. Base insights on the vehicle's age and mileage alone; use "due" or "overdue" rather than "good" for anything that cannot be confirmed as recently done. Flag the lack of records clearly in each detail.`;
+
+    const km = Number(resolvedMileage) || 0;
+    const prompt = `You are an NZ vehicle maintenance analyst. Vehicle: ${resolvedYear || ''} ${resolvedMake || ''} ${resolvedModel || ''} (${formattedRego || ''}), current odometer ${km || 'unknown'} km.
+${historyNote}
+
+Torqued's service intervals (use these EXACT values — do not invent your own):
+- Oil & Filter: every 10,000 km OR 12 months, whichever comes first
+- Cambelt: every 100,000 km OR 60 months (5 years), whichever comes first. Chain-driven engines are "info" (no action needed).
+- Transmission fluid: every 60,000 km OR 48 months (4 years), whichever comes first
+- Brake inspection: every 20,000 km OR 12 months
+- Wheel alignment: every 20,000 km OR 12 months
+
+CRITICAL calculation rules — apply these before writing any insight:
+1. Find the km at which the last service was done (from history). Call it last_km.
+2. km_since_last = current_odometer − last_km. This is NOT how overdue the service is.
+3. km_remaining = km_interval − km_since_last. If km_remaining > 0 the vehicle is within the km interval.
+4. A service is "overdue" by km ONLY if km_since_last >= km_interval. Otherwise it is NOT overdue by km.
+5. If a date-based record exists, check the date interval separately. Only call "overdue" if BOTH or EITHER clearly exceed their interval.
+6. Never say "X km over" or "X km past" when km_since_last < km_interval — instead say "Good for another ~X km" or "Last done at Y km, next due at Z km."
 
 You MUST return exactly one insight for EACH of these five services, in this order:
-1. Oil Service — typical interval 10,000–15,000 km or 12 months (whichever comes first)
-2. Cambelt & Water Pump — check if belt-driven; typical interval 100,000 km or 5–7 years
-3. Transmission Fluid — typical interval 60,000–80,000 km or 3–4 years
-4. Brake Inspection — annually or every 20,000 km
-5. Wheel Alignment — annually or after any suspension work / kerb impact
+1. Oil & Filter — interval: 10,000 km / 12 months
+2. Cambelt — interval: 100,000 km / 60 months (skip if chain-driven, use severity "info")
+3. Transmission Fluid — interval: 60,000 km / 48 months
+4. Brake Inspection — interval: 20,000 km / 12 months
+5. Wheel Alignment — interval: 20,000 km / 12 months
 
-Then add 1–2 additional insights for anything else due or noteworthy (e.g. cabin filter, coolant, battery age).
+Then add 1–2 additional insights for anything else noteworthy (e.g. cabin filter, coolant, battery age, spark plugs).
 
-For each, use severity:
-  "good"    = done recently and clearly within service interval
-  "due"     = approaching interval (within 10%) or no record but vehicle is newer/low km
-  "overdue" = interval clearly exceeded based on mileage or history, or no record on a high-mileage vehicle
-  "info"    = timing drive is chain (no cambelt needed), EV (no oil changes), or other non-applicable note
+Severity rules:
+  "good"    = clearly within interval by both km and date
+  "due"     = within 10% of interval (km or date) — approaching but not yet overdue
+  "overdue" = km_since_last >= km_interval OR date interval clearly exceeded — use only when genuinely overdue
+  "info"    = chain-driven engine (no cambelt), EV (no oil), or other non-applicable note
 
-Return ONLY valid JSON (no markdown): {"insights":[{"title":"short label","detail":"1 NZ-specific practical sentence mentioning km or months","severity":"good|due|overdue|info"}]}`;
+Return ONLY valid JSON (no markdown): {"insights":[{"title":"short label","detail":"1–2 NZ-specific sentences. Must include next-due km or date where calculable.","severity":"good|due|overdue|info"}]}`;
 
     const raw = await callClaudeChat([{ role: 'user', content: prompt }], 800, true, false);
     const text = raw.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/,'').trim();
     let parsed: any = {};
     try { parsed = JSON.parse(text); } catch { return res.status(422).json({ error: 'Could not parse insights', raw: text.slice(0, 200) }); }
-    res.json({ insights: Array.isArray(parsed.insights) ? parsed.insights : [] });
+    res.json({ insights: Array.isArray(parsed.insights) ? parsed.insights : [], hasHistory });
   } catch (err: any) {
     console.error('[ai/health-insights]', err);
     res.status(500).json({ error: err?.message || 'Insights failed' });
@@ -3973,6 +4109,26 @@ app.post('/api/customer/add-vehicle', async (req, res) => {
   } catch (err) {
     console.error('[customer/add-vehicle]', err);
     res.status(500).json({ error: 'Could not add vehicle' });
+  }
+});
+
+// POST /api/customer/remove-vehicle — detach a plate from a customer's account.
+// Preserves all vehicle_history rows; just clears owner_id so a new owner can claim the plate.
+app.post('/api/customer/remove-vehicle', async (req, res) => {
+  try {
+    const { ownerId, rego } = req.body;
+    if (!ownerId || !rego) return res.status(400).json({ error: 'ownerId and rego are required' });
+    const supabase = getSupabaseAdmin();
+    if (!supabase) return res.status(500).json({ error: 'Database not configured' });
+    const formattedRego = (rego as string).toUpperCase().trim();
+    const { data: vehicle } = await supabase.from('vehicles').select('owner_id').eq('rego', formattedRego).single();
+    if (!vehicle) return res.status(404).json({ error: 'Vehicle not found' });
+    if (vehicle.owner_id !== ownerId) return res.status(403).json({ error: 'Not authorised to remove this vehicle' });
+    await supabase.from('vehicles').update({ owner_id: null }).eq('rego', formattedRego);
+    res.json({ success: true });
+  } catch (err) {
+    console.error('[customer/remove-vehicle]', err);
+    res.status(500).json({ error: 'Could not remove vehicle' });
   }
 });
 
