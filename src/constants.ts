@@ -1,56 +1,20 @@
 import { Mechanic, Service, Vehicle } from './types';
 
 export const SERVICES: Service[] = [
-  { id: 'oil', name: 'Oil Change', icon: '🔧', basePrice: 180, category: 'maintenance' },
-  { 
-    id: 'wof', 
-    name: 'Warrant of Fitness', 
-    icon: '📋', 
-    basePrice: 65,
-    category: 'inspection'
-  },
-  { 
-    id: 'full', 
-    name: 'Full Service', 
-    icon: '🚗', 
-    basePrice: 350,
-    category: 'maintenance'
-  },
-  { 
-    id: 'brakes_front_pads', 
-    name: 'Front Brake Pads', 
-    icon: '🛑', 
-    basePrice: 220,
-    category: 'repair'
-  },
-  { 
-    id: 'brakes_front_rotors', 
-    name: 'Front Rotors & Pads', 
-    icon: '🛑', 
-    basePrice: 580,
-    category: 'repair'
-  },
-  { 
-    id: 'brakes_rear_pads', 
-    name: 'Rear Brake Pads', 
-    icon: '🛑', 
-    basePrice: 190,
-    category: 'repair'
-  },
-  { 
-    id: 'brakes_rear_rotors', 
-    name: 'Rear Rotors & Pads', 
-    icon: '🛑', 
-    basePrice: 480,
-    category: 'repair'
-  },
-  { id: 'timing', name: 'Cambelt / Timing Chain', icon: '⚙️', basePrice: 2289, category: 'maintenance' },
-  { id: 'transmission', name: 'Transmission Service', icon: '⚙️', basePrice: 621, category: 'maintenance' },
-  { id: 'battery', name: 'Battery (12V)', icon: '🔋', basePrice: 280, category: 'repair' },
+  { id: 'oil', name: 'Standard Service', icon: '🔧', basePrice: 0, category: 'maintenance' },
+  { id: 'wof', name: 'Warrant of Fitness', icon: '📋', basePrice: 0, category: 'inspection' },
+  { id: 'full', name: 'Full Service', icon: '🚗', basePrice: 0, category: 'maintenance' },
+  { id: 'brakes_front_pads', name: 'Front Brake Pads', icon: '🛑', basePrice: 0, category: 'repair' },
+  { id: 'brakes_front_rotors', name: 'Front Rotors & Pads', icon: '🛑', basePrice: 0, category: 'repair' },
+  { id: 'brakes_rear_pads', name: 'Rear Brake Pads', icon: '🛑', basePrice: 0, category: 'repair' },
+  { id: 'brakes_rear_rotors', name: 'Rear Rotors & Pads', icon: '🛑', basePrice: 0, category: 'repair' },
+  { id: 'timing', name: 'Cambelt / Timing Chain', icon: '⚙️', basePrice: 0, category: 'maintenance' },
+  { id: 'transmission', name: 'Transmission Service', icon: '⚙️', basePrice: 0, category: 'maintenance' },
+  { id: 'battery', name: 'Battery (12V)', icon: '🔋', basePrice: 0, category: 'repair' },
   { id: 'diag_inspection', name: 'Diagnostic Inspection', icon: '🔍', basePrice: 99, category: 'inspection' },
-  { id: 'spark_plugs', name: 'Spark Plugs', icon: '🔌', basePrice: 240, category: 'maintenance' },
-  { id: 'cabin_filter', name: 'Cabin Air Filter', icon: '🌬️', basePrice: 110, category: 'maintenance' },
-  { id: 'brake_fluid', name: 'Brake Fluid Flush', icon: '🧪', basePrice: 145, category: 'maintenance' },
+  { id: 'spark_plugs', name: 'Spark Plugs', icon: '🔌', basePrice: 0, category: 'maintenance' },
+  { id: 'cabin_filter', name: 'Cabin Air Filter', icon: '🌬️', basePrice: 0, category: 'maintenance' },
+  { id: 'brake_fluid', name: 'Brake Fluid Flush', icon: '🧪', basePrice: 0, category: 'maintenance' },
 ];
 
 export const MOCK_MECHANICS: Mechanic[] = [

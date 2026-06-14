@@ -317,7 +317,7 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
   const [isSearchingRego, setIsSearchingRego] = useState(false);
   const [vehicle, setVehicle] = useState<Vehicle | null>(null);
   const [mileage, setMileage] = useState<string>('');
-  const [quotePath, setQuotePath] = useState<'service' | 'fault' | null>(null);
+  const [quotePath, setQuotePath] = useState<'service' | 'fault' | null>('service');
   const [selectedServices, setSelectedServices] = useState<string[]>([]);
   const [faultCode, setFaultCode] = useState('');
   const [aiTranslation, setAiTranslation] = useState('');
@@ -343,6 +343,7 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
   const [selectedDate, setSelectedDate] = useState<string>('2026-04-23'); // Default to Thursday (2 days from Tuesday)
   const [selectedTime, setSelectedTime] = useState<string>('09:00');
   const [estimatedReadyTime, setEstimatedReadyTime] = useState<string>('5:00 PM');
+  const [collectNextDay, setCollectNextDay] = useState(false);
   
   // New user / history state
   const [isNewVehicle, setIsNewVehicle] = useState(false);
@@ -441,6 +442,9 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
   const [customSearchDone, setCustomSearchDone] = useState(false);
   const [customSearchLoading, setCustomSearchLoading] = useState(false);
   const [carjamVehicle, setCarjamVehicle] = useState<{ make: string; model: string; year: number; bodyType: string; fuel: string } | null>(null);
+  const [vehicleModelSpec, setVehicleModelSpec] = useState<{ engine_code: string | null; engine_cc: number | null; fuel: string | null; transmission: string | null; timing_drive: string | null; submodel?: string | null } | null>(null);
+  const [vehicleModelOptions, setVehicleModelOptions] = useState<any[]>([]);
+  const [showSubmodelPicker, setShowSubmodelPicker] = useState(false);
   const [quoteFallbackCategoryId, setQuoteFallbackCategoryId] = useState<number | null>(null);
 
   useEffect(() => {
@@ -596,6 +600,21 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
       setActiveJobs(mapped);
     } catch { /* keep local jobs */ }
   };
+  // Sync vehicle list from server when garage unlocks — clears stale cached vehicles
+  useEffect(() => {
+    if (!garageUnlocked || !customerOwnerId) return;
+    fetch(`/api/customer/vehicles?ownerId=${encodeURIComponent(customerOwnerId)}`)
+      .then(r => r.ok ? r.json() : null)
+      .then(d => {
+        if (d?.vehicles) {
+          const fresh = d.vehicles.map((r: any) => ({ id: r.rego, rego: r.rego, make: r.make, model: r.model, year: r.year, variant: r.variant ?? undefined, mileage: r.mileage ?? 0, thumbnail: r.thumbnail ?? undefined }));
+          setGarageVehicles(fresh);
+          persistCustomerSession({ ownerId: customerOwnerId, email: customerEmail, rego: fresh[0]?.rego ?? '', vehicles: fresh });
+        }
+      }).catch(() => {});
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [garageUnlocked, customerOwnerId]);
+
   useEffect(() => { if (garageUnlocked) loadCustomerBookings(); /* eslint-disable-next-line */ }, [garageUnlocked, customerOwnerId, garageVehicles.length]);
 
   // Auto-select the first non-archived vehicle when the garage opens so service history shows immediately
@@ -694,7 +713,7 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
     const t = setTimeout(async () => {
       try {
         if (window.confirm('Booking confirmed! 🎉\n\nWant faster access next time? Create a passkey to sign in with Face ID / Touch ID — no email link needed.')) {
-          await registerPasskey('customer', plate);
+          await registerPasskey('customer', customerEmail || plate);
           window.alert('Passkey created. Next time you enter your plate, just tap "Verify with Face / Touch ID".');
         }
       } catch { /* cancelled — magic link still works */ }
@@ -1110,6 +1129,23 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
       };
       setVehicle(v);
       setMileage((data.mileage ?? 0).toString());
+      setVehicleModelSpec(null);
+      setVehicleModelOptions([]);
+      setShowSubmodelPicker(false);
+      // Look up engine/gearbox spec from vehicle_models DB
+      if (data.make && data.model && data.year) {
+        fetch(`/api/vehicles/lookup?make=${encodeURIComponent(data.make)}&model=${encodeURIComponent(data.model)}&year=${encodeURIComponent(data.year)}`)
+          .then(r => r.ok ? r.json() : null)
+          .then((d: any) => {
+            const results = d?.results ?? [];
+            if (results.length === 1) {
+              setVehicleModelSpec(results[0]);
+            } else if (results.length > 1) {
+              setVehicleModelOptions(results);
+              setShowSubmodelPicker(true);
+            }
+          }).catch(() => {});
+      }
 
       setUserName(userProfile?.name || null);
       // Per-vehicle service pricing and oil specs from the DB
@@ -2097,7 +2133,30 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                   <div className="flex-1 text-center sm:text-left">
                     <div className="torqued-badge mb-1">{vehicle.rego}</div>
                     <h3 className="text-xl sm:text-2xl">{vehicle.year} {vehicle.make} {vehicle.model}</h3>
-                    <p className="text-xs sm:text-sm text-muted">{vehicle.variant}</p>
+                    {vehicle.variant && <p className="text-xs sm:text-sm text-muted">{vehicle.variant}</p>}
+                    {vehicleModelSpec && (
+                      <div className="mt-1.5 flex flex-wrap gap-1.5 justify-center sm:justify-start">
+                        {vehicleModelSpec.engine_cc && <span className="text-[10px] font-bold bg-torqued-red/10 text-torqued-red px-2 py-0.5 rounded-full">{(vehicleModelSpec.engine_cc / 1000).toFixed(1)}L {vehicleModelSpec.fuel || ''}</span>}
+                        {vehicleModelSpec.engine_code && <span className="text-[10px] font-bold bg-card border border-border text-muted px-2 py-0.5 rounded-full">{vehicleModelSpec.engine_code}</span>}
+                        {vehicleModelSpec.transmission && <span className="text-[10px] font-bold bg-card border border-border text-muted px-2 py-0.5 rounded-full">{vehicleModelSpec.transmission}</span>}
+                        {vehicleModelSpec.timing_drive && <span className="text-[10px] font-bold bg-card border border-border text-muted px-2 py-0.5 rounded-full">Timing {vehicleModelSpec.timing_drive}</span>}
+                        <button onClick={() => { setShowSubmodelPicker(true); setVehicleModelSpec(null); }} className="text-[10px] font-bold text-muted hover:text-foreground underline">change</button>
+                      </div>
+                    )}
+                    {showSubmodelPicker && !vehicleModelSpec && vehicleModelOptions.length > 0 && (
+                      <div className="mt-2 space-y-1.5 w-full text-left">
+                        <p className="text-[10px] font-black uppercase tracking-widest text-muted">Confirm your variant</p>
+                        {vehicleModelOptions.map((opt: any, i: number) => (
+                          <button
+                            key={i}
+                            onClick={() => { setVehicleModelSpec(opt); setShowSubmodelPicker(false); }}
+                            className="w-full text-left px-3 py-2 rounded-xl border border-border hover:border-torqued-red/40 bg-background hover:bg-card transition-all"
+                          >
+                            <span className="text-xs font-bold text-foreground">{opt.submodel || opt.model}{opt.engine_code ? ` · ${opt.engine_code}` : ''}{opt.engine_cc ? ` · ${(opt.engine_cc / 1000).toFixed(1)}L` : ''}{opt.transmission ? ` · ${opt.transmission}` : ''}</span>
+                          </button>
+                        ))}
+                      </div>
+                    )}
                   </div>
                   <CheckCircle2 className="hidden sm:block ml-auto text-green-500" size={32} />
                 </Card>
@@ -2165,10 +2224,10 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                           </div>
                           
                           <div className="space-y-2">
-                            <label className="text-xs font-bold uppercase tracking-wider text-white/50">Service History (Optional)</label>
+                            <label className="text-xs font-bold uppercase tracking-wider text-muted">Service History (Optional)</label>
                             <div className="space-y-2">
                               {manualHistory.map((item, i) => (
-                                <div key={i} className="flex justify-between items-center p-2 bg-white/5 rounded-lg text-xs">
+                                <div key={i} className="flex justify-between items-center p-2 bg-card rounded-lg text-xs">
                                   <div className="space-y-0.5">
                                     <div className="font-bold">{item.date} - {item.service}</div>
                                     <div className="opacity-60 flex gap-2">
@@ -2210,43 +2269,43 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                               {receiptError && <p className="text-[10px] text-torqued-red font-bold">{receiptError}</p>}
 
                               {showHistoryEntry && (
-                                <div className="p-3 bg-white/5 rounded-xl space-y-2 border border-white/10">
-                                  <Input 
-                                    label="Service Date" 
-                                    type="date" 
-                                    className="h-8 text-xs bg-white/5 border-white/10" 
+                                <div className="p-3 bg-card rounded-xl space-y-2 border border-border">
+                                  <Input
+                                    label="Service Date"
+                                    type="date"
+                                    className="h-8 text-xs bg-background border-border"
                                     value={entryDate}
                                     onChange={(e) => setEntryDate(e.target.value)}
                                   />
-                                  <Input 
-                                    label="Service Performed" 
-                                    placeholder="Oil change..." 
-                                    className="h-8 text-xs bg-white/5 border-white/10" 
+                                  <Input
+                                    label="Service Performed"
+                                    placeholder="Oil change..."
+                                    className="h-8 text-xs bg-background border-border"
                                     value={entryService}
                                     onChange={(e) => setEntryService(e.target.value)}
                                   />
-                                  <Input 
-                                    label="Mileage (km)" 
-                                    placeholder="E.g. 85000" 
+                                  <Input
+                                    label="Mileage (km)"
+                                    placeholder="E.g. 85000"
                                     type="number"
-                                    className="h-8 text-xs bg-white/5 border-white/10" 
+                                    className="h-8 text-xs bg-background border-border"
                                     value={entryMileage}
                                     onChange={(e) => setEntryMileage(e.target.value)}
                                   />
                                   <div className="relative">
-                                    <Input 
-                                      label="Provider" 
-                                      placeholder="Precision Mech..." 
-                                      className="h-8 text-xs bg-white/5 border-white/10" 
+                                    <Input
+                                      label="Provider"
+                                      placeholder="Precision Mech..."
+                                      className="h-8 text-xs bg-background border-border"
                                       value={entryProvider}
                                       onChange={(e) => setEntryProvider(e.target.value)}
                                     />
                                     {filteredProviders.length > 0 && (
-                                      <div className="absolute z-10 w-full bg-torqued-dark border border-white/10 rounded-lg mt-1 shadow-lg overflow-hidden">
+                                      <div className="absolute z-10 w-full bg-card border border-border rounded-lg mt-1 shadow-lg overflow-hidden">
                                         {filteredProviders.map(p => (
                                           <button
                                             key={p}
-                                            className="w-full text-left px-3 py-1.5 text-[10px] hover:bg-torqued-red/5 hover:text-torqued-red transition-all border-b border-white/5 last:border-0"
+                                            className="w-full text-left px-3 py-1.5 text-[10px] hover:bg-torqued-red/5 hover:text-torqued-red transition-all border-b border-border last:border-0"
                                             onClick={() => setEntryProvider(p)}
                                           >
                                             {p}
@@ -2293,75 +2352,18 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
             className="space-y-8"
           >
             <div className="flex items-center gap-4">
-              <button onClick={() => setStep(1)} className="p-2 hover:bg-white/5 rounded-full transition-all">
+              <button onClick={() => setStep(1)} className="p-2 hover:bg-card rounded-full transition-all">
                 <ArrowLeft size={24} />
               </button>
               <div className="space-y-1">
                 <h2 className="text-2xl sm:text-3xl md:text-4xl">Step 2: What Do You Need?</h2>
-                <p className="text-sm sm:text-base text-white/60">
+                <p className="text-sm sm:text-base text-muted">
                   Select a standard service or describe a problem.
                 </p>
               </div>
             </div>
 
-            {!quotePath ? (
-              <div className="space-y-6">
-              {suggestedJobs.length > 0 && (
-                <div className="p-4 bg-torqued-red/5 border border-torqued-red/10 rounded-2xl space-y-3">
-                  <div className="flex items-center gap-2 text-torqued-red font-bold uppercase tracking-widest text-[10px]">
-                    <AlertTriangle size={14} /> {`Recommended for your mileage (${mileage} km)`}
-                  </div>
-                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-                    {suggestedJobs.map(id => {
-                      const service = SERVICES.find(s => s.id === id);
-                      if (!service) return null;
-                      return (
-                        <button
-                          key={id}
-                          onClick={() => {
-                            setQuotePath('service');
-                            if (!selectedServices.includes(id)) toggleService(id);
-                          }}
-                          className="flex items-center justify-between p-3 bg-card border border-border rounded-xl hover:bg-torqued-red/5 hover:border-torqued-red/30 transition-all text-left"
-                        >
-                          <div className="flex items-center gap-2">
-                            <span className="text-xl">{service.icon}</span>
-                            <span className="text-xs font-bold uppercase">{serviceDisplayName(service.id, service.name)}</span>
-                          </div>
-                          <Plus size={14} className="text-torqued-red" />
-                        </button>
-                      );
-                    })}
-                  </div>
-                </div>
-              )}
-
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-3 sm:gap-4">
-                <Card 
-                  hoverable 
-                  className="p-6 sm:p-10 text-center space-y-4 border-border bg-card active:scale-95 transition-transform"
-                  onClick={() => setQuotePath('service')}
-                >
-                  <div className="w-16 h-16 bg-torqued-red/5 rounded-full flex items-center justify-center mx-auto ring-1 ring-torqued-red/10">
-                    <Wrench size={28} className="text-torqued-red" />
-                  </div>
-                  <h3 className="text-2xl sm:text-3xl tracking-tight">I know what I need</h3>
-                  <p className="text-sm text-muted">Select from common services like Oil Change or WOF.</p>
-                </Card>
-                <Card 
-                  hoverable 
-                  className="p-6 sm:p-10 text-center space-y-4 border-border bg-card active:scale-95 transition-transform"
-                  onClick={() => setQuotePath('fault')}
-                >
-                  <div className="w-16 h-16 bg-torqued-red/5 rounded-full flex items-center justify-center mx-auto ring-1 ring-torqued-red/10">
-                    <AlertTriangle size={28} className="text-torqued-red" />
-                  </div>
-                  <h3 className="text-2xl sm:text-3xl tracking-tight">I have a problem</h3>
-                  <p className="text-sm text-muted">Describe symptoms or enter a diagnostic fault code.</p>
-                </Card>
-              </div>
-            </div>
-            ) : quotePath === 'service' ? (
+            {quotePath === 'service' ? (
               <div className="space-y-6">
                 <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-3">
                   {SERVICES.map(service => {
@@ -2375,18 +2377,18 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                           "p-4 rounded-xl border text-left transition-all flex flex-col gap-2",
                           selected
                             ? "border-torqued-red bg-torqued-red/10 text-torqued-red"
-                            : "border-white/10 bg-white/5 hover:border-white/20"
+                            : "border-border bg-card hover:border-border/60 text-foreground"
                         )}
                       >
                         <div className="flex flex-col items-center gap-1 w-full text-center">
                           <span className="text-2xl">{service.icon}</span>
                           <span className="text-xs font-bold uppercase tracking-tight leading-tight">{serviceDisplayName(service.id, service.name)}</span>
-                          {fp && <span className="text-[10px] opacity-70">${fp.high}</span>}
+                          {fp && <span className="text-[10px] text-muted">${fp.high}</span>}
                         </div>
                         {selected && fp && (fp.partsLow > 0 || fp.labourLow > 0) && (
-                          <div className="w-full border-t border-white/10 pt-2 space-y-0.5">
-                            {fp.partsLow > 0 && <div className="flex justify-between text-[10px] opacity-60"><span>Parts</span><span>${fp.partsHigh}</span></div>}
-                            {fp.labourLow > 0 && <div className="flex justify-between text-[10px] opacity-60"><span>Labour{fp.labourHours ? ` (${fp.labourHours} hrs)` : ''}</span><span>${fp.labourLow}</span></div>}
+                          <div className="w-full border-t border-border pt-2 space-y-0.5">
+                            {fp.partsLow > 0 && <div className="flex justify-between text-[10px] text-muted"><span>Parts</span><span>${fp.partsHigh}</span></div>}
+                            {fp.labourLow > 0 && <div className="flex justify-between text-[10px] text-muted"><span>Labour{fp.labourHours ? ` (${fp.labourHours} hrs)` : ''}</span><span>${fp.labourLow}</span></div>}
                           </div>
                         )}
                       </button>
@@ -2394,16 +2396,41 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                   })}
                 </div>
 
+                {/* Service comparison card — shown when Standard Service or Full Service is selected */}
+                {(selectedServices.includes('oil') || selectedServices.includes('full')) && (
+                  <div className="p-4 bg-card border border-border rounded-xl space-y-3">
+                    <p className="text-[10px] font-black uppercase tracking-widest text-muted">What's included</p>
+                    <div className="grid grid-cols-2 gap-3">
+                      <div className={cn("p-3 rounded-lg border space-y-2 transition-all", selectedServices.includes('oil') ? "border-torqued-red bg-torqued-red/5" : "border-border opacity-60")}>
+                        <p className="text-xs font-black uppercase tracking-tight text-foreground">Standard Service</p>
+                        <ul className="space-y-1">
+                          {['Oil & filter change', 'Check all fluid levels', 'Tyre pressure inspection', 'General safety inspection'].map(item => (
+                            <li key={item} className="text-[10px] text-muted flex items-start gap-1"><span className="text-torqued-red mt-0.5">✓</span>{item}</li>
+                          ))}
+                        </ul>
+                      </div>
+                      <div className={cn("p-3 rounded-lg border space-y-2 transition-all", selectedServices.includes('full') ? "border-torqued-red bg-torqued-red/5" : "border-border opacity-60")}>
+                        <p className="text-xs font-black uppercase tracking-tight text-foreground">Full Service</p>
+                        <ul className="space-y-1">
+                          {['Everything in Standard', 'Air filter inspection', 'Visual drive belt check', 'Cooling system check', '12V battery test', 'Test drive report'].map(item => (
+                            <li key={item} className="text-[10px] text-muted flex items-start gap-1"><span className="text-torqued-red mt-0.5">✓</span>{item}</li>
+                          ))}
+                        </ul>
+                      </div>
+                    </div>
+                  </div>
+                )}
+
                 {/* Water pump recommendation card — belt-driven VW/Audi/Skoda/Seat */}
                 {waterPumpRecommended && waterPump && selectedServices.includes('timing') && (
                   <div className="p-4 bg-orange-500/10 border border-orange-500/30 rounded-xl space-y-3">
                     <div className="flex items-start gap-3">
                       <AlertTriangle size={16} className="text-orange-400 mt-0.5 shrink-0" />
                       <div className="flex-1 space-y-1">
-                        <p className="text-sm font-bold text-orange-300">Water Pump strongly recommended</p>
-                        <p className="text-[11px] text-orange-200/70">On this engine the water pump is belt-driven. Replacing both together avoids a second belt removal and saves significant labour cost later.</p>
+                        <p className="text-sm font-bold text-orange-500">Water Pump strongly recommended</p>
+                        <p className="text-[11px] text-muted">On this engine the water pump is belt-driven. Replacing both together avoids a second belt removal and saves significant labour cost later.</p>
                         <div className="flex justify-between items-center pt-1">
-                          <div className="text-[11px] text-orange-200/60">
+                          <div className="text-[11px] text-muted">
                             Parts ${waterPump.partsHigh} + ${waterPump.labourExtra} labour
                           </div>
                           <button
@@ -2424,33 +2451,33 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                 )}
 
                 {totalPrice > 0 && (
-                  <div className="p-4 bg-white/5 rounded-xl border border-white/10 space-y-2">
+                  <div className="p-4 bg-card rounded-xl border border-border space-y-2">
                     {selectedServices.map(id => {
                       const fp = fleetPricesRaw[id];
                       const svc = SERVICES.find(s => s.id === id);
                       if (!fp || !svc) return null;
                       return (
-                        <div key={id} className="flex justify-between text-xs text-white/60">
+                        <div key={id} className="flex justify-between text-xs text-muted">
                           <span>{serviceDisplayName(id, svc.name)}</span>
                           <span>${fp.high}</span>
                         </div>
                       );
                     })}
                     {addWaterPump && waterPump && selectedServices.includes('timing') && (
-                      <div className="flex justify-between text-xs text-orange-300/80">
+                      <div className="flex justify-between text-xs text-orange-500">
                         <span>Water Pump</span>
                         <span>${waterPump.high}</span>
                       </div>
                     )}
-                    <div className="flex justify-between items-center pt-2 border-t border-white/10">
-                      <span className="text-xs font-bold uppercase text-white/40">Estimated Total</span>
+                    <div className="flex justify-between items-center pt-2 border-t border-border">
+                      <span className="text-xs font-bold uppercase text-muted">Estimated Total</span>
                       <span className="text-xl font-bold text-torqued-red">${totalPrice}</span>
                     </div>
                   </div>
                 )}
                 {/* Something else — service search */}
-                <div className="space-y-3 p-4 bg-white/5 rounded-xl border border-white/10">
-                  <p className="text-xs font-bold uppercase tracking-wider text-white/50">Something else?</p>
+                <div className="space-y-3 p-4 bg-card rounded-xl border border-border">
+                  <p className="text-xs font-bold uppercase tracking-wider text-muted">Something else?</p>
                   <div className="flex gap-2">
                     <input
                       type="text"
@@ -2466,7 +2493,7 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                           .finally(() => setCustomSearchLoading(false));
                       }}}
                       placeholder="e.g. AC regas, coolant flush, battery…"
-                      className="flex-1 bg-white/5 border border-white/10 rounded-lg px-3 py-2 text-sm text-white outline-none focus:border-torqued-red/40"
+                      className="flex-1 bg-background border border-border rounded-lg px-3 py-2 text-sm text-foreground outline-none focus:border-torqued-red/40"
                     />
                     <button
                       onClick={() => {
@@ -2486,7 +2513,7 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                   </div>
                   {customSearchDone && customSearchResults.length === 0 && (
                     <div className="space-y-2">
-                      <p className="text-xs text-white/50">No pricing found for that service.</p>
+                      <p className="text-xs text-muted">No pricing found for that service.</p>
                       <button
                         onClick={() => {
                           toggleService('diag_inspection');
@@ -2508,11 +2535,11 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                             "w-full flex justify-between items-center px-3 py-2 rounded-lg text-sm border transition-all",
                             selectedServices.includes(r.id)
                               ? "border-torqued-red bg-torqued-red/10 text-torqued-red"
-                              : "border-white/10 bg-white/5 text-white hover:border-white/20"
+                              : "border-border bg-card text-foreground hover:border-border/60"
                           )}
                         >
                           <span className="font-medium">{r.name}</span>
-                          <span className="text-xs opacity-60">from ${r.indicativePrice}</span>
+                          {r.indicativePrice > 0 && <span className="text-xs opacity-60">from ${r.indicativePrice}</span>}
                         </button>
                       ))}
                     </div>
@@ -2520,17 +2547,17 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                 </div>
 
                 <div className="space-y-2">
-                  <label className="text-xs font-bold uppercase tracking-wider text-white/50">
+                  <label className="text-xs font-bold uppercase tracking-wider text-muted">
                     {selectedServices.includes('diag_inspection') ? 'Describe your concern *' : 'Additional Notes'}
                   </label>
                   <textarea
                     value={diagnosticComment}
                     onChange={e => setDiagnosticComment(e.target.value)}
                     className={cn(
-                      "w-full bg-white/5 border rounded-xl px-4 py-3 outline-none focus:bg-white/10 transition-all min-h-[100px] text-white",
+                      "w-full bg-background border rounded-xl px-4 py-3 outline-none focus:bg-card transition-all min-h-[100px] text-foreground",
                       selectedServices.includes('diag_inspection') && !diagnosticComment.trim()
                         ? "border-torqued-red/60 focus:border-torqued-red"
-                        : "border-white/10 focus:border-torqued-red/30"
+                        : "border-border focus:border-torqued-red/30"
                     )}
                     placeholder={selectedServices.includes('diag_inspection')
                       ? `Describe your concern about your ${[vehicle?.make, vehicle?.model].filter(Boolean).join(' ') || 'vehicle'} here`
@@ -2541,7 +2568,7 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                   )}
                 </div>
                 <div className="flex gap-4">
-                  <Button variant="outline" onClick={() => setQuotePath(null)}>Back</Button>
+                  <Button variant="outline" onClick={() => setStep(1)}>Back</Button>
                   <Button className="flex-1 bg-torqued-red" onClick={() => { lookupFleetQuote(); setStep(3); }}
                     disabled={selectedServices.length === 0 || (selectedServices.includes('diag_inspection') && !diagnosticComment.trim())}>
                     Continue →
@@ -2551,30 +2578,30 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
             ) : (
               <div className="space-y-6">
                 <div className="space-y-2">
-                  <label className="text-xs font-bold uppercase tracking-wider text-white/50">Describe the issue</label>
-                  <textarea 
-                    className="w-full bg-white/5 border border-white/10 rounded-xl px-4 py-3 outline-none focus:bg-white/10 focus:border-torqued-red/30 transition-all min-h-[120px] text-white"
+                  <label className="text-xs font-bold uppercase tracking-wider text-muted">Describe the issue</label>
+                  <textarea
+                    className="w-full bg-background border border-border rounded-xl px-4 py-3 outline-none focus:bg-card focus:border-torqued-red/30 transition-all min-h-[120px] text-foreground"
                     placeholder="E.g. Squeaking when braking, engine light is on..."
                   />
                 </div>
                 <div className="space-y-2">
                   <div className="flex justify-between items-center">
-                    <label className="text-xs font-bold uppercase tracking-wider text-white/50">Fault Code (Optional)</label>
+                    <label className="text-xs font-bold uppercase tracking-wider text-muted">Fault Code (Optional)</label>
                     <div className="flex items-center gap-1 text-[10px] font-bold text-torqued-red uppercase bg-torqued-red/10 px-2 py-0.5 rounded">
                       <Lock size={10} /> Torqued Pro
                     </div>
                   </div>
-                  <Input 
-                    placeholder="E.G. P0301" 
+                  <Input
+                    placeholder="E.G. P0301"
                     value={faultCode}
                     onChange={(e) => setFaultCode(e.target.value)}
-                    className="bg-white/5 border-white/10 text-white"
+                    className="bg-background border-border text-foreground"
                   />
                   {aiTranslation && (
-                    <motion.div 
+                    <motion.div
                       initial={{ opacity: 0, y: 5 }}
                       animate={{ opacity: 1, y: 0 }}
-                      className="p-3 bg-white/5 border border-white/10 text-white rounded-xl text-xs leading-relaxed"
+                      className="p-3 bg-card border border-border text-foreground rounded-xl text-xs leading-relaxed"
                     >
                       <div className="flex items-center gap-2 mb-1 text-torqued-red font-bold uppercase tracking-widest text-[10px]">
                         <Info size={12} /> Auto Interpretation
@@ -2584,7 +2611,7 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                   )}
                 </div>
                 <div className="flex gap-4">
-                  <Button variant="outline" onClick={() => setQuotePath(null)}>Back</Button>
+                  <Button variant="outline" onClick={() => setStep(1)}>Back</Button>
                   <Button className="flex-1 bg-torqued-red" onClick={() => {
                     if (!faultCode) {
                       setIsDiagnosticMode(true);
@@ -3169,9 +3196,27 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
           </motion.div>
         );
 
-      case 6:
+      case 6: {
+        const totalJobHours = (() => {
+          let h = 0;
+          for (const id of selectedServices) {
+            const fp = fleetPricesRaw[id];
+            if (fp?.labourHours) h += parseFloat(fp.labourHours) || 0;
+          }
+          if (addWaterPump && selectedServices.includes('timing')) h += 0.5;
+          return h;
+        })();
+        const dropOffBy = totalJobHours > 0 && totalJobHours < 3 ? '12:00 PM' : '9:00 AM';
+        const mechanicClosingTime = '5:30 PM';
+        const mechanicOpeningTime = '8:00 AM';
+        const nextBizDay = (() => {
+          const d = new Date(selectedDate + 'T00:00:00');
+          const dow = d.getDay();
+          d.setDate(d.getDate() + (dow === 5 ? 3 : dow === 6 ? 2 : 1));
+          return d.toLocaleDateString('en-NZ', { weekday: 'long', day: 'numeric', month: 'long' });
+        })();
         return (
-          <motion.div 
+          <motion.div
             initial={{ opacity: 0, x: 20 }}
             animate={{ opacity: 1, x: 0 }}
             exit={{ opacity: 0, x: -20 }}
@@ -3183,7 +3228,7 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
               </button>
               <div className="space-y-1">
                 <h2 className="text-3xl sm:text-4xl md:text-5xl tracking-tighter">Finalise Booking</h2>
-                <p className="text-sm sm:text-base text-muted">Drop off on {selectedDate} @ {selectedTime}.</p>
+                <p className="text-sm sm:text-base text-muted">Drop off by {dropOffBy} on {selectedDate}. Pickup by {mechanicClosingTime}.</p>
               </div>
             </div>
 
@@ -3206,34 +3251,34 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                       <div key={id} className="space-y-3 bg-background/50 p-4 rounded-2xl border border-border">
                         <div className="flex justify-between items-center text-foreground">
                           <span className="text-sm font-black uppercase tracking-tight">{matchedPkg ? matchedPkg.name : serviceDisplayName(id, service.name)}</span>
-                          <span className="text-sm font-black">${displayPrice}</span>
+                          <span className="text-sm font-black">{displayPrice > 0 ? `$${displayPrice}` : <span className="text-muted text-xs font-bold">Quoted by workshop</span>}</span>
                         </div>
                         {matchedPkg ? (
                           <div className="border-t border-border/50 pt-3 space-y-1.5">
                             {matchedPkg.base_fee != null && (
-                              <div className="flex justify-between text-[11px] text-muted font-medium">
+                              <div className="flex justify-between text-xs text-muted">
                                 <span>Labour / base</span><span>${matchedPkg.base_fee}</span>
                               </div>
                             )}
                             {matchedPkg.pkg_type === 'standard' && matchedPkg.oil_cost_per_l != null && (
-                              <div className="flex justify-between text-[11px] text-muted font-medium">
+                              <div className="flex justify-between text-xs text-muted">
                                 <span>{matchedPkg.vehicleOilCapacity ?? matchedPkg.oil_litres ?? '?'}L {matchedPkg.oil_grade || 'oil'} @${matchedPkg.oil_cost_per_l}/L{matchedPkg.vehicleOilCapacity ? ' (vehicle spec)' : ''}</span>
                                 <span>${((matchedPkg.vehicleOilCapacity ?? matchedPkg.oil_litres ?? 0) * matchedPkg.oil_cost_per_l).toFixed(2)}</span>
                               </div>
                             )}
                             {matchedPkg.filter_cost != null && matchedPkg.pkg_type === 'standard' && (
-                              <div className="flex justify-between text-[11px] text-muted font-medium">
+                              <div className="flex justify-between text-xs text-muted">
                                 <span>Oil filter</span><span>${matchedPkg.filter_cost}</span>
                               </div>
                             )}
                             {matchedPkg.pkg_type === 'transmission' && matchedPkg.trans_oil_cost_per_l != null && (
-                              <div className="flex justify-between text-[11px] text-muted font-medium">
+                              <div className="flex justify-between text-xs text-muted">
                                 <span>{matchedPkg.trans_oil_litres ?? '?'}L trans fluid @${matchedPkg.trans_oil_cost_per_l}/L</span>
                                 <span>${((matchedPkg.trans_oil_litres ?? 0) * matchedPkg.trans_oil_cost_per_l).toFixed(2)}</span>
                               </div>
                             )}
-                            {matchedPkg.freight != null && <div className="flex justify-between text-[11px] text-muted font-medium"><span>Freight</span><span>${matchedPkg.freight}</span></div>}
-                            {matchedPkg.scan_tool_fee != null && <div className="flex justify-between text-[11px] text-muted font-medium"><span>Scan tool</span><span>${matchedPkg.scan_tool_fee}</span></div>}
+                            {matchedPkg.freight != null && <div className="flex justify-between text-xs text-muted"><span>Freight</span><span>${matchedPkg.freight}</span></div>}
+                            {matchedPkg.scan_tool_fee != null && <div className="flex justify-between text-xs text-muted"><span>Scan tool</span><span>${matchedPkg.scan_tool_fee}</span></div>}
                             {Array.isArray(matchedPkg.included_items) && matchedPkg.included_items.length > 0 && (
                               <div className="pt-2 border-t border-border/30">
                                 <p className="text-[10px] font-black uppercase text-muted tracking-widest mb-1.5">Included</p>
@@ -3253,13 +3298,13 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                           return fp && (fp.partsLow > 0 || fp.labourLow > 0) ? (
                             <div className="border-t border-border/50 pt-3 space-y-1.5">
                               {fp.partsLow > 0 && (
-                                <div className="flex justify-between text-[11px] text-muted font-medium">
+                                <div className="flex justify-between text-xs text-muted">
                                   <span>Parts</span>
                                   <span>${fp.partsHigh}</span>
                                 </div>
                               )}
                               {fp.labourLow > 0 && (
-                                <div className="flex justify-between text-[11px] text-muted font-medium">
+                                <div className="flex justify-between text-xs text-muted">
                                   <span>Labour{fp.labourHours ? ` (${fp.labourHours} hrs)` : ''}</span>
                                   <span>${fp.labourLow}</span>
                                 </div>
@@ -3279,11 +3324,11 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                         <span className="text-sm font-black">${waterPump.high}</span>
                       </div>
                       <div className="border-t border-orange-500/20 pt-3 space-y-1.5">
-                        <div className="flex justify-between text-[11px] text-muted font-medium">
+                        <div className="flex justify-between text-xs text-muted">
                           <span>Parts (indicative)</span>
                           <span>${waterPump.partsHigh}</span>
                         </div>
-                        <div className="flex justify-between text-[11px] text-muted font-medium">
+                        <div className="flex justify-between text-xs text-muted">
                           <span>Labour (extra 0.5 hrs)</span>
                           <span>${waterPump.labourExtra}</span>
                         </div>
@@ -3294,7 +3339,10 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
 
                 <div className="flex justify-between items-center py-6 border-t border-b border-border">
                   <span className="text-[10px] font-black uppercase text-muted tracking-widest">Total Estimate (incl. GST)</span>
-                  <span className="text-4xl font-black text-torqued-red tracking-tighter">${selectedMechanic?.estimatedPrice || totalPrice}</span>
+                  {(selectedMechanic?.estimatedPrice || totalPrice) > 0
+                    ? <span className="text-4xl font-black text-torqued-red tracking-tighter">${selectedMechanic?.estimatedPrice || totalPrice}</span>
+                    : <span className="text-lg font-black text-muted">Confirmed by matched workshop</span>
+                  }
                 </div>
                 {isRepairFromDiagnostic && (
                   <div className="pt-2">
@@ -3383,10 +3431,26 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                 )}
               </Card>
 
-              {/* Promo Code Box */}
-              <div className="p-6 bg-card border border-border/70 rounded-3xl space-y-3.5 shadow-md">
+              {/* Pickup options */}
+              <div className="p-5 bg-card border border-border rounded-3xl space-y-4 shadow-sm">
+                <div className="flex items-start justify-between gap-4">
+                  <div className="space-y-1">
+                    <p className="text-[11px] font-black uppercase tracking-widest text-muted">Vehicle Pickup</p>
+                    <p className="text-sm text-foreground">End of day — ready by {mechanicClosingTime}</p>
+                    <p className="text-xs text-muted">Your vehicle will be ready to collect from the workshop by end of business day on {selectedDate}.</p>
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setCollectNextDay(v => !v)}
+                  className={`w-full text-left p-4 rounded-2xl border transition-all text-sm ${collectNextDay ? 'border-torqued-red bg-torqued-red/5 text-foreground' : 'border-border bg-background/50 text-muted hover:border-torqued-red/30'}`}
+                >
+                  <span className={`text-[10px] font-black uppercase tracking-widest block mb-1 ${collectNextDay ? 'text-torqued-red' : 'text-muted'}`}>
+                    {collectNextDay ? '✓ ' : ''}Collect next business day
+                  </span>
+                  <span className="text-xs text-muted">Pick up on {nextBizDay} between {mechanicOpeningTime} and {mechanicClosingTime}.</span>
+                </button>
               </div>
-
 
               <div className="space-y-6">
                 <div className="space-y-3">
@@ -3465,6 +3529,7 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
             </div>
           </motion.div>
         );
+      }
 
       case 7: {
         const isConfirmed = latestBooking?.paymentStatus === 'confirmed';
@@ -3654,16 +3719,23 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
   };
   const [removingRego, setRemovingRego] = useState<string | null>(null);
   const removeVehicle = async (rego: string) => {
-    if (!customerOwnerId) return;
     if (!window.confirm(`Remove ${rego} from your account?\n\nYour service history for this vehicle will be preserved — a new owner can claim the plate and access it.`)) return;
     setRemovingRego(rego);
     try {
-      const r = await fetch('/api/customer/remove-vehicle', {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ ownerId: customerOwnerId, rego }),
-      });
-      if (!r.ok) { const d = await r.json(); alert(d.error || 'Could not remove vehicle'); return; }
-      setGarageVehicles(prev => prev.filter(v => v.rego !== rego));
+      if (customerOwnerId) {
+        const r = await fetch('/api/customer/remove-vehicle', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ ownerId: customerOwnerId, rego }),
+        });
+        // 404 = already gone from DB; 403 handled by email fallback on server — either way remove locally
+        if (!r.ok && r.status !== 404 && r.status !== 403) {
+          const d = await r.json(); alert(d.error || 'Could not remove vehicle'); return;
+        }
+      }
+      // Remove from local state and persisted session regardless
+      const updated = garageVehicles.filter(v => v.rego !== rego);
+      setGarageVehicles(updated);
+      persistCustomerSession({ ownerId: customerOwnerId, email: customerEmail, rego: updated[0]?.rego ?? '', vehicles: updated });
       if (vehicle?.rego === rego) setVehicle(null);
     } catch { alert('Could not remove vehicle — try again.'); }
     finally { setRemovingRego(null); }
@@ -3732,7 +3804,7 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
               const plate = (rego || vehicle?.rego || garageVehicles[0]?.rego || '').toUpperCase();
               if (!plate) return;
               setPasskeyCardState('adding');
-              try { await registerPasskey('customer', plate); setPasskeyCardState('added'); }
+              try { await registerPasskey('customer', customerEmail || plate); setPasskeyCardState('added'); }
               catch { setPasskeyCardState('error'); }
             }}>{passkeyCardState === 'adding' ? 'Adding…' : 'Add passkey'}</Button>
           </Card>
@@ -3769,40 +3841,33 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                     </button>
                   </div>
 
-                  <div className="space-y-6">
+                  <div className="space-y-4">
                     <div className="space-y-2">
                       <label className="text-[10px] font-black uppercase text-muted tracking-widest">Display Name</label>
-                      <Input 
-                        value={userName || 'Sri'} 
+                      <Input
+                        value={userName || ''}
                         onChange={(e) => setUserName(e.target.value)}
                         className="bg-background border-border"
+                        placeholder="Your name"
                       />
                     </div>
                     <div className="space-y-2">
-                      <label className="text-[10px] font-black uppercase text-muted tracking-widest">Home Location</label>
-                      <Input 
-                        placeholder="e.g. Grey Lynn, Auckland" 
+                      <label className="text-[10px] font-black uppercase text-muted tracking-widest">Email Address</label>
+                      <Input
+                        value={customerEmail || ''}
+                        readOnly
+                        className="bg-background border-border opacity-70 cursor-not-allowed"
+                      />
+                    </div>
+                    <div className="space-y-2">
+                      <label className="text-[10px] font-black uppercase text-muted tracking-widest">City / Location</label>
+                      <Input
+                        placeholder="e.g. Dunedin, Wellington, Auckland"
                         value={location}
                         onChange={(e) => setLocation(e.target.value)}
                         className="bg-background border-border"
                       />
-                    </div>
-                    <div className="space-y-2">
-                      <label className="text-[10px] font-black uppercase text-muted tracking-widest">Notification Preferences</label>
-                      <div className="space-y-3">
-                        <div className="flex items-center justify-between p-4 bg-background/50 rounded-2xl border border-border">
-                          <span className="text-xs font-bold">SMS reminders for bookings</span>
-                          <div className="w-10 h-5 bg-torqued-red rounded-full relative">
-                            <div className="absolute right-1 top-1 w-3 h-3 bg-white rounded-full" />
-                          </div>
-                        </div>
-                        <div className="flex items-center justify-between p-4 bg-background/50 rounded-2xl border border-border">
-                          <span className="text-xs font-bold">Maintenance alerts</span>
-                          <div className="w-10 h-5 bg-torqued-red rounded-full relative">
-                            <div className="absolute right-1 top-1 w-3 h-3 bg-white rounded-full" />
-                          </div>
-                        </div>
-                      </div>
+                      <p className="text-[10px] text-muted">Used to find nearby workshops for your quotes.</p>
                     </div>
                   </div>
 
@@ -3928,7 +3993,7 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
               <section className="space-y-4">
                 <div className="flex justify-between items-center gap-3">
                   <div>
-                    <h3 className="text-2xl font-bold tracking-tight">Vehicle Health</h3>
+                    <h3 className="text-2xl font-bold tracking-tight">Service Recommendations</h3>
                     {vehicle && <p className="text-xs text-muted mt-0.5">{vehicle.year} {vehicle.make} {vehicle.model}</p>}
                   </div>
                   <div className="flex gap-2">
@@ -3949,7 +4014,7 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
 
                 {/* AI health cards */}
                 {!vehicle ? (
-                  <Card className="p-6 bg-card border-border text-center text-sm text-muted italic">Select a vehicle above to see its health overview.</Card>
+                  <Card className="p-6 bg-card border-border text-center text-sm text-muted italic">Select a vehicle above to see personalised service recommendations.</Card>
                 ) : healthLoading ? (
                   <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                     {[...Array(5)].map((_, i) => (
@@ -3958,7 +4023,7 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                   </div>
                 ) : healthInsights.length === 0 ? (
                   <Card className="p-6 bg-card border-border text-center space-y-2">
-                    <p className="text-sm text-muted">Could not load health overview.</p>
+                    <p className="text-sm text-muted">Could not load service recommendations.</p>
                     <p className="text-xs text-muted/60">This may be a temporary issue — try refreshing the page.</p>
                   </Card>
                 ) : (
@@ -4219,68 +4284,6 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
             </Card>
           </section>
 
-          {(() => {
-            // Map a maintenance item to a bookable service id
-            const itemToService = (name: string): string | null => {
-              const n = name.toLowerCase();
-              if (n.includes('wof')) return 'wof';
-              if (n.includes('timing') || n.includes('cambelt')) return 'timing';
-              if (n.includes('oil')) return 'oil';
-              if (n.includes('brake')) return 'brakes_front_pads';
-              if (n.includes('spark')) return 'spark_plugs';
-              if (n.includes('battery')) return 'battery';
-              if (n.includes('transmission') || n.includes('dsg') || n.includes('dct')) return 'transmission';
-              return null;
-            };
-            // Only show items that are upcoming/not recently completed
-            const dueItems = userServiceItems.filter(it => {
-              if (!it.lastDoneDate) return true;
-              const months = it.intervalMonths || 12;
-              const last = new Date(it.lastDoneDate).getTime();
-              return Date.now() - last > (months - 2) * 30 * 864e5; // due within ~2 months
-            });
-            const costRange = (sid: string | null) => {
-              if (!sid) return null;
-              const base = priceFor(sid);
-              if (!base) return null;
-              const high = Math.round(base * 1.3 / 5) * 5;
-              return `$${base} – $${high}`;
-            };
-            return (
-              <section className="space-y-6">
-                <h3 className="text-2xl font-bold tracking-tight">Maintenance Schedule</h3>
-                <p className="text-sm text-muted -mt-3">Upcoming or due services for your {vehicle?.make} {vehicle?.model}. Tap one to get a quote and book.</p>
-                <div className="space-y-3">
-                  {dueItems.length === 0 && <Card className="p-8 text-center text-muted italic bg-card border-border">You're all up to date — no services due soon. 🎉</Card>}
-                  {dueItems.map(item => {
-                    const sid = itemToService(item.name);
-                    const range = costRange(sid);
-                    return (
-                      <Card key={item.id} onClick={() => {
-                        if (!sid) return;
-                        setSelectedServices([sid]); setQuotePath('service'); setView('quote'); setStep(3);
-                      }} className={cn("p-4 flex items-center justify-between gap-4 bg-card border-border transition-all", sid ? "cursor-pointer hover:border-torqued-red/40 active:scale-[0.99]" : "")}>
-                        <div className="flex items-center gap-3">
-                          <div className="w-9 h-9 rounded-lg bg-torqued-red/10 flex items-center justify-center text-torqued-red"><Wrench size={16} /></div>
-                          <div>
-                            <p className="font-bold text-sm">{item.name}</p>
-                            <p className="text-[11px] text-muted">{item.intervalMileage ? `Due at ${item.intervalMileage.toLocaleString()} km` : 'Due soon'}</p>
-                          </div>
-                        </div>
-                        <div className="text-right">
-                          <p className="font-black text-torqued-red text-sm">{range || 'Get quote'}</p>
-                          {sid && <p className="text-[10px] text-muted uppercase font-bold tracking-widest flex items-center gap-1 justify-end">Book <ChevronRight size={11} /></p>}
-                        </div>
-                      </Card>
-                    );
-                  })}
-                </div>
-                <div className="p-3 bg-torqued-red/5 text-[10px] text-torqued-red font-black uppercase tracking-widest text-center rounded-xl border border-torqued-red/10">
-                  Estimates based on {vehicle?.make} {vehicle?.model} data · final price confirmed by your chosen workshop
-                </div>
-              </section>
-            );
-          })()}
         </div>
       </div>
     );
@@ -4295,7 +4298,9 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
         {/* Subtle top glow */}
         <div className="absolute top-0 left-1/2 -translate-x-1/2 w-1/2 h-px bg-gradient-to-r from-transparent via-torqued-red/30 to-transparent" />
         
-        <Logo variant={theme === 'dark' ? 'light' : 'dark'} />
+        <button onClick={onBack} className="focus:outline-none hover:opacity-80 transition-opacity">
+          <Logo variant={theme === 'dark' ? 'light' : 'dark'} />
+        </button>
         <div className="flex gap-4 items-center">
           <div className="hidden sm:flex bg-card p-1 rounded-xl border border-border">
             {[

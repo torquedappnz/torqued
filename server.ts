@@ -647,19 +647,35 @@ app.post('/api/passkey/auth-verify', async (req, res) => {
       const { data: link } = await supabase.auth.admin.generateLink({ type: 'magiclink', email: cred.owner_ref });
       return res.json({ success: true, actorType: 'mechanic', email: cred.owner_ref, tokenHash: link?.properties?.hashed_token || null });
     }
-    // customer: return rego + garage (no Supabase session needed)
-    const rego = cred.owner_ref.toUpperCase();
-    const { data: vehicle } = await supabase.from('vehicles').select('owner_id').eq('rego', rego).single();
-    let email: string | null = null, ownerId: string | null = null, vehicles: any[] = [];
-    if (vehicle?.owner_id) {
-      ownerId = vehicle.owner_id;
-      const { data: p } = await supabase.from('profiles').select('email').eq('id', ownerId).single();
-      email = p?.email ?? null;
-      const { data: rows } = await supabase.from('vehicles').select('rego, make, model, year, variant, mileage, thumbnail').eq('owner_id', ownerId);
-      vehicles = rows ?? [];
+    // customer: owner_ref is now the customer's email address (supports multiple vehicles)
+    // Legacy: if owner_ref looks like a rego (no @), fall back to rego-based lookup
+    let email: string | null = null, ownerId: string | null = null, vehicles: any[] = [], rego: string = '';
+    const ownerRef = cred.owner_ref as string;
+    if (ownerRef.includes('@')) {
+      // Email-keyed passkey — look up profile by email
+      const { data: profile } = await supabase.from('profiles').select('id, email').ilike('email', ownerRef).maybeSingle();
+      if (profile) {
+        ownerId = profile.id;
+        email = profile.email;
+        const { data: rows } = await supabase.from('vehicles').select('rego, make, model, year, variant, mileage, thumbnail').eq('owner_id', ownerId);
+        vehicles = rows ?? [];
+        rego = vehicles[0]?.rego ?? '';
+      }
+    } else {
+      // Legacy rego-keyed passkey — resolve via vehicle
+      rego = ownerRef.toUpperCase();
+      const { data: vehicle } = await supabase.from('vehicles').select('owner_id').eq('rego', rego).single();
+      if (vehicle?.owner_id) {
+        ownerId = vehicle.owner_id;
+        const { data: p } = await supabase.from('profiles').select('email').eq('id', ownerId).single();
+        email = p?.email ?? null;
+        const { data: rows } = await supabase.from('vehicles').select('rego, make, model, year, variant, mileage, thumbnail').eq('owner_id', ownerId);
+        vehicles = rows ?? [];
+        rego = vehicles[0]?.rego ?? rego;
+      }
     }
-    // vt: a short-lived signed token so the native app can complete sign-in after web passkey auth
-    res.json({ success: true, actorType: 'customer', rego, email, ownerId, vehicles, vt: makeMagicToken(rego) });
+    // vt: short-lived signed token so the native app can complete sign-in after web passkey auth
+    res.json({ success: true, actorType: 'customer', rego, email, ownerId, vehicles, vt: rego ? makeMagicToken(rego) : null });
   } catch (err) {
     console.error('[passkey/auth-verify]', err);
     res.status(500).json({ error: 'Sign-in failed' });
@@ -2527,6 +2543,12 @@ app.post('/api/mechanic/resend', async (req, res) => {
   }
 });
 
+// ── AI insight in-memory cache ───────────────────────────────────────────────
+// Key: `${rego}|${mileage}|${histCount}`, TTL: 7 days.
+// Prevents redundant Claude calls when nothing about the vehicle has changed.
+const _aiInsightCache = new Map<string, { insights: any[]; hasHistory: boolean; ts: number }>();
+const AI_INSIGHT_TTL = 7 * 24 * 60 * 60 * 1000;
+
 // ── Claude (Anthropic) AI helpers ───────────────────────────────────────────
 // All AI calls now use claude-haiku-4-5 with web search enabled.
 const CLAUDE_MODEL = 'claude-haiku-4-5';
@@ -2900,7 +2922,14 @@ app.get('/api/fleet-prices', async (req, res) => {
     const slugs = Object.values(FLEET_SERVICE_TO_SLUG);
     const { data: cats } = await supabase
       .from('part_categories').select('id, slug').in('slug', slugs);
-    if (!cats || cats.length === 0) return res.json({ prices: {} });
+    if (!cats || cats.length === 0) {
+      const wpMakes2 = ['volkswagen', 'vw', 'skoda', 'seat', 'audi'];
+      const wpRec2 = timingDrive === 'belt' && wpMakes2.some(m => (custVehicle.make || '').toLowerCase().includes(m));
+      const wpL2 = 130; // platform fallback $/hr
+      return res.json({ prices: {}, timingDrive, vehicleId,
+        waterPumpRecommended: wpRec2,
+        waterPump: wpRec2 ? { partsLow: 280, partsHigh: 420, labourExtra: wpL2, low: 280 + wpL2, high: 420 + wpL2 } : null });
+    }
 
     const catIdToSlug: Record<number, string> = Object.fromEntries(cats.map((c: any) => [c.id, c.slug]));
     const slugToServiceId: Record<string, string> = Object.fromEntries(
@@ -3028,6 +3057,33 @@ app.get('/api/fleet-prices', async (req, res) => {
       };
     }
 
+    // Fixed-price services: not in parts_data (no vehicle-specific parts), priced by labour rate
+    if (!prices['wof']) {
+      // WOF: ~0.5hr visual inspection; total is a regulated ~$55–75 flat fee in NZ
+      prices['wof'] = { low: 55, high: 75, midpoint: 65, partsLow: 0, partsHigh: 0,
+        labourLow: 65, labourHigh: 65, labourHours: '0.5' };
+    }
+    if (!prices['diag_inspection']) {
+      // Fixed $99 diagnostic fee
+      prices['diag_inspection'] = { low: 99, high: 99, midpoint: 99, partsLow: 0, partsHigh: 0,
+        labourLow: 99, labourHigh: 99, labourHours: '1' };
+    }
+    if (!prices['brake_fluid']) {
+      // ~0.75hr flush + DOT4 fluid ($25–35) + sundries
+      const bfLabour = Math.round(0.75 * NZD_LABOUR_RATE);
+      prices['brake_fluid'] = { low: 25 + bfLabour, high: 45 + bfLabour, midpoint: 35 + bfLabour,
+        partsLow: 25, partsHigh: 45, labourLow: bfLabour, labourHigh: bfLabour, labourHours: '0.75' };
+    }
+    if (!prices['full']) {
+      // Full service: oil + filter + extras + 2.5hrs labour
+      const fsOilMid = Math.round(oilCapacity * 20);
+      const fsParts = fsOilMid + 55; // oil + oil filter + air filter check
+      const fsLabour = Math.round(2.5 * NZD_LABOUR_RATE);
+      prices['full'] = { low: fsParts + fsLabour - 30, high: fsParts + fsLabour + 30,
+        midpoint: fsParts + fsLabour, partsLow: fsParts - 30, partsHigh: fsParts + 30,
+        labourLow: fsLabour, labourHigh: fsLabour, labourHours: '2.5' };
+    }
+
     // Water pump recommendation: true when timing_drive is 'belt' and make is VW/Skoda/Seat/Audi
     // (belt-driven water pump engines where replacement is standard practice alongside cambelt).
     // This list expands as we get better engine-family data.
@@ -3092,7 +3148,7 @@ app.get('/api/services/search', async (req, res) => {
 
 // Indicative all-in Torqued prices (NZD) — mirrors the booking catalog, used for AI price guidance.
 const SERVICE_PRICES: Record<string, { name: string; price: number }> = {
-  oil: { name: 'Oil Change', price: 180 }, wof: { name: 'Warrant of Fitness', price: 65 },
+  oil: { name: 'Standard Service', price: 180 }, wof: { name: 'Warrant of Fitness', price: 65 },
   full: { name: 'Full Service', price: 350 }, brakes_front_pads: { name: 'Front Brake Pads', price: 220 },
   brakes_front_rotors: { name: 'Front Rotors & Pads', price: 580 }, brakes_rear_pads: { name: 'Rear Brake Pads', price: 190 },
   brakes_rear_rotors: { name: 'Rear Rotors & Pads', price: 480 }, timing: { name: 'Cambelt', price: 2289 },
@@ -3257,51 +3313,58 @@ app.post('/api/ai/health-insights', async (req, res) => {
     }
 
     const hasHistory = history.length > 0;
-    const historyNote = hasHistory
-      ? `Service history (most recent first): ${JSON.stringify(history.slice(0, 20))}.`
-      : `No service history on file. Base insights on the vehicle's age and mileage alone; use "due" or "overdue" rather than "good" for anything that cannot be confirmed as recently done. Flag the lack of records clearly in each detail.`;
+
+    // Return cached insights if mileage + history count unchanged
+    const cacheKey = `${formattedRego}|${resolvedMileage ?? 0}|${history.length}`;
+    const cached = _aiInsightCache.get(cacheKey);
+    if (cached && Date.now() - cached.ts < AI_INSIGHT_TTL) {
+      return res.json({ insights: cached.insights, hasHistory: cached.hasHistory, cached: true });
+    }
+
+    const historyText = hasHistory
+      ? `Service history (most recent first):\n${history.slice(0, 20).map((h: any) => `- ${h.service_date || 'unknown date'}: ${h.work_done}${h.mileage ? ` at ${h.mileage} km` : ''}${h.provider ? ` (${h.provider})` : ''}`).join('\n')}`
+      : 'No service history on file.';
 
     const km = Number(resolvedMileage) || 0;
-    const prompt = `You are an NZ vehicle maintenance analyst. Vehicle: ${resolvedYear || ''} ${resolvedMake || ''} ${resolvedModel || ''} (${formattedRego || ''}), current odometer ${km || 'unknown'} km.
-${historyNote}
+    const today = new Date().toISOString().slice(0, 10);
+    const prompt = `You are an NZ vehicle service advisor. Today is ${today}.
 
-Torqued's service intervals (use these EXACT values — do not invent your own):
-- Oil & Filter: every 10,000 km OR 12 months, whichever comes first
-- Cambelt: every 100,000 km OR 60 months (5 years), whichever comes first. Chain-driven engines are "info" (no action needed).
-- Transmission fluid: every 60,000 km OR 48 months (4 years), whichever comes first
-- Brake inspection: every 20,000 km OR 12 months
-- Wheel alignment: every 20,000 km OR 12 months
+Vehicle: ${resolvedYear || 'unknown year'} ${resolvedMake || ''} ${resolvedModel || ''} (${formattedRego || ''}), current odometer: ${km ? `${km.toLocaleString()} km` : 'unknown'}.
 
-CRITICAL calculation rules — apply these before writing any insight:
-1. Find the km at which the last service was done (from history). Call it last_km.
-2. km_since_last = current_odometer − last_km. This is NOT how overdue the service is.
-3. km_remaining = km_interval − km_since_last. If km_remaining > 0 the vehicle is within the km interval.
-4. A service is "overdue" by km ONLY if km_since_last >= km_interval. Otherwise it is NOT overdue by km.
-5. If a date-based record exists, check the date interval separately. Only call "overdue" if BOTH or EITHER clearly exceed their interval.
-6. Never say "X km over" or "X km past" when km_since_last < km_interval — instead say "Good for another ~X km" or "Last done at Y km, next due at Z km."
+${historyText}
 
-You MUST return exactly one insight for EACH of these five services, in this order:
-1. Oil & Filter — interval: 10,000 km / 12 months
-2. Cambelt — interval: 100,000 km / 60 months (skip if chain-driven, use severity "info")
-3. Transmission Fluid — interval: 60,000 km / 48 months
-4. Brake Inspection — interval: 20,000 km / 12 months
-5. Wheel Alignment — interval: 20,000 km / 12 months
+Your job: produce ONLY genuine, vehicle-specific service recommendations. Rules:
+1. Read the service history carefully. If a service (e.g. cambelt, oil change, transmission) was completed recently, mark it "good" — do NOT suggest it is due unless the interval has genuinely been exceeded.
+2. Only include a service if it is relevant to this specific vehicle. Examples:
+   - EVs and PHEVs do not need cambelt or transmission fluid services in the same way — adapt accordingly.
+   - Chain-driven engines (most modern VAG/Toyota/Honda engines) need no cambelt — use severity "info" if you mention it at all, or skip.
+   - PHEVs may have extended oil intervals — reflect the manufacturer recommendation.
+3. Use ONLY the actual service history and vehicle age/mileage to determine urgency. Do not invent or assume services that the history shows were recently done.
+4. Typical NZ intervals for reference (adjust for this specific vehicle/manufacturer):
+   - Oil & Filter: 10,000–15,000 km or 12 months (PHEVs often longer)
+   - Cambelt: 100,000 km or 5 years (belt-driven only)
+   - Transmission fluid: 60,000 km or 4 years
+   - Brakes: inspect every 20,000 km or 12 months
+   - Spark plugs: 40,000–100,000 km depending on type
+   - Coolant: 60,000 km or 3–5 years
+5. Return 3–6 insights. Only include services that are actually due, overdue, or approaching due based on real evidence. If the history clearly shows a service was done recently, mark it "good" and give next-due info, or skip it entirely if there is nothing useful to add.
+6. Km calculations: km_since_last = current_km − km_at_last_service. Only mark "overdue" if km_since_last ≥ interval OR date interval is clearly exceeded.
 
-Then add 1–2 additional insights for anything else noteworthy (e.g. cabin filter, coolant, battery age, spark plugs).
+Severity:
+  "good"    = confirmed recently done, clearly within interval
+  "due"     = approaching interval (within ~10%), or due based on time even if km not reached
+  "overdue" = interval genuinely exceeded by km or time
+  "info"    = not applicable to this vehicle (e.g. no cambelt, EV drivetrain), or general advisory
 
-Severity rules:
-  "good"    = clearly within interval by both km and date
-  "due"     = within 10% of interval (km or date) — approaching but not yet overdue
-  "overdue" = km_since_last >= km_interval OR date interval clearly exceeded — use only when genuinely overdue
-  "info"    = chain-driven engine (no cambelt), EV (no oil), or other non-applicable note
-
-Return ONLY valid JSON (no markdown): {"insights":[{"title":"short label","detail":"1–2 NZ-specific sentences. Must include next-due km or date where calculable.","severity":"good|due|overdue|info"}]}`;
+Return ONLY valid JSON (no markdown): {"insights":[{"title":"short label","detail":"1–2 sentences with specific km/date context.","severity":"good|due|overdue|info"}]}`;
 
     const raw = await callClaudeChat([{ role: 'user', content: prompt }], 800, true, false);
     const text = raw.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/,'').trim();
     let parsed: any = {};
     try { parsed = JSON.parse(text); } catch { return res.status(422).json({ error: 'Could not parse insights', raw: text.slice(0, 200) }); }
-    res.json({ insights: Array.isArray(parsed.insights) ? parsed.insights : [], hasHistory });
+    const insights = Array.isArray(parsed.insights) ? parsed.insights : [];
+    _aiInsightCache.set(cacheKey, { insights, hasHistory, ts: Date.now() });
+    res.json({ insights, hasHistory });
   } catch (err: any) {
     console.error('[ai/health-insights]', err);
     res.status(500).json({ error: err?.message || 'Insights failed' });
@@ -4105,6 +4168,29 @@ app.post('/api/otp/send', async (req, res) => {
 });
 
 // GET /api/vehicles/:rego — returns vehicle + specs (called after OTP or when no owner)
+// GET /api/customer/resolve-owner?rego=xxx — re-derive ownerId + vehicle list from a plate.
+// Used when the iOS session has a stale/missing ownerId so it can self-heal without a full re-login.
+app.get('/api/customer/resolve-owner', async (req, res) => {
+  try {
+    const rego = String(req.query.rego || '').toUpperCase().trim();
+    if (!rego) return res.status(400).json({ error: 'rego required' });
+    const supabase = getSupabaseAdmin();
+    if (!supabase) return res.status(500).json({ error: 'Database not configured' });
+    const { data: vehicle } = await supabase.from('vehicles').select('owner_id').eq('rego', rego).single();
+    const ownerId = vehicle?.owner_id ?? null;
+    let vehicles: any[] = [];
+    if (ownerId) {
+      const { data: rows } = await supabase.from('vehicles')
+        .select('rego, make, model, year, variant, mileage, thumbnail').eq('owner_id', ownerId);
+      vehicles = rows ?? [];
+    }
+    res.json({ ownerId, vehicles });
+  } catch (err) {
+    console.error('[customer/resolve-owner]', err);
+    res.status(500).json({ error: 'Could not resolve owner' });
+  }
+});
+
 // GET /api/customer/vehicles?ownerId=xxx — return the live vehicle list for an owner
 app.get('/api/customer/vehicles', async (req, res) => {
   try {
@@ -4238,7 +4324,27 @@ app.post('/api/customer/remove-vehicle', async (req, res) => {
     const formattedRego = (rego as string).toUpperCase().trim();
     const { data: vehicle } = await supabase.from('vehicles').select('owner_id').eq('rego', formattedRego).single();
     if (!vehicle) return res.status(404).json({ error: 'Vehicle not found' });
-    if (vehicle.owner_id !== ownerId) return res.status(403).json({ error: 'Not authorised to remove this vehicle' });
+
+    // Primary check: direct owner_id match
+    let authorised = vehicle.owner_id === ownerId;
+
+    // Fallback: both IDs map to profiles with the same email (handles passkey vs email auth creating different profile IDs)
+    if (!authorised && vehicle.owner_id) {
+      const [{ data: rp }, { data: vp }] = await Promise.all([
+        supabase.from('profiles').select('email').eq('id', ownerId).single(),
+        supabase.from('profiles').select('email').eq('id', vehicle.owner_id).single(),
+      ]);
+      if (rp?.email && vp?.email && rp.email.toLowerCase() === vp.email.toLowerCase()) {
+        authorised = true;
+      }
+      console.log('[remove-vehicle] fallback email check', { requestOwnerId: ownerId, vehicleOwnerId: vehicle.owner_id, requestEmail: rp?.email, vehicleEmail: vp?.email, authorised });
+    }
+
+    if (!authorised) {
+      console.log('[remove-vehicle] 403', { requestOwnerId: ownerId, vehicleOwnerId: vehicle.owner_id, rego: formattedRego });
+      return res.status(403).json({ error: 'Not authorised to remove this vehicle' });
+    }
+
     await supabase.from('vehicles').update({ owner_id: null }).eq('rego', formattedRego);
     res.json({ success: true });
   } catch (err) {
