@@ -4050,6 +4050,24 @@ app.post('/api/otp/send', async (req, res) => {
 });
 
 // GET /api/vehicles/:rego — returns vehicle + specs (called after OTP or when no owner)
+// GET /api/customer/vehicles?ownerId=xxx — return the live vehicle list for an owner
+app.get('/api/customer/vehicles', async (req, res) => {
+  try {
+    const ownerId = String(req.query.ownerId || '').trim();
+    if (!ownerId) return res.status(400).json({ error: 'ownerId required' });
+    const supabase = getSupabaseAdmin();
+    if (!supabase) return res.status(500).json({ error: 'Database not configured' });
+    const { data } = await supabase
+      .from('vehicles')
+      .select('rego, make, model, year, variant, mileage, thumbnail')
+      .eq('owner_id', ownerId);
+    res.json({ vehicles: data ?? [] });
+  } catch (err) {
+    console.error('[customer/vehicles]', err);
+    res.status(500).json({ error: 'Could not fetch vehicles' });
+  }
+});
+
 app.get('/api/vehicles/:rego', async (req, res) => {
   const formattedRego = req.params.rego.toUpperCase().trim();
   const supabase = getSupabaseAdmin();
