@@ -1045,7 +1045,7 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
   const totalPrice = useMemo(() => {
     let t = selectedServices.reduce((sum, id) => sum + priceFor(id), 0);
     if (addWaterPump && waterPump && selectedServices.includes('timing')) {
-      t += Math.round((waterPump.low + waterPump.high) / 2);
+      t += waterPump.high;
     }
     return t;
   }, [selectedServices, vehiclePrices, addWaterPump, waterPump]);
@@ -2400,7 +2400,7 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                         <p className="text-[11px] text-orange-200/70">On this engine the water pump is belt-driven. Replacing both together avoids a second belt removal and saves significant labour cost later.</p>
                         <div className="flex justify-between items-center pt-1">
                           <div className="text-[11px] text-orange-200/60">
-                            Parts ${waterPump.partsLow}–${waterPump.partsHigh} + ${waterPump.labourExtra} labour
+                            Parts ${waterPump.partsHigh} + ${waterPump.labourExtra} labour
                           </div>
                           <button
                             onClick={() => setAddWaterPump(v => !v)}
@@ -2435,7 +2435,7 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                     {addWaterPump && waterPump && selectedServices.includes('timing') && (
                       <div className="flex justify-between text-xs text-orange-300/80">
                         <span>Water Pump</span>
-                        <span>${Math.round((waterPump.low + waterPump.high) / 2)}</span>
+                        <span>${waterPump.high}</span>
                       </div>
                     )}
                     <div className="flex justify-between items-center pt-2 border-t border-white/10">
@@ -3201,12 +3201,12 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                     <div className="space-y-3 bg-orange-500/5 p-4 rounded-2xl border border-orange-500/20">
                       <div className="flex justify-between items-center text-foreground">
                         <span className="text-sm font-black uppercase tracking-tight text-orange-300">Water Pump</span>
-                        <span className="text-sm font-black">${Math.round((waterPump.low + waterPump.high) / 2)}</span>
+                        <span className="text-sm font-black">${waterPump.high}</span>
                       </div>
                       <div className="border-t border-orange-500/20 pt-3 space-y-1.5">
                         <div className="flex justify-between text-[11px] text-muted font-medium">
                           <span>Parts (indicative)</span>
-                          <span>${Math.round((waterPump.partsLow + waterPump.partsHigh) / 2)}</span>
+                          <span>${waterPump.partsHigh}</span>
                         </div>
                         <div className="flex justify-between text-[11px] text-muted font-medium">
                           <span>Labour (extra 0.5 hrs)</span>
