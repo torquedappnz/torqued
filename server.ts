@@ -718,12 +718,50 @@ app.post('/api/customer/check-plate', async (req, res) => {
   }
 });
 
+// GET /api/vehicles/lookup?make=xxx&model=xxx&year=xxx — fuzzy search vehicle_models for manual entry matching
+app.get('/api/vehicles/lookup', async (req, res) => {
+  try {
+    const make  = String(req.query.make  || '').trim();
+    const model = String(req.query.model || '').trim();
+    const year  = Number(req.query.year)  || null;
+    if (!make || !model) return res.status(400).json({ error: 'make and model are required' });
+
+    const supabase = getSupabaseAdmin();
+    if (!supabase) return res.status(500).json({ error: 'Database not configured' });
+
+    const firstWord = model.split(' ')[0];
+
+    // Try progressively looser matches: exact → prefix → no year
+    const tryQuery = async (modelPat: string, withYear: boolean) => {
+      let q = supabase.from('vehicle_models')
+        .select('id, make, model, submodel, engine_code, engine_cc, fuel, transmission, drive, year_from, year_to, timing_drive, body_type')
+        .ilike('make', `%${make}%`)
+        .ilike('model', modelPat);
+      if (withYear && year) {
+        q = q.lte('year_from', year).or(`year_to.is.null,year_to.gte.${year}`);
+      }
+      const { data } = await q.order('year_from', { ascending: false }).limit(8);
+      return (data as any[]) ?? [];
+    };
+
+    let rows = await tryQuery(`%${model}%`, true);
+    if (!rows.length) rows = await tryQuery(`%${firstWord}%`, true);
+    if (!rows.length) rows = await tryQuery(`%${model}%`, false);
+    if (!rows.length) rows = await tryQuery(`%${firstWord}%`, false);
+
+    res.json({ results: rows });
+  } catch (err) {
+    console.error('[vehicles/lookup]', err);
+    res.status(500).json({ error: 'Lookup failed' });
+  }
+});
+
 // POST /api/customer/manual-vehicle — create a vehicles row from manually-entered details
 // when the customer's plate can't be found via the automated registry lookup.
-// Returns same shape as check-plate so the frontend can continue to the OTP / register flow.
+// If vehicleModelId is provided, also writes a vehicle_aliases row so fleet-prices can resolve engine data.
 app.post('/api/customer/manual-vehicle', async (req, res) => {
   try {
-    const { rego, year, make, model, submodel } = req.body;
+    const { rego, year, make, model, submodel, vehicleModelId } = req.body;
     if (!rego || !make || !model) return res.status(400).json({ error: 'rego, make and model are required' });
     const formattedRego = String(rego).toUpperCase().trim();
     const supabase = getSupabaseAdmin();
@@ -734,21 +772,38 @@ app.post('/api/customer/manual-vehicle', async (req, res) => {
       .from('vehicles').select('rego, owner_id').eq('rego', formattedRego).single();
 
     if (existing) {
-      // Already in DB — route as normal check-plate result
       return res.json({ found: true, isNew: !existing.owner_id });
     }
+
+    const cleanMake    = String(make).trim();
+    const cleanModel   = String(model).trim();
+    const cleanSubmodel = submodel ? String(submodel).trim() : null;
+    const numYear      = year ? Number(year) : null;
 
     // Insert manually-entered vehicle
     const { error: insertErr } = await supabase.from('vehicles').insert({
       rego: formattedRego,
-      year: year ? Number(year) : null,
-      make: String(make).trim(),
-      model: String(model).trim(),
-      variant: submodel ? String(submodel).trim() : null,
+      year: numYear,
+      make: cleanMake,
+      model: cleanModel,
+      variant: cleanSubmodel,
     });
     if (insertErr) {
       console.error('[manual-vehicle] insert error:', insertErr);
       return res.status(500).json({ error: 'Could not register vehicle' });
+    }
+
+    // If a vehicle_models match was selected, create an alias so fleet-prices resolves correctly
+    if (vehicleModelId) {
+      const { error: aliasErr } = await supabase.from('vehicle_aliases').upsert({
+        vehicle_id:    vehicleModelId,
+        alias_make:    cleanMake,
+        alias_model:   cleanModel,
+        alias_variant: cleanSubmodel,
+        year_from:     numYear,
+        year_to:       numYear,
+      }, { onConflict: 'alias_make,alias_model,alias_variant,year_from,engine_code' });
+      if (aliasErr) console.warn('[manual-vehicle] alias upsert warning:', aliasErr.message);
     }
 
     return res.json({ found: true, isNew: true });
