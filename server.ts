@@ -1208,7 +1208,7 @@ const SERVICE_NAMES: Record<string, string> = {
   oil: 'Oil Change', wof: 'Warrant of Fitness', full: 'Full Service',
   brakes_front_pads: 'Front Brake Pads', brakes_front_rotors: 'Front Rotors & Pads',
   brakes_rear_pads: 'Rear Brake Pads', brakes_rear_rotors: 'Rear Rotors & Pads',
-  timing: 'Cambelt & Waterpump', transmission: 'DCT Transmission Service',
+  timing: 'Cambelt', transmission: 'DCT Transmission Service',
   battery: 'Battery (12V)', diag_inspection: 'Diagnostic Inspection',
   spark_plugs: 'Spark Plugs', cabin_filter: 'Cabin Air Filter', brake_fluid: 'Brake Fluid Flush',
 };
@@ -3040,7 +3040,7 @@ const SERVICE_PRICES: Record<string, { name: string; price: number }> = {
   oil: { name: 'Oil Change', price: 180 }, wof: { name: 'Warrant of Fitness', price: 65 },
   full: { name: 'Full Service', price: 350 }, brakes_front_pads: { name: 'Front Brake Pads', price: 220 },
   brakes_front_rotors: { name: 'Front Rotors & Pads', price: 580 }, brakes_rear_pads: { name: 'Rear Brake Pads', price: 190 },
-  brakes_rear_rotors: { name: 'Rear Rotors & Pads', price: 480 }, timing: { name: 'Cambelt & Waterpump', price: 2289 },
+  brakes_rear_rotors: { name: 'Rear Rotors & Pads', price: 480 }, timing: { name: 'Cambelt', price: 2289 },
   transmission: { name: 'Transmission Service', price: 621 }, battery: { name: 'Battery (12V)', price: 280 },
   diag_inspection: { name: 'Diagnostic Inspection', price: 99 }, spark_plugs: { name: 'Spark Plugs (all four)', price: 240 },
   cabin_filter: { name: 'Cabin Air Filter', price: 110 }, brake_fluid: { name: 'Brake Fluid Flush', price: 145 },

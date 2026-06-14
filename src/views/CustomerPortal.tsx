@@ -436,6 +436,10 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
   const [waterPumpRecommended, setWaterPumpRecommended] = useState(false);
   const [waterPump, setWaterPump] = useState<{ partsLow: number; partsHigh: number; labourExtra: number; low: number; high: number } | null>(null);
   const [addWaterPump, setAddWaterPump] = useState(false);
+  const [customServiceQuery, setCustomServiceQuery] = useState('');
+  const [customSearchResults, setCustomSearchResults] = useState<Array<{ id: string; name: string; indicativePrice: number }>>([]);
+  const [customSearchDone, setCustomSearchDone] = useState(false);
+  const [customSearchLoading, setCustomSearchLoading] = useState(false);
   const [carjamVehicle, setCarjamVehicle] = useState<{ make: string; model: string; year: number; bodyType: string; fuel: string } | null>(null);
   const [quoteFallbackCategoryId, setQuoteFallbackCategoryId] = useState<number | null>(null);
 
@@ -1126,11 +1130,11 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
           setWaterPump(fp?.waterPump ?? null);
           setAddWaterPump(false);
           if (fp?.prices && Object.keys(fp.prices).length > 0) {
-            const fleetMidpoints: Record<string, number> = {};
+            const fleetHighs: Record<string, number> = {};
             for (const [svcId, p] of Object.entries(fp.prices as Record<string, any>)) {
-              fleetMidpoints[svcId] = p.midpoint;
+              fleetHighs[svcId] = p.high;
             }
-            setVehiclePrices({ ...legacyPrices, ...fleetMidpoints });
+            setVehiclePrices({ ...legacyPrices, ...fleetHighs });
             setFleetPricesRaw(fp.prices);
           }
         })
@@ -2377,11 +2381,11 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                         <div className="flex flex-col items-center gap-1 w-full text-center">
                           <span className="text-2xl">{service.icon}</span>
                           <span className="text-xs font-bold uppercase tracking-tight leading-tight">{serviceDisplayName(service.id, service.name)}</span>
-                          {fp && <span className="text-[10px] opacity-70">${fp.low}–${fp.high}</span>}
+                          {fp && <span className="text-[10px] opacity-70">${fp.high}</span>}
                         </div>
                         {selected && fp && (fp.partsLow > 0 || fp.labourLow > 0) && (
                           <div className="w-full border-t border-white/10 pt-2 space-y-0.5">
-                            {fp.partsLow > 0 && <div className="flex justify-between text-[10px] opacity-60"><span>Parts</span><span>${fp.partsLow}–${fp.partsHigh}</span></div>}
+                            {fp.partsLow > 0 && <div className="flex justify-between text-[10px] opacity-60"><span>Parts</span><span>${fp.partsHigh}</span></div>}
                             {fp.labourLow > 0 && <div className="flex justify-between text-[10px] opacity-60"><span>Labour{fp.labourHours ? ` (${fp.labourHours} hrs)` : ''}</span><span>${fp.labourLow}</span></div>}
                           </div>
                         )}
@@ -2428,7 +2432,7 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                       return (
                         <div key={id} className="flex justify-between text-xs text-white/60">
                           <span>{serviceDisplayName(id, svc.name)}</span>
-                          <span>${Math.round((fp.low + fp.high) / 2)}</span>
+                          <span>${fp.high}</span>
                         </div>
                       );
                     })}
@@ -2444,6 +2448,77 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                     </div>
                   </div>
                 )}
+                {/* Something else — service search */}
+                <div className="space-y-3 p-4 bg-white/5 rounded-xl border border-white/10">
+                  <p className="text-xs font-bold uppercase tracking-wider text-white/50">Something else?</p>
+                  <div className="flex gap-2">
+                    <input
+                      type="text"
+                      value={customServiceQuery}
+                      onChange={e => { setCustomServiceQuery(e.target.value); setCustomSearchDone(false); }}
+                      onKeyDown={e => { if (e.key === 'Enter') {
+                        const q = customServiceQuery.trim();
+                        if (!q) return;
+                        setCustomSearchLoading(true); setCustomSearchDone(false); setCustomSearchResults([]);
+                        fetch(`/api/services/search?q=${encodeURIComponent(q)}`)
+                          .then(r => r.json()).then(d => { setCustomSearchResults(d.results ?? []); setCustomSearchDone(true); })
+                          .catch(() => { setCustomSearchResults([]); setCustomSearchDone(true); })
+                          .finally(() => setCustomSearchLoading(false));
+                      }}}
+                      placeholder="e.g. AC regas, coolant flush, battery…"
+                      className="flex-1 bg-white/5 border border-white/10 rounded-lg px-3 py-2 text-sm text-white outline-none focus:border-torqued-red/40"
+                    />
+                    <button
+                      onClick={() => {
+                        const q = customServiceQuery.trim();
+                        if (!q) return;
+                        setCustomSearchLoading(true); setCustomSearchDone(false); setCustomSearchResults([]);
+                        fetch(`/api/services/search?q=${encodeURIComponent(q)}`)
+                          .then(r => r.json()).then(d => { setCustomSearchResults(d.results ?? []); setCustomSearchDone(true); })
+                          .catch(() => { setCustomSearchResults([]); setCustomSearchDone(true); })
+                          .finally(() => setCustomSearchLoading(false));
+                      }}
+                      disabled={!customServiceQuery.trim() || customSearchLoading}
+                      className="px-4 py-2 bg-torqued-red text-white text-sm font-bold rounded-lg disabled:opacity-40"
+                    >
+                      {customSearchLoading ? '…' : 'Search'}
+                    </button>
+                  </div>
+                  {customSearchDone && customSearchResults.length === 0 && (
+                    <div className="space-y-2">
+                      <p className="text-xs text-white/50">No pricing found for that service.</p>
+                      <button
+                        onClick={() => {
+                          toggleService('diag_inspection');
+                          if (customServiceQuery.trim()) setDiagnosticComment(prev => `Customer query: ${customServiceQuery.trim()}${prev ? '\n' + prev : ''}`);
+                        }}
+                        className="text-xs font-bold text-torqued-red underline"
+                      >
+                        Book a diagnostic inspection instead →
+                      </button>
+                    </div>
+                  )}
+                  {customSearchDone && customSearchResults.length > 0 && (
+                    <div className="space-y-2">
+                      {customSearchResults.map(r => (
+                        <button
+                          key={r.id}
+                          onClick={() => toggleService(r.id)}
+                          className={cn(
+                            "w-full flex justify-between items-center px-3 py-2 rounded-lg text-sm border transition-all",
+                            selectedServices.includes(r.id)
+                              ? "border-torqued-red bg-torqued-red/10 text-torqued-red"
+                              : "border-white/10 bg-white/5 text-white hover:border-white/20"
+                          )}
+                        >
+                          <span className="font-medium">{r.name}</span>
+                          <span className="text-xs opacity-60">from ${r.indicativePrice}</span>
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                </div>
+
                 <div className="space-y-2">
                   <label className="text-xs font-bold uppercase tracking-wider text-white/50">
                     {selectedServices.includes('diag_inspection') ? 'Describe your concern *' : 'Additional Notes'}
@@ -3179,8 +3254,8 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                             <div className="border-t border-border/50 pt-3 space-y-1.5">
                               {fp.partsLow > 0 && (
                                 <div className="flex justify-between text-[11px] text-muted font-medium">
-                                  <span>Parts (indicative)</span>
-                                  <span>${Math.round((fp.partsLow + fp.partsHigh) / 2)}</span>
+                                  <span>Parts</span>
+                                  <span>${fp.partsHigh}</span>
                                 </div>
                               )}
                               {fp.labourLow > 0 && (
