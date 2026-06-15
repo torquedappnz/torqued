@@ -31,7 +31,7 @@ export const AdminPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) => {
   const [setupDone, setSetupDone] = useState(false);
   const [setupError, setSetupError] = useState<string | null>(null);
 
-  const [tab, setTab] = useState<'overview' | 'search' | 'mechanics' | 'bookings' | 'postmvp'>('overview');
+  const [tab, setTab] = useState<'overview' | 'search' | 'mechanics' | 'bookings' | 'compliance' | 'postmvp'>('overview');
   const [overview, setOverview] = useState<any>(null);
   const [mechanics, setMechanics] = useState<any[]>([]);
   const [bookings, setBookings] = useState<any[]>([]);
@@ -112,6 +112,66 @@ export const AdminPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) => {
     } catch (e: any) {
       setAuthError(e?.message || 'Passkey sign-in failed');
     }
+  };
+
+  // Compliance state
+  const [privacyRequests, setPrivacyRequests] = useState<any[]>([]);
+  const [privacyForm, setPrivacyForm] = useState({ email: '', type: 'export', notes: '' });
+  const [privacyBusy, setPrivacyBusy] = useState(false);
+  const [privacyMsg, setPrivacyMsg] = useState<string | null>(null);
+  const [aiEmail, setAiEmail] = useState('');
+  const [aiCustomer, setAiCustomer] = useState<any | null>(null);
+  const [aiBusy, setAiBusy] = useState(false);
+  const [aiMsg, setAiMsg] = useState<string | null>(null);
+
+  const loadPrivacyRequests = async () => {
+    const r = await fetch(`/api/admin/privacy-requests?key=${encodeURIComponent(key)}`);
+    if (r.ok) { const d = await r.json(); setPrivacyRequests(d.requests || []); }
+  };
+
+  const submitPrivacyRequest = async () => {
+    if (!privacyForm.email) return;
+    setPrivacyBusy(true); setPrivacyMsg(null);
+    try {
+      const r = await fetch('/api/admin/privacy-request', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ key, customerEmail: privacyForm.email, requestType: privacyForm.type, notes: privacyForm.notes }),
+      });
+      const d = await r.json();
+      if (!r.ok) { setPrivacyMsg(d.error || 'Failed'); return; }
+      setPrivacyMsg(`✓ ${privacyForm.type === 'delete' ? 'Deletion' : 'Export'} request logged.`);
+      setPrivacyForm({ email: '', type: 'export', notes: '' });
+      await loadPrivacyRequests();
+    } catch { setPrivacyMsg('Could not connect.'); }
+    finally { setPrivacyBusy(false); }
+  };
+
+  const lookupAiCustomer = async () => {
+    if (!aiEmail) return;
+    setAiBusy(true); setAiCustomer(null); setAiMsg(null);
+    try {
+      const r = await fetch(`/api/admin/customer-ai-status?key=${encodeURIComponent(key)}&email=${encodeURIComponent(aiEmail)}`);
+      const d = await r.json();
+      if (!r.ok) { setAiMsg(d.error || 'Not found'); return; }
+      setAiCustomer(d);
+    } catch { setAiMsg('Could not connect.'); }
+    finally { setAiBusy(false); }
+  };
+
+  const toggleAi = async (disable: boolean) => {
+    if (!aiCustomer) return;
+    setAiBusy(true); setAiMsg(null);
+    try {
+      const r = await fetch('/api/admin/toggle-customer-ai', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ key, customerEmail: aiCustomer.email, disabled: disable }),
+      });
+      const d = await r.json();
+      if (!r.ok) { setAiMsg(d.error || 'Failed'); return; }
+      setAiCustomer((c: any) => ({ ...c, ai_disabled: d.ai_disabled }));
+      setAiMsg(`✓ AI features ${disable ? 'disabled' : 'enabled'} — customer notified by email.`);
+    } catch { setAiMsg('Could not connect.'); }
+    finally { setAiBusy(false); }
   };
 
   const [mechDetail, setMechDetail] = useState<any | null>(null);
@@ -241,8 +301,8 @@ export const AdminPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) => {
       </nav>
 
       <div className="px-4 md:px-8 py-4 flex gap-2 border-b border-white/10 overflow-x-auto">
-        {(['overview','search','mechanics','bookings','postmvp'] as const).map(t => (
-          <button key={t} onClick={() => setTab(t)}
+        {(['overview','search','mechanics','bookings','compliance','postmvp'] as const).map(t => (
+          <button key={t} onClick={() => { setTab(t); if (t === 'compliance') loadPrivacyRequests(); }}
             className={`px-4 py-2 rounded-xl text-xs font-black uppercase tracking-wider whitespace-nowrap ${tab===t?'bg-torqued-red text-white':'text-white/40 hover:text-white'}`}>
             {t === 'postmvp' ? 'Post-MVP' : t}
           </button>
@@ -427,6 +487,118 @@ export const AdminPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) => {
                 </div>
               </div>
             ))}
+          </div>
+        )}
+
+        {tab === 'compliance' && (
+          <div className="space-y-6 max-w-2xl">
+            <h2 className="text-lg font-black uppercase tracking-tight">Compliance & Privacy</h2>
+
+            {/* AI Controls */}
+            <div className="bg-card border border-white/10 rounded-2xl p-5 space-y-4">
+              <div>
+                <h3 className="font-black text-sm uppercase text-torqued-red">AI Feature Control</h3>
+                <p className="text-xs text-white/40 mt-0.5">Disable or re-enable AI features for a customer account. The customer will be notified by email.</p>
+              </div>
+              <div className="flex gap-2">
+                <input value={aiEmail} onChange={e => { setAiEmail(e.target.value); setAiCustomer(null); setAiMsg(null); }}
+                  onKeyDown={e => { if (e.key === 'Enter') lookupAiCustomer(); }}
+                  placeholder="Customer email address"
+                  className="flex-1 bg-white/5 border border-white/10 rounded-xl px-3 h-10 text-sm text-white placeholder:text-white/30 focus:outline-none focus:border-torqued-red" />
+                <button onClick={lookupAiCustomer} disabled={!aiEmail || aiBusy}
+                  className="bg-white/10 text-white text-xs font-bold px-4 rounded-xl disabled:opacity-40 hover:bg-white/20 transition-colors">
+                  {aiBusy ? '…' : 'Look up'}
+                </button>
+              </div>
+              {aiCustomer && (
+                <div className="bg-white/5 rounded-xl p-4 space-y-3">
+                  <div>
+                    <p className="font-bold text-white text-sm">{aiCustomer.name || aiCustomer.email}</p>
+                    <p className="text-xs text-white/40">{aiCustomer.email}</p>
+                    <p className={`text-xs font-bold mt-1 ${aiCustomer.ai_disabled ? 'text-amber-400' : 'text-emerald-400'}`}>
+                      AI features: {aiCustomer.ai_disabled ? 'Disabled (paused by request)' : 'Enabled'}
+                    </p>
+                  </div>
+                  <div className="flex gap-2">
+                    {!aiCustomer.ai_disabled ? (
+                      <button onClick={() => toggleAi(true)} disabled={aiBusy}
+                        className="text-xs font-bold bg-amber-500/20 text-amber-400 border border-amber-500/30 px-4 py-2 rounded-lg disabled:opacity-40 hover:bg-amber-500/30 transition-colors">
+                        {aiBusy ? 'Working…' : 'Disable AI for this customer'}
+                      </button>
+                    ) : (
+                      <button onClick={() => toggleAi(false)} disabled={aiBusy}
+                        className="text-xs font-bold bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 px-4 py-2 rounded-lg disabled:opacity-40 hover:bg-emerald-500/30 transition-colors">
+                        {aiBusy ? 'Working…' : 'Re-enable AI for this customer'}
+                      </button>
+                    )}
+                  </div>
+                </div>
+              )}
+              {aiMsg && <p className={`text-xs font-bold ${aiMsg.startsWith('✓') ? 'text-emerald-400' : 'text-torqued-red'}`}>{aiMsg}</p>}
+            </div>
+
+            {/* Privacy Act Requests */}
+            <div className="bg-card border border-white/10 rounded-2xl p-5 space-y-4">
+              <div>
+                <h3 className="font-black text-sm uppercase text-torqued-red">Privacy Act Requests</h3>
+                <p className="text-xs text-white/40 mt-0.5">Log and manage requests under the NZ Privacy Act 2020. Data export requests must be fulfilled within 20 working days. Vehicle service history is retained indefinitely per legal obligation; only profile data is erased on deletion.</p>
+              </div>
+              <div className="space-y-2.5">
+                <input value={privacyForm.email} onChange={e => setPrivacyForm(f => ({ ...f, email: e.target.value }))}
+                  placeholder="Customer email address"
+                  className="w-full bg-white/5 border border-white/10 rounded-xl px-3 h-10 text-sm text-white placeholder:text-white/30 focus:outline-none focus:border-torqued-red" />
+                <select value={privacyForm.type} onChange={e => setPrivacyForm(f => ({ ...f, type: e.target.value }))}
+                  className="w-full bg-white/5 border border-white/10 rounded-xl px-3 h-10 text-sm text-white focus:outline-none focus:border-torqued-red">
+                  <option value="export">Data export request (Access request)</option>
+                  <option value="delete">Deletion / erasure request</option>
+                  <option value="correction">Correction request</option>
+                  <option value="complaint">Privacy complaint</option>
+                </select>
+                <textarea value={privacyForm.notes} onChange={e => setPrivacyForm(f => ({ ...f, notes: e.target.value }))}
+                  placeholder="Notes (optional)"
+                  rows={2}
+                  className="w-full bg-white/5 border border-white/10 rounded-xl px-3 py-2 text-sm text-white placeholder:text-white/30 focus:outline-none focus:border-torqued-red resize-none" />
+                {privacyMsg && <p className={`text-xs font-bold ${privacyMsg.startsWith('✓') ? 'text-emerald-400' : 'text-torqued-red'}`}>{privacyMsg}</p>}
+                <button onClick={submitPrivacyRequest} disabled={privacyBusy || !privacyForm.email}
+                  className="bg-torqued-red text-white text-xs font-bold px-5 py-2.5 rounded-xl disabled:opacity-40 hover:bg-red-700 transition-colors">
+                  {privacyBusy ? 'Logging…' : 'Log Request'}
+                </button>
+              </div>
+            </div>
+
+            {/* Existing requests */}
+            {privacyRequests.length > 0 && (
+              <div className="space-y-2">
+                <h3 className="text-sm font-black uppercase text-white/40">Logged Requests ({privacyRequests.length})</h3>
+                {privacyRequests.map((r: any) => (
+                  <div key={r.id} className="bg-card border border-white/10 rounded-xl p-4 flex items-start justify-between gap-4">
+                    <div>
+                      <p className="text-sm font-bold text-white">{r.customer_email}</p>
+                      <p className="text-xs text-white/40">{r.request_type} · {new Date(r.created_at).toLocaleDateString('en-NZ')} · <span className={r.status === 'resolved' ? 'text-emerald-400' : 'text-amber-400'}>{r.status}</span></p>
+                      {r.notes && <p className="text-xs text-white/40 italic mt-0.5">"{r.notes}"</p>}
+                    </div>
+                    {r.status !== 'resolved' && (
+                      <button onClick={async () => {
+                        await fetch('/api/admin/resolve-privacy-request', {
+                          method: 'POST', headers: { 'Content-Type': 'application/json' },
+                          body: JSON.stringify({ key, id: r.id }),
+                        });
+                        await loadPrivacyRequests();
+                      }} className="text-[10px] font-bold text-emerald-400 border border-emerald-400/30 px-3 py-1.5 rounded-lg hover:bg-emerald-400/10 shrink-0">
+                        Mark resolved
+                      </button>
+                    )}
+                  </div>
+                ))}
+              </div>
+            )}
+
+            {/* Privacy policy link */}
+            <div className="bg-card border border-white/10 rounded-2xl p-4 text-xs text-white/40 space-y-1">
+              <p className="font-bold text-white/60">Privacy Policy</p>
+              <p>Published policy document: <a href="/privacy-policy.pdf" target="_blank" rel="noreferrer" className="text-torqued-red underline">View Privacy Policy PDF</a></p>
+              <p>For privacy enquiries: <a href="mailto:torqued.nz@icloud.com" className="text-torqued-red">torqued.nz@icloud.com</a></p>
+            </div>
           </div>
         )}
 

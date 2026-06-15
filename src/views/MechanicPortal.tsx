@@ -750,6 +750,73 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
   const [showColdQuote, setShowColdQuote] = useState(false);
   const [coldBusy, setColdBusy] = useState(false);
   const [coldForm, setColdForm] = useState({ customerName: '', email: '', phone: '', rego: '', make: '', model: '', description: '', date: '' });
+
+  // OTP / service history access states
+  type HistoryAccessState = 'idle' | 'checking' | 'no_account' | 'prior_booking' | 'needs_otp' | 'otp_sent' | 'already_sent' | 'no_email' | 'entering_code' | 'verifying' | 'granted' | 'error';
+  const [histAccessState, setHistAccessState] = useState<HistoryAccessState>('idle');
+  const [histAccessMsg, setHistAccessMsg] = useState<string | null>(null);
+  const [histOtpInput, setHistOtpInput] = useState('');
+  const [histOtpExpiry, setHistOtpExpiry] = useState<string | null>(null);
+  const [unlockedHistory, setUnlockedHistory] = useState<{ imported: any[]; torquedJobs: any[] } | null>(null);
+  const [coldRegoLookedUp, setColdRegoLookedUp] = useState(false);
+
+  const checkHistoryAccess = async (plateRego: string) => {
+    if (!user?.id || !plateRego) return;
+    setHistAccessState('checking');
+    setHistAccessMsg(null);
+    setUnlockedHistory(null);
+    try {
+      const r = await fetch('/api/mechanic/request-history-access', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ mechanicId: user.id, rego: plateRego }),
+      });
+      const d = await r.json();
+      if (!d.hasAccount) { setHistAccessState('no_account'); return; }
+      if (d.priorBooking) {
+        setHistAccessState('prior_booking');
+        // Load history directly
+        const hr = await fetch(`/api/mechanic/history-direct?mechanicId=${encodeURIComponent(user.id)}&rego=${encodeURIComponent(plateRego)}`);
+        if (hr.ok) { const hd = await hr.json(); setUnlockedHistory(hd.history); setHistAccessState('granted'); }
+        return;
+      }
+      if (d.noEmail) { setHistAccessState('no_email'); return; }
+      if (d.alreadySent) {
+        setHistOtpExpiry(d.expiresAt);
+        setHistAccessState('already_sent');
+        return;
+      }
+      if (d.otpSent) {
+        setHistOtpExpiry(d.expiresAt);
+        setHistAccessState('otp_sent');
+        return;
+      }
+      setHistAccessState('needs_otp');
+    } catch {
+      setHistAccessState('error');
+      setHistAccessMsg('Could not connect. Please try again.');
+    }
+  };
+
+  const verifyHistOtp = async () => {
+    if (!user?.id || !coldForm.rego || !histOtpInput.trim()) return;
+    setHistAccessState('verifying');
+    try {
+      const r = await fetch('/api/mechanic/verify-history-otp', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ mechanicId: user.id, rego: coldForm.rego, otp: histOtpInput.trim() }),
+      });
+      const d = await r.json();
+      if (!r.ok) { setHistAccessState('entering_code'); setHistAccessMsg(d.error || 'Invalid code.'); return; }
+      setUnlockedHistory(d.history);
+      setHistAccessState('granted');
+      setHistAccessMsg(null);
+    } catch {
+      setHistAccessState('entering_code');
+      setHistAccessMsg('Could not connect. Please try again.');
+    }
+  };
   const [procurementQueue, setProcurementQueue] = useState<ProcurementItem[]>([]);
   const [diagnosticStep, setDiagnosticStep] = useState<'review' | 'inspect' | 'quote' | 'sent'>('review');
   const [diagnosticFindings, setDiagnosticFindings] = useState('');
@@ -3629,22 +3696,165 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
               {([['customerName','Customer name *'],['email','Email *'],['phone','Phone'],['rego','Rego'],['make','Make'],['model','Model']] as const).map(([f,l]) => (
                 <input key={f} value={(coldForm as any)[f]} placeholder={l}
-                  onChange={e => setColdForm(c => ({ ...c, [f]: f === 'rego' ? e.target.value.toUpperCase() : e.target.value }))}
+                  onChange={e => {
+                    setColdForm(c => ({ ...c, [f]: f === 'rego' ? e.target.value.toUpperCase() : e.target.value }));
+                    if (f === 'rego') { setColdRegoLookedUp(false); setHistAccessState('idle'); setUnlockedHistory(null); }
+                  }}
                   onBlur={f === 'rego' ? async () => {
                     const plate = coldForm.rego.trim().toUpperCase();
-                    if (!plate) return;
-                    try { const v = await fetch(`/api/vehicles/${encodeURIComponent(plate)}`).then(r => r.ok ? r.json() : null); if (v) setColdForm(c => ({ ...c, make: c.make || v.make || '', model: c.model || v.model || '' })); } catch {}
+                    if (!plate || coldRegoLookedUp) return;
+                    setColdRegoLookedUp(true);
+                    try {
+                      // Try Carjam first, fall back to our vehicles table
+                      const cj = await fetch(`/api/rego/carjam?plate=${encodeURIComponent(plate)}`).then(r => r.ok ? r.json() : null);
+                      if (cj?.make) {
+                        setColdForm(c => ({ ...c, make: c.make || cj.make || '', model: c.model || cj.model || '' }));
+                      } else {
+                        const v = await fetch(`/api/vehicles/${encodeURIComponent(plate)}`).then(r => r.ok ? r.json() : null);
+                        if (v) setColdForm(c => ({ ...c, make: c.make || v.make || '', model: c.model || v.model || '' }));
+                      }
+                      // After vehicle details fetched, check if customer account exists
+                      await checkHistoryAccess(plate);
+                    } catch {}
                   } : undefined}
                   className="bg-background border border-border rounded-lg px-3 h-10 text-sm text-foreground" />
               ))}
             </div>
+
+            {/* Service History Access Panel */}
+            {histAccessState !== 'idle' && coldForm.rego && (
+              <div className="rounded-xl border border-border bg-background p-4 space-y-3">
+                <p className="text-[10px] font-black uppercase tracking-widest text-muted">Customer Service History</p>
+
+                {histAccessState === 'checking' && (
+                  <p className="text-xs text-muted flex items-center gap-2">
+                    <span className="inline-block w-3 h-3 border-2 border-muted border-t-foreground rounded-full animate-spin" />
+                    Checking for Torqued account…
+                  </p>
+                )}
+
+                {histAccessState === 'no_account' && (
+                  <p className="text-xs text-muted">No Torqued account linked to this plate. You can still proceed with the quote.</p>
+                )}
+
+                {histAccessState === 'no_email' && (
+                  <p className="text-xs text-amber-500">This customer has a Torqued account but no email on file. Contact support to resolve.</p>
+                )}
+
+                {histAccessState === 'needs_otp' && (
+                  <div className="space-y-2">
+                    <p className="text-xs text-foreground">The owner of this vehicle has a Torqued account. To view their service history, we need to send them a one-time access code. Once they provide you with the code, enter it below to unlock their service history for this quote.</p>
+                    <button
+                      onClick={() => checkHistoryAccess(coldForm.rego)}
+                      className="text-xs font-bold bg-torqued-red text-white px-4 py-2 rounded-lg hover:bg-torqued-red/80 transition-colors">
+                      Send Access Code
+                    </button>
+                  </div>
+                )}
+
+                {(histAccessState === 'otp_sent' || histAccessState === 'already_sent') && (
+                  <div className="space-y-2">
+                    <p className="text-xs text-foreground">
+                      {histAccessState === 'already_sent'
+                        ? 'A code has already been sent to the vehicle owner.'
+                        : 'An access code has been sent to the vehicle owner\'s email.'}
+                      {histOtpExpiry && <span className="text-muted"> Expires {new Date(histOtpExpiry).toLocaleTimeString('en-NZ', { hour: 'numeric', minute: '2-digit' })}.</span>}
+                    </p>
+                    <div className="flex gap-2">
+                      <input
+                        type="text"
+                        inputMode="numeric"
+                        maxLength={6}
+                        value={histOtpInput}
+                        onChange={e => setHistOtpInput(e.target.value.replace(/\D/g, '').slice(0, 6))}
+                        placeholder="Enter 6-digit code"
+                        className="flex-1 bg-card border border-border rounded-lg px-3 h-10 text-sm text-foreground tracking-widest font-mono text-center"
+                      />
+                      <button
+                        onClick={verifyHistOtp}
+                        disabled={histOtpInput.length !== 6}
+                        className="text-xs font-bold bg-torqued-red text-white px-4 py-2 rounded-lg disabled:opacity-40 hover:bg-torqued-red/80 transition-colors">
+                        Unlock
+                      </button>
+                    </div>
+                    {histAccessMsg && <p className="text-xs text-torqued-red font-bold">{histAccessMsg}</p>}
+                  </div>
+                )}
+
+                {histAccessState === 'entering_code' && (
+                  <div className="space-y-2">
+                    <div className="flex gap-2">
+                      <input
+                        type="text"
+                        inputMode="numeric"
+                        maxLength={6}
+                        value={histOtpInput}
+                        onChange={e => setHistOtpInput(e.target.value.replace(/\D/g, '').slice(0, 6))}
+                        placeholder="Enter 6-digit code"
+                        className="flex-1 bg-card border border-border rounded-lg px-3 h-10 text-sm text-foreground tracking-widest font-mono text-center"
+                      />
+                      <button
+                        onClick={verifyHistOtp}
+                        disabled={histOtpInput.length !== 6}
+                        className="text-xs font-bold bg-torqued-red text-white px-4 py-2 rounded-lg disabled:opacity-40">
+                        Unlock
+                      </button>
+                    </div>
+                    {histAccessMsg && <p className="text-xs text-torqued-red font-bold">{histAccessMsg}</p>}
+                  </div>
+                )}
+
+                {histAccessState === 'verifying' && (
+                  <p className="text-xs text-muted flex items-center gap-2">
+                    <span className="inline-block w-3 h-3 border-2 border-muted border-t-foreground rounded-full animate-spin" />
+                    Verifying code…
+                  </p>
+                )}
+
+                {histAccessState === 'prior_booking' && (
+                  <p className="text-xs text-emerald-600 dark:text-emerald-400 flex items-center gap-1.5">
+                    <span>✓</span> Prior booking found — loading history…
+                  </p>
+                )}
+
+                {histAccessState === 'granted' && unlockedHistory && (
+                  <div className="space-y-2">
+                    <p className="text-xs text-emerald-600 dark:text-emerald-400 font-bold flex items-center gap-1.5">
+                      <span>✓</span> Service history unlocked
+                    </p>
+                    {unlockedHistory.imported.length === 0 && unlockedHistory.torquedJobs.length === 0 && (
+                      <p className="text-xs text-muted italic">No service history records on file.</p>
+                    )}
+                    <div className="space-y-1 max-h-40 overflow-y-auto">
+                      {unlockedHistory.torquedJobs.map((j: any, i: number) => (
+                        <div key={`tj${i}`} className="flex justify-between text-xs text-foreground bg-card rounded px-2 py-1.5 border border-border">
+                          <span className="font-medium">{(j.date || (j.created_at || '').slice(0, 10))} · {(j.service_ids || []).join(', ') || 'Torqued job'}</span>
+                          <span className="text-muted shrink-0">${j.total_price || 0}</span>
+                        </div>
+                      ))}
+                      {unlockedHistory.imported.map((h: any, i: number) => (
+                        <div key={`ih${i}`} className="flex justify-between text-xs text-foreground bg-card rounded px-2 py-1.5 border border-border">
+                          <span>{h.service_date || '—'} · {h.work_done || 'Service'}{h.provider ? ` · ${h.provider}` : ''}</span>
+                          <span className="text-muted shrink-0">{h.mileage ? `${Number(h.mileage).toLocaleString()} km` : ''}</span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {histAccessState === 'error' && (
+                  <p className="text-xs text-torqued-red">{histAccessMsg || 'Something went wrong.'}</p>
+                )}
+              </div>
+            )}
+
             <textarea value={coldForm.description} onChange={e => setColdForm(c => ({ ...c, description: e.target.value }))} rows={2} placeholder="Work required / notes" className="w-full bg-background border border-border rounded-lg px-3 py-2 text-sm text-foreground resize-none" />
             <div className="space-y-1">
               <label className="text-[10px] font-black uppercase tracking-widest text-muted">Proposed date (optional — customer can confirm)</label>
               <input type="date" value={coldForm.date} onChange={e => setColdForm(c => ({ ...c, date: e.target.value }))} className="w-full bg-background border border-border rounded-lg px-3 h-10 text-sm text-foreground" />
             </div>
             <div className="flex gap-2">
-              <Button variant="outline" fullWidth className="text-foreground border-border" onClick={() => setShowColdQuote(false)}>Cancel</Button>
+              <Button variant="outline" fullWidth className="text-foreground border-border" onClick={() => { setShowColdQuote(false); setHistAccessState('idle'); setUnlockedHistory(null); setColdRegoLookedUp(false); }}>Cancel</Button>
               <Button fullWidth className="bg-torqued-red text-white" disabled={coldBusy || !coldForm.customerName || !coldForm.email} onClick={async () => {
                 setColdBusy(true);
                 try {
@@ -3652,6 +3862,7 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                   const d = await r.json();
                   if (!r.ok) { alert(d.error || 'Could not create cold quote.'); return; }
                   setShowColdQuote(false);
+                  setHistAccessState('idle'); setUnlockedHistory(null); setColdRegoLookedUp(false);
                   openQuoteEditor({ id: d.bookingId, reg: coldForm.rego, customerName: coldForm.customerName, model: `${coldForm.make} ${coldForm.model}`.trim() || coldForm.rego, services: [] });
                 } catch { alert('Could not create cold quote.'); }
                 finally { setColdBusy(false); }

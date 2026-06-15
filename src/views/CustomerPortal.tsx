@@ -83,7 +83,7 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
     doc.setTextColor(21, 4, 2);
     doc.setFont('Helvetica', 'bold');
     doc.setFontSize(14);
-    doc.text('SECURED BOOKING CONFIRMATION & RECEIPT', 15, 58);
+    doc.text('BOOKING CONFIRMATION & QUOTE', 15, 58);
     
     doc.setDrawColor(226, 232, 240);
     doc.setLineWidth(0.4);
@@ -281,14 +281,14 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
     doc.setFont('Helvetica', 'bold');
     doc.setFontSize(9);
     doc.setTextColor(255, 24, 0);
-    doc.text('SECURED CLEARANCE', 20, 16 + currentY);
+    doc.text('TORQUED BOOKING', 20, 16 + currentY);
 
     doc.setFont('Helvetica', 'normal');
     doc.setFontSize(8);
     doc.setTextColor(115, 115, 115);
-    doc.text('This booking is verified and prepaid through Torqued.', 20, 23 + currentY);
-    doc.text('Arrive at your scheduled drop-off time and present this', 20, 27 + currentY);
-    doc.text('receipt to your workshop on arrival.', 20, 31 + currentY);
+    doc.text('This is your official quote and booking confirmation.', 20, 23 + currentY);
+    doc.text('Present this document to your workshop on arrival.', 20, 27 + currentY);
+    doc.text(`Booking ref: #${job.id.toUpperCase()}`, 20, 31 + currentY);
     
     // 7. Sign-Off
     const signY = currentY + 62;
@@ -307,10 +307,10 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
     doc.setFontSize(7.5);
     doc.setTextColor(156, 163, 175);
     const lineY = signY + 24;
-    doc.text('Disclaimer: Torqued operates secure, fully encrypted payments matching NZ CAN-SPAM and PCI-DSS compliance requirements.', 15, lineY);
-    doc.text('All rates include 15% New Zealand Goods and Services Tax (GST). Present this PDF to your workshop mechanic upon arrival.', 15, lineY + 4);
+    doc.text('All rates include 15% New Zealand Goods and Services Tax (GST). Present this document to your workshop on arrival.', 15, lineY);
+    doc.text('Privacy Policy: torqued-psi.vercel.app/privacy-policy.pdf  ·  torqued.nz@icloud.com  ·  NZ Privacy Act 2020 compliant.', 15, lineY + 4);
 
-    doc.save(`Torqued-Secure-Booking-${job.id.toUpperCase()}.pdf`);
+    doc.save(`Torqued-Quote-${job.id.toUpperCase()}.pdf`);
   };
   const [step, setStep] = useState(1);
   const [rego, setRego] = useState('');

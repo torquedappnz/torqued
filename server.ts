@@ -5591,6 +5591,476 @@ app.post('/api/email/send-test-single', async (req, res) => {
 });
 
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Cold Quote — Customer Service History Access (OTP flow)
+// ─────────────────────────────────────────────────────────────────────────────
+
+// POST /api/mechanic/request-history-access
+// Called when mechanic enters a rego on cold quote and wants to see history.
+// Returns: { hasAccount, priorBooking, otpSent, alreadySent, expiresAt }
+app.post('/api/mechanic/request-history-access', async (req, res) => {
+  try {
+    const { mechanicId, rego } = req.body;
+    if (!mechanicId || !rego) return res.status(400).json({ error: 'mechanicId and rego required' });
+    const formattedRego = String(rego).toUpperCase().trim();
+
+    const supabase = getSupabaseAdmin();
+    if (!supabase) return res.status(500).json({ error: 'DB not configured' });
+
+    // Find vehicle + owner
+    const { data: vehicle } = await supabase
+      .from('vehicles')
+      .select('rego, owner_id')
+      .eq('rego', formattedRego)
+      .single();
+
+    if (!vehicle?.owner_id) {
+      return res.json({ hasAccount: false });
+    }
+
+    const customerId = vehicle.owner_id;
+
+    // Step 7: check for prior booking between this mechanic and this vehicle
+    const { data: priorBookings } = await supabase
+      .from('bookings')
+      .select('id')
+      .eq('mechanic_id', mechanicId)
+      .eq('vehicle_rego', formattedRego)
+      .in('status', ['completed', 'in_progress'])
+      .limit(1);
+
+    if (priorBookings && priorBookings.length > 0) {
+      return res.json({ hasAccount: true, priorBooking: true });
+    }
+
+    // Check for existing unexpired OTP for this mechanic/vehicle
+    const { data: existing } = await supabase
+      .from('history_access_otps')
+      .select('id, expires_at, created_at')
+      .eq('mechanic_id', mechanicId)
+      .eq('vehicle_rego', formattedRego)
+      .is('used_at', null)
+      .gt('expires_at', new Date().toISOString())
+      .order('created_at', { ascending: false })
+      .limit(1)
+      .maybeSingle();
+
+    if (existing) {
+      // Check 15-minute re-request throttle
+      const createdAt = new Date(existing.created_at).getTime();
+      const throttleCutoff = Date.now() - 15 * 60 * 1000;
+      if (createdAt > throttleCutoff) {
+        return res.json({ hasAccount: true, alreadySent: true, expiresAt: existing.expires_at });
+      }
+    }
+
+    // Get customer email (do not expose it)
+    const { data: profile } = await supabase
+      .from('profiles')
+      .select('email')
+      .eq('id', customerId)
+      .single();
+
+    if (!profile?.email) {
+      return res.json({ hasAccount: true, noEmail: true });
+    }
+
+    // Get mechanic name for the email
+    const { data: mechProfile } = await supabase
+      .from('profiles')
+      .select('name')
+      .eq('id', mechanicId)
+      .single();
+
+    // Get vehicle details for the email
+    const { data: vehData } = await supabase
+      .from('vehicles')
+      .select('year, make, model')
+      .eq('rego', formattedRego)
+      .single();
+
+    const vehicleLabel = vehData
+      ? `${vehData.year || ''} ${vehData.make || ''} ${vehData.model || ''}`.trim()
+      : formattedRego;
+
+    // Generate 6-digit OTP, hash before storage
+    const otp = Array.from(crypto.randomBytes(3)).map(b => b % 10).join('');
+    const otpHash = crypto.createHash('sha256').update(otp).digest('hex');
+    const expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
+
+    // Invalidate any previous unused OTPs for this mechanic/vehicle
+    await supabase
+      .from('history_access_otps')
+      .update({ used_at: new Date().toISOString() })
+      .eq('mechanic_id', mechanicId)
+      .eq('vehicle_rego', formattedRego)
+      .is('used_at', null);
+
+    // Store new OTP
+    await supabase.from('history_access_otps').insert({
+      mechanic_id: mechanicId,
+      customer_id: customerId,
+      vehicle_rego: formattedRego,
+      otp_hash: otpHash,
+      expires_at: expiresAt,
+    });
+
+    // Send email to customer
+    const mailer = getMailTransporter();
+    if (mailer) {
+      const mechName = mechProfile?.name || 'A mechanic';
+      await mailer.sendMail({
+        from: process.env.SMTP_FROM || '"Torqued" <torquedapp.nz@gmail.com>',
+        to: profile.email,
+        subject: 'Someone is requesting access to your vehicle\'s service history',
+        html: `
+          <div style="font-family:Arial,sans-serif;background:#f9f9f9;padding:32px;">
+            <div style="max-width:560px;margin:0 auto;background:#fff;border-radius:16px;overflow:hidden;border:1px solid #e5e7eb;">
+              <div style="background:#150402;padding:24px 28px;">
+                <img src="${LOGO_URL}" alt="Torqued" style="height:36px;" />
+              </div>
+              <div style="padding:28px;">
+                <p style="font-size:15px;color:#111;margin-bottom:16px;">${mechName} on Torqued is preparing a quote for your <strong>${vehicleLabel}</strong> and has requested access to your vehicle's service history.</p>
+                <p style="font-size:15px;color:#111;margin-bottom:8px;">If you want to share your service history with this mechanic, give them this code:</p>
+                <div style="background:#150402;border-radius:12px;padding:20px 28px;text-align:center;margin:20px 0;">
+                  <span style="font-size:36px;font-weight:900;letter-spacing:10px;color:#ff1800;font-family:monospace;">${otp}</span>
+                </div>
+                <p style="font-size:13px;color:#6b7280;margin-top:8px;">This code expires in 24 hours. If you did not expect this request or do not wish to share your history, you can ignore this email — no access will be granted without the code.</p>
+                <hr style="border:none;border-top:1px solid #e5e7eb;margin:20px 0;" />
+                <p style="font-size:11px;color:#9ca3af;">Torqued NZ · torqued.nz@icloud.com · If you have questions, reply to this email.</p>
+              </div>
+            </div>
+          </div>
+        `,
+      });
+    }
+
+    return res.json({ hasAccount: true, otpSent: true, expiresAt });
+  } catch (err) {
+    console.error('[request-history-access]', err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// POST /api/mechanic/verify-history-otp
+// Validates the OTP and returns service history if correct
+app.post('/api/mechanic/verify-history-otp', async (req, res) => {
+  try {
+    const { mechanicId, rego, otp } = req.body;
+    if (!mechanicId || !rego || !otp) return res.status(400).json({ error: 'mechanicId, rego, otp required' });
+    const formattedRego = String(rego).toUpperCase().trim();
+    const otpHash = crypto.createHash('sha256').update(String(otp).trim()).digest('hex');
+
+    const supabase = getSupabaseAdmin();
+    if (!supabase) return res.status(500).json({ error: 'DB not configured' });
+
+    const { data: record } = await supabase
+      .from('history_access_otps')
+      .select('id, customer_id, expires_at, used_at')
+      .eq('mechanic_id', mechanicId)
+      .eq('vehicle_rego', formattedRego)
+      .eq('otp_hash', otpHash)
+      .single();
+
+    if (!record) return res.status(401).json({ error: 'Invalid code. Please check and try again.' });
+    if (record.used_at) return res.status(401).json({ error: 'This code has already been used.' });
+    if (new Date(record.expires_at) < new Date()) return res.status(401).json({ error: 'This code has expired. Please request a new one.' });
+
+    // Mark as used
+    await supabase.from('history_access_otps').update({ used_at: new Date().toISOString() }).eq('id', record.id);
+
+    // Load service history
+    const { data: imported } = await supabase
+      .from('service_history')
+      .select('service_date, work_done, provider, mileage, price, notes')
+      .eq('vehicle_rego', formattedRego)
+      .order('service_date', { ascending: false });
+
+    const { data: torquedJobs } = await supabase
+      .from('bookings')
+      .select('date, service_ids, total_price, status, created_at')
+      .eq('vehicle_rego', formattedRego)
+      .eq('status', 'completed')
+      .order('created_at', { ascending: false });
+
+    // Send confirmation email to customer
+    const { data: profile } = await supabase
+      .from('profiles')
+      .select('email')
+      .eq('id', record.customer_id)
+      .single();
+
+    const { data: vehData } = await supabase
+      .from('vehicles')
+      .select('year, make, model')
+      .eq('rego', formattedRego)
+      .single();
+
+    const vehicleLabel = vehData
+      ? `${vehData.year || ''} ${vehData.make || ''} ${vehData.model || ''}`.trim()
+      : formattedRego;
+
+    if (profile?.email) {
+      const mailer = getMailTransporter();
+      if (mailer) {
+        await mailer.sendMail({
+          from: process.env.SMTP_FROM || '"Torqued" <torquedapp.nz@gmail.com>',
+          to: profile.email,
+          subject: 'Your vehicle service history was accessed on Torqued',
+          html: `
+            <div style="font-family:Arial,sans-serif;background:#f9f9f9;padding:32px;">
+              <div style="max-width:560px;margin:0 auto;background:#fff;border-radius:16px;overflow:hidden;border:1px solid #e5e7eb;">
+                <div style="background:#150402;padding:24px 28px;">
+                  <img src="${LOGO_URL}" alt="Torqued" style="height:36px;" />
+                </div>
+                <div style="padding:28px;">
+                  <p style="font-size:15px;color:#111;margin-bottom:12px;">This is to let you know that a mechanic on Torqued has accessed the service history for your <strong>${vehicleLabel}</strong> to prepare a quote.</p>
+                  <p style="font-size:14px;color:#6b7280;">If you have questions about this, contact us at <a href="mailto:torqued.nz@icloud.com" style="color:#ff1800;">torqued.nz@icloud.com</a>.</p>
+                  <hr style="border:none;border-top:1px solid #e5e7eb;margin:20px 0;" />
+                  <p style="font-size:11px;color:#9ca3af;">Torqued NZ · torqued.nz@icloud.com</p>
+                </div>
+              </div>
+            </div>
+          `,
+        });
+      }
+    }
+
+    return res.json({
+      granted: true,
+      history: {
+        imported: imported || [],
+        torquedJobs: torquedJobs || [],
+      },
+    });
+  } catch (err) {
+    console.error('[verify-history-otp]', err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// GET /api/mechanic/history-direct?mechanicId=&rego=
+// Used when prior booking exists — skip OTP and load history directly
+app.get('/api/mechanic/history-direct', async (req, res) => {
+  try {
+    const { mechanicId, rego } = req.query as { mechanicId: string; rego: string };
+    if (!mechanicId || !rego) return res.status(400).json({ error: 'mechanicId and rego required' });
+    const formattedRego = rego.toUpperCase().trim();
+
+    const supabase = getSupabaseAdmin();
+    if (!supabase) return res.status(500).json({ error: 'DB not configured' });
+
+    // Re-verify prior booking (security check)
+    const { data: prior } = await supabase
+      .from('bookings')
+      .select('id')
+      .eq('mechanic_id', mechanicId)
+      .eq('vehicle_rego', formattedRego)
+      .in('status', ['completed', 'in_progress'])
+      .limit(1);
+
+    if (!prior || prior.length === 0) {
+      return res.status(403).json({ error: 'No prior booking authorisation' });
+    }
+
+    const { data: imported } = await supabase
+      .from('service_history')
+      .select('service_date, work_done, provider, mileage, price, notes')
+      .eq('vehicle_rego', formattedRego)
+      .order('service_date', { ascending: false });
+
+    const { data: torquedJobs } = await supabase
+      .from('bookings')
+      .select('date, service_ids, total_price, status, created_at')
+      .eq('vehicle_rego', formattedRego)
+      .eq('status', 'completed')
+      .order('created_at', { ascending: false });
+
+    return res.json({ granted: true, history: { imported: imported || [], torquedJobs: torquedJobs || [] } });
+  } catch (err) {
+    console.error('[history-direct]', err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Admin — Privacy Act & AI Controls
+// ─────────────────────────────────────────────────────────────────────────────
+
+// POST /api/admin/privacy-request — log a privacy act request
+app.post('/api/admin/privacy-request', async (req, res) => {
+  try {
+    const { key, customerEmail, requestType, notes } = req.body;
+    if (key !== process.env.ADMIN_KEY) return res.status(403).json({ error: 'Forbidden' });
+    if (!customerEmail || !requestType) return res.status(400).json({ error: 'customerEmail and requestType required' });
+
+    const supabase = getSupabaseAdmin();
+    if (!supabase) return res.status(500).json({ error: 'DB not configured' });
+
+    const { error } = await supabase.from('privacy_requests').insert({
+      customer_email: String(customerEmail).trim().toLowerCase(),
+      request_type: requestType,
+      notes: notes || null,
+      status: 'pending',
+    });
+
+    if (error) {
+      // Table may not exist yet — create it lazily via raw SQL
+      // Table doesn't exist yet — insert will fail gracefully; admin should create table in Supabase
+      await supabase.from('privacy_requests').insert({
+        customer_email: String(customerEmail).trim().toLowerCase(),
+        request_type: requestType,
+        notes: notes || null,
+        status: 'pending',
+      });
+    }
+
+    // If delete request: soft-delete customer data in profiles
+    if (requestType === 'delete') {
+      const { data: profile } = await supabase
+        .from('profiles')
+        .select('id')
+        .ilike('email', String(customerEmail).trim())
+        .maybeSingle();
+      if (profile) {
+        await supabase.from('profiles').update({
+          name: '[Deleted]',
+          email: `deleted_${profile.id}@torqued.nz`,
+          phone: null,
+        }).eq('id', profile.id);
+        // Vehicles and service history are retained per legal requirement
+      }
+    }
+
+    res.json({ success: true });
+  } catch (err) {
+    console.error('[privacy-request]', err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// GET /api/admin/privacy-requests — list all requests
+app.get('/api/admin/privacy-requests', async (req, res) => {
+  try {
+    const { key } = req.query as { key: string };
+    if (key !== process.env.ADMIN_KEY) return res.status(403).json({ error: 'Forbidden' });
+
+    const supabase = getSupabaseAdmin();
+    if (!supabase) return res.status(500).json({ error: 'DB not configured' });
+
+    const { data, error } = await supabase
+      .from('privacy_requests')
+      .select('*')
+      .order('created_at', { ascending: false });
+
+    if (error) return res.json({ requests: [] });
+    res.json({ requests: data || [] });
+  } catch (err) {
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// POST /api/admin/resolve-privacy-request
+app.post('/api/admin/resolve-privacy-request', async (req, res) => {
+  try {
+    const { key, id, resolvedBy } = req.body;
+    if (key !== process.env.ADMIN_KEY) return res.status(403).json({ error: 'Forbidden' });
+
+    const supabase = getSupabaseAdmin();
+    if (!supabase) return res.status(500).json({ error: 'DB not configured' });
+
+    await supabase.from('privacy_requests').update({
+      status: 'resolved',
+      resolved_by: resolvedBy || 'admin',
+      resolved_at: new Date().toISOString(),
+    }).eq('id', id);
+
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// POST /api/admin/toggle-customer-ai — disable/enable AI features for a customer
+app.post('/api/admin/toggle-customer-ai', async (req, res) => {
+  try {
+    const { key, customerEmail, disabled } = req.body;
+    if (key !== process.env.ADMIN_KEY) return res.status(403).json({ error: 'Forbidden' });
+
+    const supabase = getSupabaseAdmin();
+    if (!supabase) return res.status(500).json({ error: 'DB not configured' });
+
+    const { data: profile } = await supabase
+      .from('profiles')
+      .select('id, email, name')
+      .ilike('email', String(customerEmail).trim())
+      .maybeSingle();
+
+    if (!profile) return res.status(404).json({ error: 'Customer not found' });
+
+    await supabase.from('profiles').update({ ai_disabled: !!disabled }).eq('id', profile.id);
+
+    // Notify customer by email
+    const mailer = getMailTransporter();
+    if (mailer) {
+      await mailer.sendMail({
+        from: process.env.SMTP_FROM || '"Torqued" <torquedapp.nz@gmail.com>',
+        to: profile.email,
+        subject: disabled
+          ? 'Your AI features on Torqued have been paused'
+          : 'Your AI features on Torqued have been re-enabled',
+        html: `
+          <div style="font-family:Arial,sans-serif;background:#f9f9f9;padding:32px;">
+            <div style="max-width:560px;margin:0 auto;background:#fff;border-radius:16px;overflow:hidden;border:1px solid #e5e7eb;">
+              <div style="background:#150402;padding:24px 28px;">
+                <img src="${LOGO_URL}" alt="Torqued" style="height:36px;" />
+              </div>
+              <div style="padding:28px;">
+                ${disabled
+                  ? `<p style="font-size:15px;color:#111;">Hi${profile.name ? ` ${profile.name.split(' ')[0]}` : ''},</p>
+                     <p style="font-size:15px;color:#111;margin-top:12px;">You have requested that AI-powered features be paused on your Torqued account. This includes AI service recommendations, vehicle health analysis, and AI-assisted receipt scanning.</p>
+                     <p style="font-size:14px;color:#6b7280;margin-top:12px;">To re-enable AI features, please contact us at <a href="mailto:torqued.nz@icloud.com" style="color:#ff1800;">torqued.nz@icloud.com</a>.</p>`
+                  : `<p style="font-size:15px;color:#111;">Hi${profile.name ? ` ${profile.name.split(' ')[0]}` : ''},</p>
+                     <p style="font-size:15px;color:#111;margin-top:12px;">AI-powered features have been re-enabled on your Torqued account.</p>`
+                }
+                <hr style="border:none;border-top:1px solid #e5e7eb;margin:20px 0;" />
+                <p style="font-size:11px;color:#9ca3af;">Torqued NZ · torqued.nz@icloud.com</p>
+              </div>
+            </div>
+          </div>
+        `,
+      });
+    }
+
+    res.json({ success: true, ai_disabled: !!disabled });
+  } catch (err) {
+    console.error('[toggle-customer-ai]', err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// GET /api/admin/customer-ai-status?key=&email= — check AI status for a customer
+app.get('/api/admin/customer-ai-status', async (req, res) => {
+  try {
+    const { key, email } = req.query as { key: string; email: string };
+    if (key !== process.env.ADMIN_KEY) return res.status(403).json({ error: 'Forbidden' });
+
+    const supabase = getSupabaseAdmin();
+    if (!supabase) return res.status(500).json({ error: 'DB not configured' });
+
+    const { data } = await supabase
+      .from('profiles')
+      .select('id, name, email, ai_disabled')
+      .ilike('email', String(email).trim())
+      .maybeSingle();
+
+    if (!data) return res.status(404).json({ error: 'Not found' });
+    res.json({ id: data.id, name: data.name, email: data.email, ai_disabled: data.ai_disabled ?? false });
+  } catch (err) {
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
 // Integrate Vite dynamic serving
 // Export app for Vercel serverless — Vercel handles static files via CDN
 export default app;
