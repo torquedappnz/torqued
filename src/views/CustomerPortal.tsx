@@ -441,7 +441,15 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
   const [customSearchResults, setCustomSearchResults] = useState<Array<{ id: string; name: string; indicativePrice: number }>>([]);
   const [customSearchDone, setCustomSearchDone] = useState(false);
   const [customSearchLoading, setCustomSearchLoading] = useState(false);
-  const [carjamVehicle, setCarjamVehicle] = useState<{ make: string; model: string; year: number; bodyType: string; fuel: string } | null>(null);
+  const [carjamVehicle, setCarjamVehicle] = useState<{
+    make: string; model: string; year: number; variant: string;
+    vin: string | null; engineCc: number | null; transmissionType: string | null;
+    fuelType: string | null; stolenFlag: boolean; latestOdometer: number | null;
+    power: number | null; rawMake: string;
+    // legacy compat
+    bodyType?: string; fuel?: string;
+  } | null>(null);
+  const [carjamStolenWarning, setCarjamStolenWarning] = useState(false);
   const [vehicleModelSpec, setVehicleModelSpec] = useState<{ engine_code: string | null; engine_cc: number | null; fuel: string | null; transmission: string | null; timing_drive: string | null; submodel?: string | null } | null>(null);
   const [vehicleModelOptions, setVehicleModelOptions] = useState<any[]>([]);
   const [showSubmodelPicker, setShowSubmodelPicker] = useState(false);
@@ -1218,8 +1226,12 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
       const make = vehicle?.make ?? '';
       const model = vehicle?.model ?? '';
       if (!make || !model) { setFleetQuoteState(null); return; }
-      const vehicleData = { make, model, year: vehicle?.year ?? 0, bodyType: '', fuel: '' };
-      setCarjamVehicle({ ...vehicleData });
+      setCarjamVehicle({
+        make, model, year: vehicle?.year ?? 0,
+        variant: vehicle?.variant ?? '', rawMake: make,
+        vin: null, engineCc: null, transmissionType: null, fuelType: null,
+        stolenFlag: false, latestOdometer: null, power: null,
+      });
 
       // Use the first selected service's pre-computed low/high from fleet-prices
       // (which already includes parts + labour + GST — no parts-only DB query needed)
@@ -1240,9 +1252,9 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
       if (firstSlug) {
         const { data: cat } = await supabase.from('part_categories').select('id').eq('slug', firstSlug).single();
         if (cat) setQuoteFallbackCategoryId((cat as any).id);
-        await _resolveSegmentFallback(matchedId, vmData, vehicleData, cat ? (cat as any).id : null);
+        await _resolveSegmentFallback(matchedId, vmData, { make, model, year: vehicle?.year ?? 0, bodyType: '', fuel: '' }, cat ? (cat as any).id : null);
       } else {
-        await _resolveSegmentFallback(matchedId, vmData, vehicleData, null);
+        await _resolveSegmentFallback(matchedId, vmData, { make, model, year: vehicle?.year ?? 0, bodyType: '', fuel: '' }, null);
       }
     } catch {
       setFleetQuoteState(null);
@@ -1604,17 +1616,76 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
         body: JSON.stringify({ rego: formattedRego }),
       });
 
-      if (res.status === 404) {
-        // Plate not in registry — offer manual entry instead of dead-end error
+      const data = await res.json();
+
+      if (res.status === 404 || data.notFound) {
+        // Plate not in registry (Carjam also failed) — offer manual entry
         setShowManualVehicle(true);
         return;
       }
 
-      const data = await res.json();
-
       if (data.isNew) {
-        // Plate has no owner. If THIS customer is already verified this session,
-        // add the car to their existing garage instead of treating them as new.
+        if (data.carjamData) {
+          // Carjam identified the vehicle — auto-populate
+          const cj = data.carjamData;
+          setCarjamVehicle(cj);
+          setCarjamStolenWarning(cj.stolenFlag === true);
+
+          // Pre-fill manual fields in case user wants to edit
+          setManualMake(cj.make);
+          setManualModel(cj.model);
+          setManualYear(String(cj.year || ''));
+          setManualSubmodel(cj.variant || '');
+
+          // Set engine/spec from DB match
+          const match = data.vehicleModelMatch;
+          if (match && !Array.isArray(match)) {
+            setVehicleModelSpec(match);
+            setVehicleModelOptions([]);
+            setShowSubmodelPicker(false);
+          } else if (Array.isArray(match) && match.length > 0) {
+            setVehicleModelOptions(match);
+            setVehicleModelSpec(null);
+            setShowSubmodelPicker(true);
+          }
+
+          // If this customer is already verified, register the Carjam vehicle and load it
+          if (customerOwnerId) {
+            const addRes = await fetch('/api/customer/manual-vehicle', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                rego: formattedRego,
+                year: cj.year || null,
+                make: cj.make,
+                model: cj.model,
+                submodel: cj.variant || null,
+                ownerId: customerOwnerId,
+              }),
+            });
+            if (addRes.ok) {
+              await loadVehicleByRego(formattedRego);
+              return;
+            }
+          }
+          // New customer — create vehicle record first (so register endpoint just sets owner_id)
+          await fetch('/api/customer/manual-vehicle', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              rego: formattedRego,
+              year: cj.year || null,
+              make: cj.make,
+              model: cj.model,
+              submodel: cj.variant || null,
+              vehicleModelId: !Array.isArray(data.vehicleModelMatch) && data.vehicleModelMatch?.id ? data.vehicleModelMatch.id : null,
+            }),
+          });
+          setShowNewCustomerForm(true);
+          return;
+        }
+
+        // Plate exists in DB but no owner — standard new customer path
         if (customerOwnerId) {
           const addRes = await fetch('/api/customer/add-vehicle', {
             method: 'POST',
@@ -1626,7 +1697,6 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
             return;
           }
         }
-        // Otherwise it's a genuinely new customer — show registration form
         setShowNewCustomerForm(true);
       } else {
         // Returning customer — magic link emailed
@@ -2111,7 +2181,7 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                 <Input 
                   placeholder="ENTER NUMBER PLATE (E.G. RAH190)" 
                   value={rego}
-                  onChange={(e) => setRego(e.target.value.toUpperCase())}
+                  onChange={(e) => { setRego(e.target.value.toUpperCase()); setCarjamVehicle(null); setCarjamStolenWarning(false); }}
                   onKeyDown={(e) => {
                     if (e.key === 'Enter' && rego && !isSearchingRego) {
                       e.preventDefault();
@@ -2125,6 +2195,26 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                 {isSearchingRego ? <div className="w-5 h-5 border-2 border-white/30 border-t-white rounded-full animate-spin" /> : <Search size={20} />}
               </Button>
             </div>
+
+            {carjamStolenWarning && (
+              <div className="flex items-start gap-3 p-4 rounded-2xl bg-red-500/10 border border-red-500/30">
+                <span className="text-red-500 text-lg leading-none mt-0.5">⚠️</span>
+                <div>
+                  <p className="text-sm font-bold text-red-500">Stolen vehicle alert</p>
+                  <p className="text-xs text-muted mt-0.5">This plate (<span className="font-bold text-foreground">{rego.toUpperCase()}</span>) has been reported as stolen on the NZ Motor Vehicle Register. We cannot process a booking for this vehicle. Please contact NZ Police if you believe this is an error.</p>
+                </div>
+              </div>
+            )}
+
+            {carjamVehicle && !vehicle && !carjamStolenWarning && (
+              <div className="flex items-start gap-3 p-3.5 rounded-2xl bg-emerald-500/10 border border-emerald-500/20">
+                <span className="text-emerald-500 text-base leading-none mt-0.5">✓</span>
+                <div>
+                  <p className="text-xs font-bold text-emerald-600 dark:text-emerald-400">Vehicle identified via NZ Motor Vehicle Register</p>
+                  <p className="text-xs text-muted mt-0.5">{carjamVehicle.year} {carjamVehicle.make} {carjamVehicle.model}{carjamVehicle.variant ? ` · ${carjamVehicle.variant}` : ''}{carjamVehicle.engineCc ? ` · ${(carjamVehicle.engineCc / 1000).toFixed(1)}L` : ''}</p>
+                </div>
+              </div>
+            )}
 
             {vehicle && (
               <motion.div initial={{ opacity: 0, scale: 0.95 }} animate={{ opacity: 1, scale: 1 }}>
@@ -2750,7 +2840,7 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
               {fleetQuoteState === 'fallback' ? (() => {
                 const greetName = (userName || returningCustomerName || '').split(' ')[0] || 'there';
                 const makeModel = carjamVehicle
-                  ? `${carjamVehicle.make.charAt(0) + carjamVehicle.make.slice(1).toLowerCase()} ${carjamVehicle.model.charAt(0) + carjamVehicle.model.slice(1).toLowerCase()}`
+                  ? `${carjamVehicle.make} ${carjamVehicle.model}`
                   : `${vehicle?.make ?? ''} ${vehicle?.model ?? ''}`.trim() || 'your vehicle';
                 const low = fleetQuoteRange?.low ?? 150;
                 const high = fleetQuoteRange?.high ?? 2500;
@@ -4509,7 +4599,11 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
             >
               <div className="space-y-1">
                 <h3 className="text-2xl font-black tracking-tight">Welcome to Torqued</h3>
-                <p className="text-sm text-muted">We found your plate in our system. Enter your details to create your account.</p>
+                {carjamVehicle ? (
+                  <p className="text-sm text-muted">We've identified your <span className="font-semibold text-foreground">{carjamVehicle.year} {carjamVehicle.make} {carjamVehicle.model}</span>. Enter your details to create your account.</p>
+                ) : (
+                  <p className="text-sm text-muted">We found your plate in our system. Enter your details to create your account.</p>
+                )}
               </div>
 
               <div className="space-y-3">

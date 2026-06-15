@@ -682,6 +682,69 @@ app.post('/api/passkey/auth-verify', async (req, res) => {
   }
 });
 
+// ── Carjam ABCD API helper ───────────────────────────────────────────────────
+// Calls the Carjam NZ plate lookup and normalises the response into clean fields.
+// Returns null if the plate isn't found or the key isn't configured.
+interface CarjamVehicle {
+  make: string;
+  model: string;
+  year: number;
+  variant: string;          // submodel field verbatim, e.g. "GSX PTR 2.5P/4WD/6AT"
+  vin: string | null;
+  engineCc: number | null;
+  transmissionType: string | null;  // e.g. "6-GEAR AUTO"
+  fuelType: string | null;          // e.g. "Petrol", "Diesel", "Electric"
+  stolenFlag: boolean;
+  latestOdometer: number | null;
+  power: number | null;             // kW
+  rawMake: string;                  // ALLCAPS make as returned by Carjam
+}
+
+function normaliseCarjamFuel(code: string | null): string | null {
+  if (!code) return null;
+  const map: Record<string, string> = {
+    '01': 'Petrol', '02': 'Diesel', '04': 'Electric', '05': 'LPG',
+    '06': 'Petrol/Electric', '07': 'Diesel/Electric', '08': 'CNG',
+  };
+  return map[code] || code;
+}
+
+function titleCase(s: string): string {
+  return s.toLowerCase().replace(/\b\w/g, c => c.toUpperCase());
+}
+
+async function callCarjamAPI(plate: string): Promise<CarjamVehicle | null> {
+  const key = process.env.CARJAM_API_KEY;
+  if (!key) {
+    console.warn('[carjam] CARJAM_API_KEY not set — skipping Carjam lookup');
+    return null;
+  }
+  try {
+    const url = `https://www.carjam.co.nz/api/car/?plate=${encodeURIComponent(plate)}&key=${key}`;
+    const resp = await fetch(url, { signal: AbortSignal.timeout(8000) });
+    if (!resp.ok) return null;
+    const d = await resp.json() as any;
+    if (!d?.make || !d?.model) return null;
+    return {
+      make: titleCase(String(d.make)),
+      model: String(d.model),
+      year: parseInt(d.year_of_manufacture, 10) || new Date().getFullYear(),
+      variant: String(d.submodel || '').trim(),
+      vin: d.vin ? String(d.vin).trim() : null,
+      engineCc: d.cc_rating ? parseInt(d.cc_rating, 10) || null : null,
+      transmissionType: d.transmission_type ? String(d.transmission_type) : null,
+      fuelType: normaliseCarjamFuel(d.fuel_type ? String(d.fuel_type) : null),
+      stolenFlag: String(d.reported_stolen || 'N').toUpperCase() === 'Y',
+      latestOdometer: d.latest_odometer_reading ? parseInt(d.latest_odometer_reading, 10) || null : null,
+      power: d.power ? parseInt(d.power, 10) || null : null,
+      rawMake: String(d.make),
+    };
+  } catch (err: any) {
+    console.warn('[carjam] lookup failed:', err?.message);
+    return null;
+  }
+}
+
 // POST /api/customer/check-plate — checks plate, triggers OTP for returning customers
 app.post('/api/customer/check-plate', async (req, res) => {
   try {
@@ -698,7 +761,61 @@ app.post('/api/customer/check-plate', async (req, res) => {
       .eq('rego', formattedRego)
       .single();
 
-    if (!vehicle) return res.status(404).json({ error: 'Plate not found in our registry' });
+    if (!vehicle) {
+      // Plate not in our DB — try Carjam ABCD API to identify the vehicle
+      const carjam = await callCarjamAPI(formattedRego);
+      if (!carjam) {
+        return res.status(404).json({ error: 'Plate not found in our registry', notFound: true });
+      }
+
+      // Try to match against vehicle_models for engine/parts spec
+      let vehicleModelMatch: any = null;
+      if (supabase) {
+        const firstWord = carjam.model.split(' ')[0];
+        const tryVMQuery = async (modelPat: string, withYear: boolean) => {
+          let q = supabase.from('vehicle_models')
+            .select('id, make, model, submodel, engine_code, engine_cc, fuel, transmission, timing_drive, year_from, year_to')
+            .ilike('make', `%${carjam.rawMake}%`)
+            .ilike('model', modelPat);
+          if (withYear && carjam.year) {
+            q = q.lte('year_from', carjam.year).or(`year_to.is.null,year_to.gte.${carjam.year}`);
+          }
+          // Prefer row with closest cc_rating if available
+          if (carjam.engineCc) {
+            q = q.order('engine_cc', { ascending: true });
+          }
+          const { data } = await q.limit(8);
+          return (data as any[]) ?? [];
+        };
+
+        let rows = await tryVMQuery(`%${carjam.model}%`, true);
+        if (!rows.length && firstWord !== carjam.model) rows = await tryVMQuery(`%${firstWord}%`, true);
+        if (!rows.length) rows = await tryVMQuery(`%${carjam.model}%`, false);
+        if (!rows.length && firstWord !== carjam.model) rows = await tryVMQuery(`%${firstWord}%`, false);
+
+        // Pick the closest engine_cc match if we have cc data
+        if (rows.length && carjam.engineCc) {
+          rows.sort((a: any, b: any) => {
+            const diffA = Math.abs((a.engine_cc || 0) - (carjam.engineCc as number));
+            const diffB = Math.abs((b.engine_cc || 0) - (carjam.engineCc as number));
+            return diffA - diffB;
+          });
+          vehicleModelMatch = rows[0];
+        } else if (rows.length === 1) {
+          vehicleModelMatch = rows[0];
+        } else if (rows.length > 1) {
+          // Return all options for picker (set vehicleModelMatch to array)
+          vehicleModelMatch = rows;
+        }
+      }
+
+      return res.json({
+        found: true,
+        isNew: true,
+        carjamData: carjam,
+        vehicleModelMatch,
+      });
+    }
 
     // New customer — plate exists but no owner
     if (!vehicle.owner_id) {
@@ -732,6 +849,15 @@ app.post('/api/customer/check-plate', async (req, res) => {
     console.error('[check-plate]', err);
     res.status(500).json({ error: 'Server error' });
   }
+});
+
+// GET /api/rego/carjam?plate=ABC123 — raw Carjam ABCD lookup (used by iOS and admin tools)
+app.get('/api/rego/carjam', async (req, res) => {
+  const plate = String(req.query.plate || '').toUpperCase().trim();
+  if (!plate) return res.status(400).json({ error: 'plate required' });
+  const data = await callCarjamAPI(plate);
+  if (!data) return res.status(404).json({ error: 'Vehicle not found via Carjam' });
+  res.json(data);
 });
 
 // GET /api/vehicles/lookup?make=xxx&model=xxx&year=xxx — fuzzy search vehicle_models for manual entry matching
