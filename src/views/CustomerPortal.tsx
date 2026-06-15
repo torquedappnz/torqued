@@ -2145,16 +2145,31 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                     )}
                     {showSubmodelPicker && !vehicleModelSpec && vehicleModelOptions.length > 0 && (
                       <div className="mt-2 space-y-1.5 w-full text-left">
-                        <p className="text-[10px] font-black uppercase tracking-widest text-muted">Confirm your variant</p>
-                        {vehicleModelOptions.map((opt: any, i: number) => (
-                          <button
-                            key={i}
-                            onClick={() => { setVehicleModelSpec(opt); setShowSubmodelPicker(false); }}
-                            className="w-full text-left px-3 py-2 rounded-xl border border-border hover:border-torqued-red/40 bg-background hover:bg-card transition-all"
-                          >
-                            <span className="text-xs font-bold text-foreground">{opt.submodel || opt.model}{opt.engine_code ? ` · ${opt.engine_code}` : ''}{opt.engine_cc ? ` · ${(opt.engine_cc / 1000).toFixed(1)}L` : ''}{opt.transmission ? ` · ${opt.transmission}` : ''}</span>
-                          </button>
-                        ))}
+                        <p className="text-[10px] font-black uppercase tracking-widest text-muted">Confirm your exact variant</p>
+                        {vehicleModelOptions.map((opt: any, i: number) => {
+                          const variant = [opt.submodel, opt.engine_code].filter(Boolean).join(' · ') || opt.model;
+                          const specs = [
+                            opt.engine_cc ? `${(opt.engine_cc / 1000).toFixed(1)}L` : null,
+                            opt.fuel,
+                            opt.transmission,
+                            opt.timing_drive ? `Timing ${opt.timing_drive}` : null,
+                          ].filter(Boolean).join(' · ');
+                          const years = opt.year_from ? `${opt.year_from}–${opt.year_to || 'present'}` : null;
+                          return (
+                            <button
+                              key={i}
+                              onClick={() => { setVehicleModelSpec(opt); setShowSubmodelPicker(false); }}
+                              className="w-full text-left px-3 py-2.5 rounded-xl border border-border hover:border-torqued-red/50 bg-background hover:bg-card transition-all space-y-0.5"
+                            >
+                              <div className="flex items-center justify-between gap-2">
+                                <span className="text-xs font-bold text-foreground">{variant}</span>
+                                {years && <span className="text-[10px] text-muted shrink-0">{years}</span>}
+                              </div>
+                              {specs && <p className="text-[10px] text-muted">{specs}</p>}
+                            </button>
+                          );
+                        })}
+                        <p className="text-[10px] text-muted pt-1">Don't see your exact variant? <button onClick={() => setShowSubmodelPicker(false)} className="underline">Skip</button> — pricing will still be accurate.</p>
                       </div>
                     )}
                   </div>
@@ -2243,14 +2258,14 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                                   variant="outline"
                                   fullWidth
                                   size="sm"
-                                  className="text-[10px] h-8 border-white/20"
+                                  className="text-[10px] h-8 border-border"
                                   onClick={() => setShowHistoryEntry(!showHistoryEntry)}
                                 >
                                   <Plus size={12} className="mr-1" /> Add Manual Entry
                                 </Button>
                                 <label className={cn(
                                   "flex-1 text-[10px] h-8 inline-flex items-center justify-center rounded-md font-bold cursor-pointer transition-all border",
-                                  isParsingReceipt ? "border-white/10 text-muted cursor-wait" : "border-torqued-red/40 text-torqued-red hover:bg-torqued-red/10"
+                                  isParsingReceipt ? "border-border text-muted cursor-wait" : "border-torqued-red/40 text-torqued-red hover:bg-torqued-red/10"
                                 )}>
                                   {isParsingReceipt ? (
                                     <><div className="w-3 h-3 border-2 border-torqued-red/30 border-t-torqued-red rounded-full animate-spin mr-1.5" /> Scanning…</>
@@ -2629,10 +2644,10 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                 animate={{ opacity: 1, scale: 1 }}
                 className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm"
               >
-                <Card className="max-w-md w-full p-8 space-y-6 overflow-hidden relative border-white/10 bg-torqued-dark">
+                <Card className="max-w-md w-full p-8 space-y-6 overflow-hidden relative border-border bg-background">
                    <button 
                     onClick={() => setIsDiagnosticMode(false)}
-                    className="absolute top-4 right-4 text-white/40 hover:text-white transition-colors"
+                    className="absolute top-4 right-4 text-muted hover:text-white transition-colors"
                    >
                      ✕
                    </button>
@@ -2641,7 +2656,7 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                         <Wrench size={24} className="text-torqued-red" />
                      </div>
                      <h3 className="text-3xl font-bold tracking-tight text-white">Diagnostic Needed</h3>
-                     <p className="text-white/60">Since there's no fault code, we need a physical inspection to quote accurately.</p>
+                     <p className="text-muted">Since there's no fault code, we need a physical inspection to quote accurately.</p>
                    </div>
 
                    <div className="space-y-4 pt-4">
@@ -2668,9 +2683,9 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                         onChange={(e) => setDiagnosticComment(e.target.value)}
                         rows={3}
                         placeholder="E.g. Grinding noise when braking, judder at 80km/h, warning light on dash…"
-                        className="w-full bg-white/5 border border-white/10 rounded-xl px-3 py-2 text-sm text-white placeholder:text-white/30 resize-none focus:outline-none focus:border-torqued-red"
+                        className="w-full bg-card border border-border rounded-xl px-3 py-2 text-sm text-white placeholder:text-muted/70 resize-none focus:outline-none focus:border-torqued-red"
                       />
-                      <p className="text-[11px] text-white/40">Your mechanic sees this before diagnosing.</p>
+                      <p className="text-[11px] text-muted">Your mechanic sees this before diagnosing.</p>
                    </div>
 
                    <div className="pt-2">
@@ -2963,7 +2978,7 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
               <motion.div 
                 initial={{ opacity: 0, y: 20 }}
                 animate={{ opacity: 1, y: 0 }}
-                className="fixed inset-0 z-[60] flex items-center justify-center p-4 bg-torqued-dark/95 backdrop-blur-md"
+                className="fixed inset-0 z-[60] flex items-center justify-center p-4 bg-background/95 backdrop-blur-md"
               >
                 <div className="max-w-xl w-full space-y-8 text-center text-white">
                    <div className="space-y-4">
@@ -2971,15 +2986,15 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                          <CheckCircle2 size={40} />
                       </div>
                       <h2 className="text-5xl font-bold">Your Quote is Ready!</h2>
-                      <p className="text-white/60 text-lg">Your diagnostic was successful. We've matched the fault to a specific major repair.</p>
+                      <p className="text-muted text-lg">Your diagnostic was successful. We've matched the fault to a specific major repair.</p>
                    </div>
 
-                   <Card className="p-8 bg-torqued-dark text-white text-left space-y-6 border border-white/10 shadow-2xl">
+                   <Card className="p-8 bg-background text-white text-left space-y-6 border border-border shadow-2xl">
                       <div className="flex justify-between items-start">
                          <div>
-                            <h4 className="text-xs font-bold uppercase tracking-widest text-white/40">Diagnosed Problem</h4>
+                            <h4 className="text-xs font-bold uppercase tracking-widest text-muted">Diagnosed Problem</h4>
                             <p className="text-xl font-bold">DQ400e Hybrid Mechatronics Unit Failure</p>
-                            <p className="text-xs text-white/40 mt-1">Requires unit replacement & system recalibration</p>
+                            <p className="text-xs text-muted mt-1">Requires unit replacement & system recalibration</p>
                          </div>
                          <div className="px-3 py-1 bg-torqued-red text-white text-[10px] font-bold uppercase rounded">
                             Verified Fix
@@ -2993,29 +3008,29 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                               <p className="text-3xl font-bold">$6,997.00</p>
                            </div>
                            <div className="text-right">
-                              <p className="text-[10px] font-bold uppercase text-white/40">Comparison</p>
+                              <p className="text-[10px] font-bold uppercase text-muted">Comparison</p>
                               <p className="text-xs font-bold text-torqued-red inline-flex items-center gap-1">
                                 <AlertTriangle size={12} /> Fair Market Price
                               </p>
-                              <p className="text-[9px] text-white/40 leading-none">High-value specialized hybrid component</p>
+                              <p className="text-[9px] text-muted leading-none">High-value specialized hybrid component</p>
                            </div>
                         </div>
                         
-                        <div className="bg-white/5 p-4 rounded-xl border border-white/5">
+                        <div className="bg-card p-4 rounded-xl border border-border/50">
                            <div className="flex justify-between text-xs mb-2">
-                             <span className="text-white/60">DQ400e Mechatronics Unit</span>
+                             <span className="text-muted">DQ400e Mechatronics Unit</span>
                              <span className="font-bold">$5,297.00</span>
                            </div>
                            <div className="flex justify-between text-xs mb-2">
-                             <span className="text-white/60">Import Fees & Customs</span>
+                             <span className="text-muted">Import Fees & Customs</span>
                              <span className="font-bold">$1,000.00</span>
                            </div>
                            <div className="flex justify-between text-xs mb-2">
-                             <span className="text-white/60">Express Freight (Germany)</span>
+                             <span className="text-muted">Express Freight (Germany)</span>
                              <span className="font-bold">$100.00</span>
                            </div>
                            <div className="flex justify-between text-xs">
-                             <span className="text-white/60">Specialized Labour (4 Hours)</span>
+                             <span className="text-muted">Specialized Labour (4 Hours)</span>
                              <span className="font-bold">$600.00</span>
                            </div>
                         </div>
@@ -3040,7 +3055,7 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                             }}
                             className={cn(
                               "p-2 rounded-lg text-[10px] font-bold uppercase tracking-wider text-center transition-all",
-                              mbiStatus === 'pre-approved' ? "bg-emerald-600 text-white" : "bg-white/5 border border-white/10 text-white/60"
+                              mbiStatus === 'pre-approved' ? "bg-emerald-600 text-white" : "bg-card border border-border text-muted"
                             )}
                            >
                               Pre-Approved
@@ -3052,7 +3067,7 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                             }}
                             className={cn(
                               "p-2 rounded-lg text-[10px] font-bold uppercase tracking-wider text-center transition-all",
-                              mbiStatus === 'not-claimed' ? "bg-emerald-600 text-white" : "bg-white/5 border border-white/10 text-white/60"
+                              mbiStatus === 'not-claimed' ? "bg-emerald-600 text-white" : "bg-card border border-border text-muted"
                             )}
                            >
                               No Claim Yet
@@ -3061,7 +3076,7 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                       </div>
 
                       <div className="space-y-3">
-                         <p className="text-xs text-white/60 leading-relaxed italic">"Torqued simplicity - finance and book online, we will save the service history for next time."</p>
+                         <p className="text-xs text-muted leading-relaxed italic">"Torqued simplicity - finance and book online, we will save the service history for next time."</p>
                          <Button fullWidth size="lg" onClick={() => {
                             setSelectedServices(['mechatronics_replace']);
                             if (selectedMechanic) {
@@ -3206,9 +3221,13 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
           if (addWaterPump && selectedServices.includes('timing')) h += 0.5;
           return h;
         })();
-        const dropOffBy = totalJobHours > 0 && totalJobHours < 3 ? '12:00 PM' : '9:00 AM';
+        const isComplexJob = totalJobHours >= 3;
         const mechanicClosingTime = '5:30 PM';
         const mechanicOpeningTime = '8:00 AM';
+        // Scheduling: complex (3+ hrs) drop off by 9am → ready 4–5pm same day
+        //             simple (< 3hrs) drop off by 12pm → ready by close of business
+        const dropOffDeadline = isComplexJob ? '9:00 AM' : '12:00 PM';
+        const samePickupWindow = isComplexJob ? '4:00 PM – 5:00 PM' : mechanicClosingTime;
         const nextBizDay = (() => {
           const d = new Date(selectedDate + 'T00:00:00');
           const dow = d.getDay();
@@ -3228,7 +3247,7 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
               </button>
               <div className="space-y-1">
                 <h2 className="text-3xl sm:text-4xl md:text-5xl tracking-tighter">Finalise Booking</h2>
-                <p className="text-sm sm:text-base text-muted">Drop off by {dropOffBy} on {selectedDate}. Pickup by {mechanicClosingTime}.</p>
+                <p className="text-sm sm:text-base text-muted">Drop off by {dropOffDeadline} on {selectedDate}.</p>
               </div>
             </div>
 
@@ -3250,8 +3269,8 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                     return (
                       <div key={id} className="space-y-3 bg-background/50 p-4 rounded-2xl border border-border">
                         <div className="flex justify-between items-center text-foreground">
-                          <span className="text-sm font-black uppercase tracking-tight">{matchedPkg ? matchedPkg.name : serviceDisplayName(id, service.name)}</span>
-                          <span className="text-sm font-black">{displayPrice > 0 ? `$${displayPrice}` : <span className="text-muted text-xs font-bold">Quoted by workshop</span>}</span>
+                          <span className="text-sm font-semibold">{matchedPkg ? matchedPkg.name : serviceDisplayName(id, service.name)}</span>
+                          <span className="text-sm font-semibold">{displayPrice > 0 ? `$${displayPrice}` : <span className="text-muted text-xs">Quoted by workshop</span>}</span>
                         </div>
                         {matchedPkg ? (
                           <div className="border-t border-border/50 pt-3 space-y-1.5">
@@ -3320,8 +3339,8 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                   {addWaterPump && waterPump && selectedServices.includes('timing') && (
                     <div className="space-y-3 bg-orange-500/5 p-4 rounded-2xl border border-orange-500/20">
                       <div className="flex justify-between items-center text-foreground">
-                        <span className="text-sm font-black uppercase tracking-tight text-orange-300">Water Pump</span>
-                        <span className="text-sm font-black">${waterPump.high}</span>
+                        <span className="text-sm font-semibold text-orange-400">Water Pump</span>
+                        <span className="text-sm font-semibold">${waterPump.high}</span>
                       </div>
                       <div className="border-t border-orange-500/20 pt-3 space-y-1.5">
                         <div className="flex justify-between text-xs text-muted">
@@ -3431,24 +3450,38 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                 )}
               </Card>
 
-              {/* Pickup options */}
-              <div className="p-5 bg-card border border-border rounded-3xl space-y-4 shadow-sm">
-                <div className="flex items-start justify-between gap-4">
-                  <div className="space-y-1">
-                    <p className="text-[11px] font-black uppercase tracking-widest text-muted">Vehicle Pickup</p>
-                    <p className="text-sm text-foreground">End of day — ready by {mechanicClosingTime}</p>
-                    <p className="text-xs text-muted">Your vehicle will be ready to collect from the workshop by end of business day on {selectedDate}.</p>
+              {/* Pickup scheduling */}
+              <div className="p-5 bg-card border border-border rounded-2xl space-y-4">
+                <p className="text-[10px] font-black uppercase tracking-widest text-muted">Collection Schedule</p>
+                {/* Default: same-day pickup */}
+                <div className="flex items-start gap-3 p-4 rounded-xl bg-background border border-border">
+                  <div className="w-2 h-2 rounded-full bg-emerald-500 mt-1.5 shrink-0" />
+                  <div className="space-y-0.5">
+                    <p className="text-sm font-semibold text-foreground">
+                      {isComplexJob
+                        ? `Ready between ${samePickupWindow} on ${selectedDate}`
+                        : `Ready by ${samePickupWindow} on ${selectedDate}`}
+                    </p>
+                    <p className="text-xs text-muted">
+                      {isComplexJob
+                        ? `Drop off by ${dropOffDeadline}. Your workshop closes at ${mechanicClosingTime} — we'll send you an SMS and email when your vehicle is ready.`
+                        : `Drop off by ${dropOffDeadline}. We'll send you an SMS and email when your vehicle is ready to collect.`}
+                    </p>
                   </div>
                 </div>
+                {/* Next day option */}
                 <button
                   type="button"
                   onClick={() => setCollectNextDay(v => !v)}
-                  className={`w-full text-left p-4 rounded-2xl border transition-all text-sm ${collectNextDay ? 'border-torqued-red bg-torqued-red/5 text-foreground' : 'border-border bg-background/50 text-muted hover:border-torqued-red/30'}`}
+                  className={`w-full text-left p-4 rounded-xl border transition-all ${collectNextDay ? 'border-torqued-red bg-torqued-red/5' : 'border-border bg-background/50 hover:border-torqued-red/30'}`}
                 >
-                  <span className={`text-[10px] font-black uppercase tracking-widest block mb-1 ${collectNextDay ? 'text-torqued-red' : 'text-muted'}`}>
-                    {collectNextDay ? '✓ ' : ''}Collect next business day
-                  </span>
-                  <span className="text-xs text-muted">Pick up on {nextBizDay} between {mechanicOpeningTime} and {mechanicClosingTime}.</span>
+                  <div className="flex items-center gap-2 mb-0.5">
+                    <div className={`w-3.5 h-3.5 rounded-full border-2 flex items-center justify-center shrink-0 ${collectNextDay ? 'border-torqued-red bg-torqued-red' : 'border-border'}`}>
+                      {collectNextDay && <div className="w-1.5 h-1.5 rounded-full bg-white" />}
+                    </div>
+                    <span className="text-sm font-semibold text-foreground">Collect next business day instead</span>
+                  </div>
+                  <p className="text-xs text-muted pl-5">{nextBizDay} — between {mechanicOpeningTime} and {mechanicClosingTime}. Workshop will confirm your preferred time by SMS.</p>
                 </button>
               </div>
 
@@ -3788,7 +3821,7 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
               </Button>
             </div>
           </div>
-          <div className="w-12 h-12 bg-torqued-red rounded-full flex items-center justify-center text-white font-bold shadow-lg shadow-torqued-red/20 border border-white/20">
+          <div className="w-12 h-12 bg-torqued-red rounded-full flex items-center justify-center text-white font-bold shadow-lg shadow-torqued-red/20 border border-border">
             {(userName || 'S').charAt(0).toUpperCase()}
           </div>
         </div>
@@ -3916,7 +3949,7 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                     key={gv.rego}
                     className={cn(
                       "overflow-hidden transition-all",
-                      isArchived ? "opacity-60 border-border" : "liquid-glass border-white/10",
+                      isArchived ? "opacity-60 border-border" : "liquid-glass border-border",
                       isActive ? "border-torqued-red ring-2 ring-torqued-red bg-torqued-red/5" : "hover:border-torqued-red/30"
                     )}
                   >
@@ -3982,7 +4015,7 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                   setStep(1);
                   setView('quote');
                 }}
-                className="w-full p-4 border border-dashed border-white/10 rounded-2xl flex items-center justify-center gap-2 text-white/40 hover:text-white hover:border-white/20 hover:bg-white/5 transition-all text-sm font-bold active:scale-[0.98]"
+                className="w-full p-4 border border-dashed border-border rounded-2xl flex items-center justify-center gap-2 text-muted hover:text-foreground hover:border-border/80 hover:bg-card transition-all text-sm font-bold active:scale-[0.98]"
               >
                 <Plus size={16} /> Add Another Vehicle
               </button>
@@ -4018,7 +4051,7 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                 ) : healthLoading ? (
                   <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                     {[...Array(5)].map((_, i) => (
-                      <div key={i} className="h-16 rounded-2xl bg-white/5 animate-pulse" />
+                      <div key={i} className="h-16 rounded-2xl bg-card animate-pulse" />
                     ))}
                   </div>
                 ) : healthInsights.length === 0 ? (
@@ -4054,7 +4087,7 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                             isGood    && "bg-emerald-500/15",
                             isDue     && "bg-amber-500/15",
                             isOverdue && "bg-torqued-red/15",
-                            !isGood && !isDue && !isOverdue && "bg-white/5"
+                            !isGood && !isDue && !isOverdue && "bg-card"
                           )}>
                             {isGood ? '✓' : isOverdue ? '⚠' : isDue ? '🔔' : 'ℹ'}
                           </div>
@@ -4298,8 +4331,8 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
         {/* Subtle top glow */}
         <div className="absolute top-0 left-1/2 -translate-x-1/2 w-1/2 h-px bg-gradient-to-r from-transparent via-torqued-red/30 to-transparent" />
         
-        <button onClick={onBack} className="focus:outline-none hover:opacity-80 transition-opacity">
-          <Logo variant={theme === 'dark' ? 'light' : 'dark'} />
+        <button onClick={() => onBack ? onBack() : (window.location.href = '/')} className="focus:outline-none hover:opacity-80 transition-opacity">
+          <Logo />
         </button>
         <div className="flex gap-4 items-center">
           <div className="hidden sm:flex bg-card p-1 rounded-xl border border-border">
@@ -4556,10 +4589,10 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
       {/* Magic-link verifying overlay */}
       <AnimatePresence>
         {magicVerifying && (
-          <div className="fixed inset-0 z-[130] flex items-center justify-center bg-torqued-dark">
+          <div className="fixed inset-0 z-[130] flex items-center justify-center bg-background">
             <div className="text-center space-y-4">
               <div className="w-12 h-12 border-4 border-torqued-red border-t-transparent rounded-full animate-spin mx-auto" />
-              <p className="text-white/60 font-bold text-sm uppercase tracking-widest">Verifying your link…</p>
+              <p className="text-muted font-bold text-sm uppercase tracking-widest">Verifying your link…</p>
             </div>
           </div>
         )}
@@ -5020,77 +5053,16 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                         Your invoice, GST receipt, mechanic booking confirmation, and SMS drop alerts will be dispatched to these channels.
                       </p>
 
-                      {/* Credit Card / Pay Later Mock Fields */}
-                      <div className="space-y-3.5 pt-1 text-left">
-                        <div className="space-y-1">
-                          <label className="text-[10px] font-black uppercase text-muted tracking-widest block font-mono">
-                            Name on Card / Payment Account
-                          </label>
-                          <input 
-                            type="text" 
-                            placeholder="John Doe"
-                            value={cardName}
-                            onChange={(e) => setCardName(e.target.value)}
-                            className="w-full bg-background border border-border h-11 px-3.5 text-sm font-bold rounded-xl focus:outline-none focus:border-torqued-red"
-                          />
-                        </div>
-
-                        <div className="grid grid-cols-2 gap-3.5">
-                          <div className="space-y-1">
-                            <label className="text-[10px] font-black uppercase text-muted tracking-widest block font-mono">Card number</label>
-                            <input 
-                              type="text" 
-                              placeholder="4242 4242 4242 4242"
-                              value={cardNum}
-                              onChange={(e) => setCardNum(e.target.value)}
-                              className="w-full bg-background border border-border h-11 px-3.5 text-sm font-mono rounded-xl focus:outline-none focus:border-torqued-red"
-                            />
-                          </div>
-                          <div className="grid grid-cols-2 gap-2">
-                            <div className="space-y-1">
-                              <label className="text-[10px] font-black uppercase text-muted tracking-widest block font-mono text-center">Expiry</label>
-                              <input 
-                                type="text" 
-                                placeholder="MM/YY"
-                                value={cardExp}
-                                onChange={(e) => setCardExp(e.target.value)}
-                                className="w-full bg-background border border-border h-11 px-3.5 text-sm font-mono rounded-xl focus:outline-none focus:border-torqued-red text-center"
-                              />
-                            </div>
-                            <div className="space-y-1">
-                              <label className="text-[10px] font-black uppercase text-muted tracking-widest block font-mono text-center">CVC</label>
-                              <input 
-                                type="text" 
-                                placeholder="CVC"
-                                value={cardCvc}
-                                onChange={(e) => setCardCvc(e.target.value)}
-                                className="w-full bg-background border border-border h-11 px-3.5 text-sm font-mono rounded-xl focus:outline-none focus:border-torqued-red text-center"
-                              />
-                            </div>
-                          </div>
-                        </div>
-                      </div>
-
-                      {cardError && (
-                        <p className="text-xs font-bold text-torqued-red bg-torqued-red/10 border border-torqued-red/15 py-1.5 px-3 rounded-xl text-center">
-                          {cardError}
-                        </p>
-                      )}
-
-                      <div className="p-3 bg-background border border-border rounded-xl text-center">
-                        <span className="text-[9.5px] text-muted font-black uppercase tracking-widest block mb-1.5 font-mono">SELECTED TEST PATHWAY</span>
-                        <div className="flex justify-center items-center gap-3">
-                          <span className={`text-[10px] px-2 py-1 rounded font-bold border ${paymentMethod === 'Credit / Debit' || paymentMethod === 'Credit' || paymentMethod === 'Credit or Debit Card' ? 'bg-foreground/5 text-foreground border-border' : 'bg-muted/10 text-muted border-border/40'}`}>Card (Stripe)</span>
-                          <span className={`text-[10px] px-2 py-1 rounded font-bold border ${paymentMethod === 'Afterpay' ? 'bg-pink-500/10 text-pink-400 border-pink-500/15' : 'bg-muted/10 text-muted border-border/40'}`}>Afterpay</span>
-                          <span className={`text-[10px] px-2 py-1 rounded font-bold border ${paymentMethod === 'Klarna' ? 'bg-cyan-500/10 text-cyan-400 border-cyan-500/15' : 'bg-muted/10 text-muted border-border/40'}`}>Klarna</span>
-                        </div>
+                      <div className="p-4 bg-amber-500/5 border border-amber-500/20 rounded-2xl text-left space-y-1">
+                        <p className="text-xs font-black text-amber-500 uppercase tracking-widest">Stripe not yet configured</p>
+                        <p className="text-xs text-muted leading-relaxed">Live payment processing will activate once Stripe keys are added. For now, confirm the booking and payment will be arranged directly with the workshop.</p>
                       </div>
 
                       <Button
                         onClick={handleMockPaymentSuccess}
-                        className="w-full bg-emerald-600 hover:bg-emerald-700 text-white font-black uppercase text-xs tracking-widest h-14 rounded-2xl transition-all shadow-xl shadow-emerald-600/10 cursor-pointer"
+                        className="w-full bg-torqued-red hover:bg-torqued-red/90 text-white font-black uppercase text-xs tracking-widest h-14 rounded-2xl transition-all shadow-xl shadow-torqued-red/20 cursor-pointer"
                       >
-                        Simulate Payment Success & Confirm Booking
+                        Confirm Booking
                       </Button>
                     </div>
                   ) : (
@@ -5422,7 +5394,7 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                   >
                     {isSendingTest ? (
                       <>
-                        <div className="w-3.5 h-3.5 border-2 border-white/20 border-t-white rounded-full animate-spin" />
+                        <div className="w-3.5 h-3.5 border-2 border-border border-t-white rounded-full animate-spin" />
                         Relaying...
                       </>
                     ) : (
