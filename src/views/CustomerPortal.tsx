@@ -728,6 +728,7 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
   const [isDiagnosticMode, setIsDiagnosticMode] = useState(false);
   const [diagnosticComment, setDiagnosticComment] = useState('');
   const [evQuoteConcern, setEvQuoteConcern] = useState('');
+  const [brakeRotorCheckMode, setBrakeRotorCheckMode] = useState(false);
   const [isDiagnosticSimulatedComplete, setIsDiagnosticSimulatedComplete] = useState(false);
   const [isRepairFromDiagnostic, setIsRepairFromDiagnostic] = useState(false);
   const [insurancePolicyNumber, setInsurancePolicyNumber] = useState('');
@@ -3222,18 +3223,24 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                   })}
                   {/* Job not listed here */}
                   <button
-                    onClick={() => setShowUnlistedQuote(true)}
+                    onClick={() => { setShowUnlistedQuote(true); }}
                     className={cn(
                       "p-4 rounded-xl border text-left transition-all flex flex-col gap-2",
                       showUnlistedQuote
                         ? "border-torqued-red bg-torqued-red/10"
-                        : "border-dashed border-border bg-card hover:border-torqued-red/40 text-foreground"
+                        : evQuoteConcern.trim() && !showUnlistedQuote
+                          ? "border-emerald-500/50 bg-emerald-500/8"
+                          : "border-dashed border-border bg-card hover:border-torqued-red/40 text-foreground"
                     )}
                   >
                     <div className="flex flex-col items-center gap-1 w-full text-center">
-                      <span className="text-2xl">💬</span>
-                      <span className="text-xs font-bold uppercase tracking-tight leading-tight text-muted">Job Not Listed Here</span>
-                      <span className="text-[10px] text-muted/70">Know what you need?</span>
+                      <span className="text-2xl">{evQuoteConcern.trim() && !showUnlistedQuote ? '✓' : '💬'}</span>
+                      <span className={cn("text-xs font-bold uppercase tracking-tight leading-tight", evQuoteConcern.trim() && !showUnlistedQuote ? "text-emerald-500" : "text-muted")}>
+                        {evQuoteConcern.trim() && !showUnlistedQuote ? 'Quote Added' : 'Job Not Listed Here'}
+                      </span>
+                      <span className="text-[10px] text-muted/70 text-center leading-tight">
+                        {evQuoteConcern.trim() && !showUnlistedQuote ? 'Tap to edit' : 'Know what you need?'}
+                      </span>
                     </div>
                   </button>
                 </div>
@@ -3417,6 +3424,12 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                       <div className="flex justify-between text-xs text-orange-500">
                         <span>Water Pump &amp; Thermostat Housing</span>
                         <span>${waterPump.high}</span>
+                      </div>
+                    )}
+                    {evQuoteConcern.trim() && !showUnlistedQuote && (
+                      <div className="flex justify-between text-xs text-emerald-500">
+                        <span className="truncate mr-2">Custom quote: "{evQuoteConcern.trim().slice(0, 40)}{evQuoteConcern.trim().length > 40 ? '…' : ''}"</span>
+                        <button onClick={() => setEvQuoteConcern('')} className="shrink-0 text-muted hover:text-torqued-red">×</button>
                       </div>
                     )}
                     <div className="flex justify-between items-center pt-2 border-t border-border">

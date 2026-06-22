@@ -810,7 +810,7 @@ export const AdminPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) => {
         )}
 
         {tab === 'compliance' && (
-          <div className="space-y-6 max-w-2xl">
+          <div className="space-y-6">
             <h2 className="text-2xl font-black uppercase tracking-tight text-foreground">Compliance & Privacy</h2>
 
             {/* AI Controls */}
@@ -933,7 +933,7 @@ export const AdminPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) => {
         )}
 
         {tab === 'postmvp' && (
-          <div className="space-y-4 max-w-2xl">
+          <div className="space-y-4">
             <h2 className="text-2xl font-black uppercase tracking-tight text-foreground">Post-MVP Innovations</h2>
             <div className="bg-card border border-border rounded-2xl p-6 space-y-3">
               <h3 className="font-black text-torqued-red uppercase text-sm">MBI Claims (parked)</h3>
@@ -950,7 +950,7 @@ export const AdminPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) => {
       {/* Mechanic detail modal */}
       {mechDetail && (
         <div className="fixed inset-0 z-[120] flex items-center justify-center p-4 bg-black/50 backdrop-blur-sm overflow-y-auto">
-          <div className="w-full max-w-2xl my-8 bg-card border border-border rounded-3xl p-6 space-y-4">
+          <div className="w-full max-w-4xl my-8 bg-card border border-border rounded-3xl p-6 space-y-4">
             {mechDetail.loading ? <p className="text-muted text-sm py-8 text-center">Loading…</p> : (() => {
               const p = mechDetail.profile; const rev = mechDetail.revenue; const bl = mechDetail.billing;
               return (
