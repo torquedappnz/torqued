@@ -87,6 +87,30 @@ function getOrigin(req: express.Request): string {
   return `${protocol}://${host}`;
 }
 
+function parseUADeviceName(ua: string): string {
+  if (!ua) return 'Unknown device';
+  // OS detection
+  let os = '';
+  const macMatch = ua.match(/Mac OS X ([\d_]+)/);
+  if (macMatch) os = 'macOS ' + macMatch[1].replace(/_/g, '.');
+  else if (/iPhone/.test(ua)) { const m = ua.match(/iPhone OS ([\d_]+)/); os = 'iOS ' + (m ? m[1].replace(/_/g, '.') : ''); }
+  else if (/iPad/.test(ua)) { const m = ua.match(/CPU OS ([\d_]+)/); os = 'iPadOS ' + (m ? m[1].replace(/_/g, '.') : ''); }
+  else if (/Android/.test(ua)) { const m = ua.match(/Android ([\d.]+)/); os = 'Android ' + (m ? m[1] : ''); }
+  else if (/Windows NT/.test(ua)) { const m = ua.match(/Windows NT ([\d.]+)/); const v: Record<string,string> = { '10.0': '10/11', '6.3': '8.1', '6.2': '8', '6.1': '7' }; os = 'Windows ' + (m ? (v[m[1]] || m[1]) : ''); }
+  else if (/Linux/.test(ua)) os = 'Linux';
+  // Browser detection
+  let browser = '';
+  const chromeMatch = ua.match(/Chrome\/([\d]+)/);
+  const safariMatch = ua.match(/Version\/([\d]+).*Safari/);
+  const ffMatch = ua.match(/Firefox\/([\d]+)/);
+  const edgeMatch = ua.match(/Edg\/([\d]+)/);
+  if (edgeMatch) browser = 'Edge ' + edgeMatch[1];
+  else if (chromeMatch && !/Chromium/.test(ua)) browser = 'Chrome ' + chromeMatch[1];
+  else if (safariMatch) browser = 'Safari ' + safariMatch[1];
+  else if (ffMatch) browser = 'Firefox ' + ffMatch[1];
+  return [os, browser].filter(Boolean).join(', ') || 'Unknown device';
+}
+
 // ── OTP ─────────────────────────────────────────────────────────────────────
 // In-memory store: key = uppercase rego, value = { code, expiresAt }
 const otpStore = new Map<string, { code: string; expiresAt: number }>();
@@ -822,13 +846,19 @@ app.post('/api/passkey/register-verify', async (req, res) => {
     const cred = verification.registrationInfo.credential;
     const supabase = getSupabaseAdmin();
     if (!supabase) return res.status(500).json({ error: 'Database not configured' });
-    await supabase.from('webauthn_credentials').insert({
+    const { data: insertedRows } = await supabase.from('webauthn_credentials').insert({
       actor_type: data.actorType, owner_ref: data.ownerRef,
       credential_id: cred.id,
       public_key: Buffer.from(cred.publicKey).toString('base64url'),
       counter: cred.counter || 0,
       transports: cred.transports || null,
-    });
+    }).select('id');
+    // Best-effort: store human-readable device label derived from user-agent
+    const ua = req.headers['user-agent'] || '';
+    const deviceName = parseUADeviceName(ua);
+    if (deviceName && insertedRows?.[0]?.id) {
+      void supabase.from('webauthn_credentials').update({ device_name: deviceName }).eq('id', insertedRows[0].id);
+    }
     res.json({ success: true });
   } catch (err) {
     console.error('[passkey/register-verify]', err);
@@ -934,7 +964,7 @@ app.get('/api/passkey/list', async (req, res) => {
     const supabase = getSupabaseAdmin();
     if (!supabase) return res.status(500).json({ error: 'Database not configured' });
     const { data, error } = await supabase.from('webauthn_credentials')
-      .select('id, credential_id, created_at, transports')
+      .select('id, credential_id, created_at, transports, device_name')
       .eq('actor_type', actorType)
       .eq('owner_ref', String(ownerRef).toLowerCase())
       .order('created_at', { ascending: false });

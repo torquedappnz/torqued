@@ -769,9 +769,9 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
           details: [row.date, row.payment_method].filter(Boolean).join(' • '),
           suggestedQuote: parseFloat(row.total_price) || 0,
           services: (row.description || '').startsWith('[EV Quote Request]')
-            ? ['EV Quote Request']
+            ? ['Manual Quote']
             : (row.service_ids || []).map((id: string) => SERVICES.find(s => s.id === id)?.name || id),
-          description: row.description || row.fault_code || '',
+          description: (row.description || row.fault_code || '').replace(/^\[EV Quote Request\]\s*/, ''),
           status: row.status === 'booked' ? 'Booked via Torqued' : row.status === 'quoted' ? 'Quote Sent'
             : (row.status === 'pending' && (parseFloat(row.total_price) || 0) === 0) ? 'Quote Requested'
             : 'Awaiting Payment',

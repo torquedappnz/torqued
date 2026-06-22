@@ -427,7 +427,7 @@ const ProfileView: React.FC<ProfileViewProps> = (props) => {
               {passkeys.map(pk => (
                 <div key={pk.id} className="flex items-center justify-between p-3 bg-background border border-border rounded-xl">
                   <div className="space-y-0.5">
-                    <p className="text-sm font-bold">🔑 Passkey</p>
+                    <p className="text-sm font-bold">🔑 {pk.device_name || 'Passkey'}</p>
                     <p className="text-[10px] text-muted">Added {new Date(pk.created_at).toLocaleDateString('en-NZ')}</p>
                   </div>
                   <button
@@ -590,7 +590,14 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
       if (shopFee > 0) row('Workshop fee (freight, sundries & consumables)', `$${shopFee.toFixed(2)}`);
       if (discount > 0) row('Discount', `-$${discount.toFixed(2)}`);
     } else {
-      job.serviceIds.forEach((sid: string) => row(SERVICES.find((s: any) => s.id === sid)?.name || sid, ''));
+      const isEVQuoteJob = (job.description || '').startsWith('[EV Quote Request]');
+      if (isEVQuoteJob) {
+        row('Prequalified Quote Request', '');
+        const rawDesc = (job.description || '').replace('[EV Quote Request] ', '');
+        if (rawDesc) row(rawDesc, '');
+      } else {
+        job.serviceIds.forEach((sid: string) => row(SERVICES.find((s: any) => s.id === sid)?.name || sid, ''));
+      }
     }
     y += 2; doc.setDrawColor(226, 232, 240); doc.line(15, y, 195, y); y += 7;
     doc.setFontSize(12); doc.setTextColor(255, 24, 0); row('TOTAL (GST incl.)', `$${Number(total).toFixed(2)}`, true);
@@ -795,6 +802,7 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
   const [customSearchResults, setCustomSearchResults] = useState<Array<{ id: string; name: string; indicativePrice: number }>>([]);
   const [customSearchDone, setCustomSearchDone] = useState(false);
   const [customSearchLoading, setCustomSearchLoading] = useState(false);
+  const [editingMileage, setEditingMileage] = useState(false);
 
   // Service log inline editing
   const [editingLogIdx, setEditingLogIdx] = useState<number | null>(null);
@@ -2422,8 +2430,8 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
     if (!selectedMechanic || !paymentMethod) return;
     setIsBookingLoading(true);
 
-    // Auto-save separate EV quote job when mixed mode (pre-qualified + EV concern)
-    if (isEV && evQuoteConcern.trim()) {
+    // Auto-save separate quote request when mixed mode (pre-qualified + unlisted concern)
+    if (evQuoteConcern.trim()) {
       const evQuoteId = (crypto as any).randomUUID ? crypto.randomUUID() : `ev_${Date.now()}`;
       fetch('/api/bookings/persist', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -2640,186 +2648,8 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                 </div>
               )}
 
-              {manualHistory.length > 0 ? (
-                <div className="space-y-4">
-                  <p className="text-muted">
-                    We have <span className="text-torqued-red font-bold">{manualHistory.length} service records</span> on file for this vehicle.
-                  </p>
-                  
-                  <div className="space-y-3">
-                    <div className="flex justify-between items-center">
-                      <h4 className="text-xs font-bold uppercase tracking-widest text-muted/40">Verified History</h4>
-                      <div className="flex items-center gap-2">
-                        <label className={cn(
-                          "h-7 px-2.5 inline-flex items-center text-[10px] font-bold rounded-lg cursor-pointer transition-all",
-                          isParsingReceipt ? "bg-card text-muted cursor-wait" : "bg-torqued-red/10 text-torqued-red hover:bg-torqued-red/20"
-                        )}>
-                          {isParsingReceipt ? (
-                            <><div className="w-3 h-3 border-2 border-torqued-red/30 border-t-torqued-red rounded-full animate-spin mr-1.5" /> Scanning…</>
-                          ) : (
-                            <><Mail size={12} className="mr-1" /> Scan Receipt</>
-                          )}
-                          <input
-                            type="file"
-                            accept="image/*,application/pdf"
-                            className="hidden"
-                            disabled={isParsingReceipt}
-                            onChange={(e) => { handleReceiptUpload(e.target.files?.[0] || null); e.target.value = ''; }}
-                          />
-                        </label>
-                        <Button
-                          variant="ghost"
-                          size="sm"
-                          className="h-7 text-[10px] text-foreground hover:bg-card"
-                          onClick={() => setShowHistoryEntry(!showHistoryEntry)}
-                        >
-                          <Plus size={12} className="mr-1" /> Add Record
-                        </Button>
-                      </div>
-                    </div>
-                    {receiptError && <p className="text-[10px] text-torqued-red font-bold">{receiptError}</p>}
-
-                    {/* Drag-and-drop multi-file importer (PDF + images) */}
-                    <div
-                      onDragOver={(e) => { e.preventDefault(); setIsDragging(true); }}
-                      onDragLeave={() => setIsDragging(false)}
-                      onDrop={(e) => { e.preventDefault(); setIsDragging(false); handleMultiUpload(Array.from(e.dataTransfer.files)); }}
-                      className={cn(
-                        "rounded-xl border-2 border-dashed p-4 text-center transition-all",
-                        isDragging ? "border-torqued-red bg-torqued-red/5" : "border-border hover:border-torqued-red/40"
-                      )}
-                    >
-                      <label className="cursor-pointer block">
-                        <Download size={18} className="mx-auto text-torqued-red mb-1.5" />
-                        <p className="text-xs font-bold">Drag &amp; drop receipts here</p>
-                        <p className="text-[10px] text-muted">Multiple PDFs or photos at once · AI reads them into your history</p>
-                        <input
-                          type="file"
-                          accept="image/*,application/pdf"
-                          multiple
-                          className="hidden"
-                          onChange={(e) => { handleMultiUpload(Array.from(e.target.files || [])); e.target.value = ''; }}
-                        />
-                      </label>
-                    </div>
-
-                    <div className="space-y-2">
-                      {manualHistory.map((item, i) => (
-                        <div key={i} className="flex justify-between items-center p-3 bg-card border border-border rounded-xl group hover:border-torqued-red/30 transition-all">
-                          <div className="flex items-center gap-3">
-                            <div className="w-8 h-8 bg-background rounded-lg flex items-center justify-center text-muted">
-                              <History size={14} />
-                            </div>
-                            <div>
-                              <div className="text-sm font-bold">{item.service}</div>
-                              <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5">
-                                <div className="text-[10px] text-muted uppercase font-black">{item.date} • {item.provider}</div>
-                                {item.price && <span className="text-[10px] bg-torqued-red/10 text-torqued-red px-1.5 rounded font-bold">{item.price}</span>}
-                                {item.notes && <span className="text-[10px] text-muted/60 italic">({item.notes})</span>}
-                              </div>
-                            </div>
-                          </div>
-                          <div className="flex items-center gap-2 opacity-0 group-hover:opacity-100 transition-opacity">
-                            <button 
-                              onClick={() => {
-                                setEntryDate(item.date);
-                                setEntryService(item.service);
-                                setEntryProvider(item.provider);
-                                setEntryMileage(item.mileage || '');
-                                setEntryPrice(item.price || '');
-                                setEntryNotes(item.notes || '');
-                                setShowHistoryEntry(true);
-                                deleteHistory(i);
-                              }}
-                              className="p-1.5 hover:bg-background rounded-lg text-muted hover:text-foreground"
-                            >
-                              <Edit2 size={12} />
-                            </button>
-                            <button 
-                              onClick={() => deleteHistory(i)}
-                              className="p-1.5 hover:bg-torqued-red/10 rounded-lg text-muted hover:text-torqued-red"
-                            >
-                              <Plus size={12} className="rotate-45" />
-                            </button>
-                          </div>
-                        </div>
-                      ))}
-                    </div>
-
-                    {showHistoryEntry && (
-                      <motion.div 
-                        initial={{ opacity: 0, y: -10 }}
-                        animate={{ opacity: 1, y: 0 }}
-                        className="p-4 bg-card rounded-2xl border border-border space-y-3"
-                      >
-                        <div className="grid grid-cols-2 gap-3">
-                          <Input 
-                            label="Service Date" 
-                            type="text" 
-                            placeholder="E.g. Oct 14th 2025"
-                            className="bg-background" 
-                            value={entryDate}
-                            onChange={(e) => setEntryDate(e.target.value)}
-                          />
-                          <Input 
-                            label="Mileage (km)" 
-                            placeholder="E.g. 103,000" 
-                            className="bg-background" 
-                            value={entryMileage}
-                            onChange={(e) => setEntryMileage(e.target.value)}
-                          />
-                        </div>
-                        <Input 
-                          label="Service Performed" 
-                          placeholder="Oil change..." 
-                          className="bg-background" 
-                          value={entryService}
-                          onChange={(e) => setEntryService(e.target.value)}
-                        />
-                        <div className="grid grid-cols-2 gap-3">
-                          <Input 
-                            label="Provider" 
-                            placeholder="Precision Mech..." 
-                            className="bg-background" 
-                            value={entryProvider}
-                            onChange={(e) => setEntryProvider(e.target.value)}
-                          />
-                          <Input 
-                            label="Price (Optional)" 
-                            placeholder="E.g. $150" 
-                            className="bg-background" 
-                            value={entryPrice}
-                            onChange={(e) => setEntryPrice(e.target.value)}
-                          />
-                        </div>
-                        <Input 
-                          label="Notes / Type (Optional)" 
-                          placeholder="e.g. External Record" 
-                          className="bg-background" 
-                          value={entryNotes}
-                          onChange={(e) => setEntryNotes(e.target.value)}
-                        />
-                        <div className="flex gap-2 pt-2">
-                          <Button size="sm" className="flex-1 bg-torqued-red text-white" onClick={() => {
-                            if (!entryDate || !entryService) return;
-                            const newItem = { date: entryDate, service: entryService, provider: entryProvider || 'Unknown', mileage: entryMileage, price: entryPrice, notes: entryNotes };
-                            setManualHistory(prev => [...prev, newItem].sort((a, b) => parseServiceDate(b.date) - parseServiceDate(a.date)));
-                            setShowHistoryEntry(false);
-                            setEntryDate('');
-                            setEntryService('');
-                            setEntryProvider('');
-                            setEntryMileage('');
-                            setEntryPrice('');
-                            setEntryNotes('');
-                          }}>Save Record</Button>
-                          <Button variant="ghost" size="sm" onClick={() => setShowHistoryEntry(false)}>Cancel</Button>
-                        </div>
-                      </motion.div>
-                    )}
-                  </div>
-                </div>
-              ) : (
-                <p className="text-muted">
+              {!vehicle && (
+                <p className="text-muted text-sm">
                   We'll use your rego to pull exact specs for accurate parts pricing.
                 </p>
               )}
@@ -2905,30 +2735,45 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                   <CheckCircle2 className="hidden sm:block ml-auto text-green-500" size={32} />
                 </Card>
                 <div className="mt-8 space-y-4">
-                  <Input
-                    label="Current Mileage (km)"
-                    placeholder="E.g. 98000"
-                    type="number"
-                    value={mileage}
-                    onChange={(e) => setMileage(e.target.value)}
-                    onBlur={() => {
-                      const km = parseInt(mileage, 10);
-                      const plate = (vehicle?.rego || rego || '').toUpperCase();
-                      if (plate && Number.isFinite(km) && km > 0) {
-                        fetch(`/api/vehicles/${encodeURIComponent(plate)}/mileage`, {
-                          method: 'POST', headers: { 'Content-Type': 'application/json' },
-                          body: JSON.stringify({ mileage: km, phase: 'customer' }),
-                        }).catch(() => {});
-                      }
-                    }}
-                    className="bg-card border-border text-foreground"
-                  />
-                  
-                  {/* New Customer / Service History Section */}
+                  {/* Last Known Mileage — tap to edit */}
+                  {editingMileage ? (
+                    <Input
+                      label="Last Known Mileage (km)"
+                      placeholder="E.g. 98000"
+                      type="number"
+                      value={mileage}
+                      autoFocus
+                      onChange={(e) => setMileage(e.target.value)}
+                      onBlur={() => {
+                        setEditingMileage(false);
+                        const km = parseInt(mileage, 10);
+                        const plate = (vehicle?.rego || rego || '').toUpperCase();
+                        if (plate && Number.isFinite(km) && km > 0) {
+                          fetch(`/api/vehicles/${encodeURIComponent(plate)}/mileage`, {
+                            method: 'POST', headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ mileage: km, phase: 'customer' }),
+                          }).catch(() => {});
+                        }
+                      }}
+                      onKeyDown={(e) => { if (e.key === 'Enter') (e.target as HTMLInputElement).blur(); }}
+                      className="bg-card border-border text-foreground"
+                    />
+                  ) : (
+                    <button
+                      onClick={() => setEditingMileage(true)}
+                      className="w-full text-left p-3 rounded-xl border border-border bg-card hover:border-torqued-red/40 transition-all group"
+                    >
+                      <p className="text-[10px] font-black uppercase tracking-widest text-muted group-hover:text-torqued-red transition-colors">Last Known Mileage · Tap to Edit</p>
+                      <p className="text-lg font-bold mt-0.5">{mileage ? `${Number(mileage).toLocaleString()} km` : <span className="text-muted font-normal text-sm">Enter mileage…</span>}</p>
+                    </button>
+                  )}
+
+                  {/* New to Torqued — hidden when vehicle is already in the garage */}
+                  {!garageUnlocked && (
                   <div className="pt-4 border-t border-border space-y-4">
                       <div className="flex items-center justify-between">
                          <label className="text-sm font-bold">New to Torqued?</label>
-                         <button 
+                         <button
                           onClick={() => setIsNewVehicle(!isNewVehicle)}
                           className={cn(
                             "w-12 h-6 rounded-full transition-all relative",
@@ -3075,6 +2920,7 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                         </motion.div>
                       )}
                     </div>
+                  )}
 
                   {/* AI Recommendations inline — shown when health insights are available */}
                   {(healthInsights.length > 0 || healthLoading) && garageUnlocked && (
@@ -3082,10 +2928,113 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                       <div className="flex items-center justify-between gap-2">
                         <p className="text-xs font-black uppercase tracking-widest text-muted">AI Recommendations</p>
                         <button
-                          onClick={() => setShowHistorySheet(true)}
+                          onClick={() => setShowHistorySheet(prev => !prev)}
                           className="text-xs text-torqued-red font-bold hover:underline"
-                        >Review Service History →</button>
+                        >{showHistorySheet ? 'Hide History ↑' : 'Review Service History →'}</button>
                       </div>
+
+                      {/* Inline service history with add / edit / delete */}
+                      {showHistorySheet && (
+                        <motion.div
+                          initial={{ opacity: 0, y: -6 }}
+                          animate={{ opacity: 1, y: 0 }}
+                          className="space-y-3 p-4 bg-card rounded-2xl border border-border"
+                        >
+                          <div className="flex items-center justify-between gap-2">
+                            <p className="text-xs font-black uppercase tracking-widest text-muted">Service History</p>
+                            <div className="flex items-center gap-2">
+                              <label className={cn(
+                                "h-7 px-2.5 inline-flex items-center text-[10px] font-bold rounded-lg cursor-pointer transition-all",
+                                isParsingReceipt ? "bg-card text-muted cursor-wait" : "bg-torqued-red/10 text-torqued-red hover:bg-torqued-red/20"
+                              )}>
+                                {isParsingReceipt ? <><div className="w-3 h-3 border-2 border-torqued-red/30 border-t-torqued-red rounded-full animate-spin mr-1.5" />Scanning…</> : <><Mail size={12} className="mr-1" />Scan Receipt</>}
+                                <input type="file" accept="image/*,application/pdf" className="hidden" disabled={isParsingReceipt} onChange={(e) => { handleReceiptUpload(e.target.files?.[0] || null); e.target.value = ''; }} />
+                              </label>
+                              <button
+                                onClick={() => setShowHistoryEntry(v => !v)}
+                                className="h-7 px-2.5 inline-flex items-center text-[10px] font-bold rounded-lg bg-card border border-border hover:border-torqued-red/40 transition-all"
+                              ><Plus size={11} className="mr-1" /> Add</button>
+                            </div>
+                          </div>
+
+                          {showHistoryEntry && (
+                            <div className="p-3 bg-background rounded-xl border border-border space-y-2">
+                              <div className="grid grid-cols-2 gap-2">
+                                <Input label="Date" placeholder="E.g. Oct 2025" className="bg-card text-xs" value={entryDate} onChange={e => setEntryDate(e.target.value)} />
+                                <Input label="Mileage (km)" placeholder="E.g. 103,000" className="bg-card text-xs" value={entryMileage} onChange={e => setEntryMileage(e.target.value)} />
+                              </div>
+                              <Input label="Service Performed" placeholder="Oil change..." className="bg-card text-xs" value={entryService} onChange={e => setEntryService(e.target.value)} />
+                              <div className="grid grid-cols-2 gap-2">
+                                <Input label="Provider" placeholder="Workshop name" className="bg-card text-xs" value={entryProvider} onChange={e => setEntryProvider(e.target.value)} />
+                                <Input label="Price (optional)" placeholder="E.g. $150" className="bg-card text-xs" value={entryPrice} onChange={e => setEntryPrice(e.target.value)} />
+                              </div>
+                              <div className="flex gap-2 pt-1">
+                                <button onClick={() => {
+                                  if (!entryDate || !entryService) return;
+                                  const newItem = { date: entryDate, service: entryService, provider: entryProvider || 'Unknown', mileage: entryMileage, price: entryPrice, notes: entryNotes };
+                                  setManualHistory(prev => [...prev, newItem].sort((a, b) => parseServiceDate(b.date) - parseServiceDate(a.date)));
+                                  setShowHistoryEntry(false); setEntryDate(''); setEntryService(''); setEntryProvider(''); setEntryMileage(''); setEntryPrice(''); setEntryNotes('');
+                                }} className="flex-1 py-1.5 bg-torqued-red text-white text-xs font-bold rounded-lg">Save Record</button>
+                                <button onClick={() => setShowHistoryEntry(false)} className="px-3 py-1.5 border border-border text-xs font-bold rounded-lg">Cancel</button>
+                              </div>
+                            </div>
+                          )}
+
+                          {manualHistory.length === 0 ? (
+                            <p className="text-xs text-muted text-center py-2">No records yet. Add one above.</p>
+                          ) : (
+                            <div className="space-y-2 max-h-64 overflow-y-auto">
+                              {[...manualHistory].sort((a, b) => parseServiceDate(b.date) - parseServiceDate(a.date)).map((item, idx) => {
+                                const originalIdx = manualHistory.indexOf(item);
+                                const isTorqued = item.source_type === 'torqued_job';
+                                const isEditingThis = editingLogIdx === idx;
+                                return (
+                                  <div key={idx} className="p-3 bg-background rounded-xl border border-border space-y-2">
+                                    {isEditingThis ? (
+                                      <div className="space-y-2">
+                                        <div className="grid grid-cols-2 gap-2">
+                                          <Input label="Date" className="bg-card text-xs" value={editLogDate} onChange={e => setEditLogDate(e.target.value)} />
+                                          <Input label="Mileage" className="bg-card text-xs" value={editLogMileage} onChange={e => setEditLogMileage(e.target.value)} />
+                                        </div>
+                                        <Input label="Service" className="bg-card text-xs" value={editLogService} onChange={e => setEditLogService(e.target.value)} />
+                                        <div className="grid grid-cols-2 gap-2">
+                                          <Input label="Provider" className="bg-card text-xs" value={editLogProvider} onChange={e => setEditLogProvider(e.target.value)} />
+                                          <Input label="Price" className="bg-card text-xs" value={editLogPrice} onChange={e => setEditLogPrice(e.target.value)} />
+                                        </div>
+                                        <div className="flex gap-2">
+                                          <button onClick={async () => {
+                                            const updated = { ...item, date: editLogDate, service: editLogService, provider: editLogProvider, mileage: editLogMileage, price: editLogPrice, notes: editLogNotes };
+                                            setManualHistory(prev => prev.map((h, i) => i === originalIdx ? updated : h));
+                                            setEditingLogIdx(null);
+                                            if (item.id) await fetch('/api/customer/update-history', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id: item.id, fields: { date: editLogDate, service: editLogService, provider: editLogProvider, mileage: editLogMileage, price: editLogPrice } }) }).catch(() => {});
+                                          }} className="flex-1 py-1.5 bg-torqued-red text-white text-xs font-bold rounded-lg">Save</button>
+                                          <button onClick={() => setEditingLogIdx(null)} className="px-3 py-1.5 border border-border text-xs rounded-lg">Cancel</button>
+                                        </div>
+                                      </div>
+                                    ) : (
+                                      <div className="flex items-start justify-between gap-2">
+                                        <div className="min-w-0">
+                                          <p className="text-xs font-bold truncate">{item.service}</p>
+                                          <p className="text-[10px] text-muted">{item.date}{item.provider ? ` · ${item.provider}` : ''}{item.mileage ? ` · ${Number(item.mileage).toLocaleString()} km` : ''}</p>
+                                          {item.price && <p className="text-[10px] font-bold text-torqued-red">{String(item.price).startsWith('$') ? item.price : `$${item.price}`}</p>}
+                                        </div>
+                                        {!isTorqued && (
+                                          <div className="flex items-center gap-1 shrink-0">
+                                            <button onClick={() => { setEditingLogIdx(idx); setEditLogDate(item.date||''); setEditLogService(item.service||''); setEditLogProvider(item.provider||''); setEditLogMileage(item.mileage||''); setEditLogPrice(item.price||''); setEditLogNotes(item.notes||''); }} className="p-1 hover:bg-card rounded text-muted hover:text-foreground transition-colors"><Edit2 size={11} /></button>
+                                            <button onClick={() => setManualHistory(prev => prev.filter((_, i) => i !== originalIdx))} className="p-1 hover:bg-torqued-red/10 rounded text-muted hover:text-torqued-red transition-colors"><Plus size={11} className="rotate-45" /></button>
+                                          </div>
+                                        )}
+                                      </div>
+                                    )}
+                                  </div>
+                                );
+                              })}
+                            </div>
+                          )}
+                        </motion.div>
+                      )}
+
+                      {/* AI insight cards */}
                       {healthLoading ? (
                         <div className="space-y-2">
                           {[...Array(3)].map((_, i) => <div key={i} className="h-14 rounded-xl bg-background animate-pulse" />)}
@@ -3106,14 +3055,10 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                                 </div>
                                 {sid && (
                                   <button
-                                    onClick={() => {
-                                      setSelectedServices(prev => isAdded ? prev.filter(s => s !== sid) : [...prev, sid]);
-                                    }}
+                                    onClick={() => setSelectedServices(prev => isAdded ? prev.filter(s => s !== sid) : [...prev, sid])}
                                     className={cn(
                                       "shrink-0 px-2.5 py-1 rounded-lg text-[10px] font-black uppercase tracking-widest transition-all",
-                                      isAdded
-                                        ? "bg-emerald-500/20 text-emerald-400"
-                                        : "bg-torqued-red text-white hover:bg-red-600"
+                                      isAdded ? "bg-emerald-500/20 text-emerald-400" : "bg-torqued-red text-white hover:bg-red-600"
                                     )}
                                   >
                                     {isAdded ? '✓ Added' : '+ Add'}
@@ -3290,26 +3235,67 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                     <div className="flex items-start justify-between gap-2">
                       <div>
                         <p className="text-sm font-bold">Request a Custom Quote</p>
-                        <p className="text-xs text-muted mt-0.5">Describe the work you need — your chosen mechanic will send you a price. No inspection fee.</p>
+                        <p className="text-xs text-muted mt-0.5">
+                          {selectedServices.length > 0
+                            ? 'Describe the extra work — your mechanic will price it separately. Your other selected services continue as normal.'
+                            : 'Describe the work you need — your chosen mechanic will send you a price. No inspection fee.'}
+                        </p>
                       </div>
-                      <button onClick={() => setShowUnlistedQuote(false)} className="p-1 hover:bg-background rounded text-muted hover:text-foreground transition-all"><X size={14} /></button>
+                      <button onClick={() => { setShowUnlistedQuote(false); setEvQuoteConcern(''); }} className="p-1 hover:bg-background rounded text-muted hover:text-foreground transition-all"><X size={14} /></button>
                     </div>
-                    <EVQuoteRequest
-                      vehicle={vehicle}
-                      rego={rego}
-                      realMechanics={realMechanics}
-                      customerEmail={customerEmail}
-                      customerOwnerId={customerOwnerId}
-                      userName={userName}
-                      customerCoords={customerCoords}
-                      requestLocation={requestLocation}
-                      locationAsked={locationAsked}
-                      onSubmitted={(job) => {
-                        setActiveJobs(prev => [job, ...prev]);
-                        setShowUnlistedQuote(false);
-                        setView('dashboard');
-                      }}
-                    />
+
+                    {selectedServices.length > 0 ? (
+                      /* Mixed mode — pre-qualified services selected + extra unlisted work */
+                      <div className="space-y-3">
+                        <textarea
+                          rows={3}
+                          placeholder="Describe the unlisted work (e.g. 'front passenger window won't go up'). Your mechanic will quote it separately."
+                          value={evQuoteConcern}
+                          onChange={(e) => setEvQuoteConcern(e.target.value)}
+                          className="w-full bg-background border border-border rounded-xl px-3 py-2.5 text-sm text-foreground placeholder:text-muted outline-none focus:border-torqued-red transition-all resize-none"
+                        />
+                        <p className="text-[10px] text-muted leading-relaxed">
+                          This quote request will be sent to your chosen mechanic alongside your booking. They'll price it and get back to you separately — no inspection fee.
+                        </p>
+                        <div className="flex gap-2">
+                          <button
+                            disabled={!evQuoteConcern.trim()}
+                            onClick={() => {
+                              if (!evQuoteConcern.trim()) return;
+                              setShowUnlistedQuote(false);
+                              // quote will auto-submit when handleBooking fires (mixed-mode logic)
+                            }}
+                            className="flex-1 py-2.5 text-xs font-black uppercase tracking-widest bg-torqued-red text-white rounded-xl disabled:opacity-40 disabled:cursor-not-allowed hover:bg-red-600 transition-all"
+                          >
+                            Add to Booking →
+                          </button>
+                          <button
+                            onClick={() => { setShowUnlistedQuote(false); setEvQuoteConcern(''); }}
+                            className="px-4 py-2.5 text-xs font-bold text-muted border border-border rounded-xl hover:bg-background transition-all"
+                          >
+                            Cancel
+                          </button>
+                        </div>
+                      </div>
+                    ) : (
+                      /* Standalone mode — no pre-qualified services selected */
+                      <EVQuoteRequest
+                        vehicle={vehicle}
+                        rego={rego}
+                        realMechanics={realMechanics}
+                        customerEmail={customerEmail}
+                        customerOwnerId={customerOwnerId}
+                        userName={userName}
+                        customerCoords={customerCoords}
+                        requestLocation={requestLocation}
+                        locationAsked={locationAsked}
+                        onSubmitted={(job) => {
+                          setActiveJobs(prev => [job, ...prev]);
+                          setShowUnlistedQuote(false);
+                          setView('dashboard');
+                        }}
+                      />
+                    )}
                   </motion.div>
                 )}
 
@@ -5438,30 +5424,34 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                       })()}
                       <div className="flex items-center gap-2 text-xs text-muted">
                         <span>at {(job as any).mechanicName || realMechanics.find(m => m.id === job.mechanicId)?.name || 'your workshop'}</span>
-                        <span>•</span>
-                        {isEditingDate === job.id ? (
-                          <div className="flex items-center gap-2">
-                            <input 
-                              type="date" 
-                              className="bg-background border border-border rounded-xl px-2 py-1 outline-none text-foreground text-[10px] focus:border-torqued-red transition-all" 
-                              value={newDate}
-                              onChange={(e) => setNewDate(e.target.value)}
-                            />
-                            <button onClick={() => {
-                              setActiveJobs(prev => prev.map(j => j.id === job.id ? { ...j, date: newDate } : j));
-                              setIsEditingDate(null);
-                            }} className="text-torqued-red font-bold">Save</button>
-                          </div>
-                        ) : (
-                          <div className="flex items-center gap-1">
-                            <span>{job.date ? (() => { const d = new Date(job.date); return isNaN(d.getTime()) ? job.date : d.toLocaleDateString('en-NZ', { day: 'numeric', month: 'short', year: 'numeric' }); })() : 'TBC'}</span>
-                            <button onClick={() => {
-                              setIsEditingDate(job.id);
-                              setNewDate(job.date);
-                            }} className="p-1 hover:bg-background rounded">
-                              <Edit2 size={12} className="text-muted" />
-                            </button>
-                          </div>
+                        {!(job.description || '').startsWith('[EV Quote Request]') && (
+                          <>
+                            <span>•</span>
+                            {isEditingDate === job.id ? (
+                              <div className="flex items-center gap-2">
+                                <input
+                                  type="date"
+                                  className="bg-background border border-border rounded-xl px-2 py-1 outline-none text-foreground text-[10px] focus:border-torqued-red transition-all"
+                                  value={newDate}
+                                  onChange={(e) => setNewDate(e.target.value)}
+                                />
+                                <button onClick={() => {
+                                  setActiveJobs(prev => prev.map(j => j.id === job.id ? { ...j, date: newDate } : j));
+                                  setIsEditingDate(null);
+                                }} className="text-torqued-red font-bold">Save</button>
+                              </div>
+                            ) : (
+                              <div className="flex items-center gap-1">
+                                <span>{job.date ? (() => { const d = new Date(job.date); return isNaN(d.getTime()) ? job.date : d.toLocaleDateString('en-NZ', { day: 'numeric', month: 'short', year: 'numeric' }); })() : 'TBC'}</span>
+                                <button onClick={() => {
+                                  setIsEditingDate(job.id);
+                                  setNewDate(job.date);
+                                }} className="p-1 hover:bg-background rounded">
+                                  <Edit2 size={12} className="text-muted" />
+                                </button>
+                              </div>
+                            )}
+                          </>
                         )}
                       </div>
                     </div>
@@ -5548,8 +5538,9 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
 
                   {(() => {
                     const isDiag = job.serviceIds.includes('diag_inspection');
+                    const isEVQuotePending = (job.description || '').startsWith('[EV Quote Request]') && job.status !== 'completed';
+                    if (isEVQuotePending) return null;
                     const hasQuote = !!jobDetail[job.id]?.quoteItems;
-                    // Progress: booked/confirmed = start, in_progress/quote sent = mid, completed = end
                     const progress = job.status === 'completed' ? '100%'
                       : job.status === 'in_progress' ? '50%'
                       : isDiag && hasQuote ? '66%'
