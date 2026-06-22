@@ -4644,7 +4644,7 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
   }
 
   return (
-    <div className="min-h-screen bg-background text-foreground flex flex-col md:flex-row transition-colors duration-300">
+    <div className="min-h-screen bg-background text-foreground flex flex-col md:flex-row transition-colors duration-300 overflow-x-hidden">
       {/* Mobile Header */}
       <div className="md:hidden p-4 border-b border-border flex justify-between items-center bg-background sticky top-0 z-50">
         <Logo />
@@ -4715,7 +4715,7 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
       </aside>
 
       {/* Main Content */}
-      <main className="flex-1 p-4 sm:p-6 md:p-8 overflow-y-auto bg-background">
+      <main className="flex-1 p-4 sm:p-6 md:p-8 overflow-y-auto overflow-x-hidden min-w-0 bg-background">
         {portalLoading && (
           <div className="flex items-center justify-center h-64">
             <div className="w-8 h-8 border-4 border-border border-t-torqued-red rounded-full animate-spin" />

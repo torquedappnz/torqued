@@ -2,7 +2,8 @@ import React, { useState, useEffect, useRef } from 'react';
 import { Logo } from '../components/Logo';
 import { Button } from '../components/Button';
 import { authPasskey, registerPasskey, passkeysSupported, hasPasskey } from '../lib/passkey';
-import { LayoutDashboard, Search, Wrench, BookOpen, Shield, Rocket, ChevronRight } from 'lucide-react';
+import { LayoutDashboard, Search, Wrench, BookOpen, Shield, Rocket, ChevronRight, Download } from 'lucide-react';
+import { jsPDF } from 'jspdf';
 
 export const AdminPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) => {
   const [key, setKey] = useState('');
@@ -316,6 +317,101 @@ export const AdminPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) => {
     } catch { setDocMsg('Upload failed.'); setDocBusy(false); }
   };
 
+  const loadLogoDataUrl = (src: string): Promise<string | null> =>
+    new Promise(resolve => {
+      const img = new Image();
+      img.crossOrigin = 'anonymous';
+      img.onload = () => { try { const c = document.createElement('canvas'); c.width = img.width; c.height = img.height; const ctx = c.getContext('2d')!; ctx.drawImage(img, 0, 0); resolve(c.toDataURL('image/png')); } catch { resolve(null); } };
+      img.onerror = () => resolve(null);
+      img.src = src;
+    });
+
+  const downloadAgreementPdf = async (p: any) => {
+    const doc = new jsPDF({ unit: 'mm', format: 'a4' });
+    const margin = 15;
+    const contentW = 210 - margin * 2;
+    let y = 35;
+
+    const checkY = (n = 10) => { if (y + n > 277) { doc.addPage(); y = 20; } };
+    const writeText = (text: string, size: number, bold = false, color: [number,number,number] = [21,4,2]) => {
+      doc.setFontSize(size); doc.setFont('helvetica', bold ? 'bold' : 'normal'); doc.setTextColor(...color);
+      const lines = doc.splitTextToSize(text, contentW); checkY(lines.length * (size * 0.4));
+      doc.text(lines, margin, y); y += lines.length * (size * 0.4) + 2;
+    };
+    const writePara = (text: string) => {
+      doc.setFontSize(9); doc.setFont('helvetica', 'normal'); doc.setTextColor(30,30,30);
+      const lines = doc.splitTextToSize(text, contentW); checkY(lines.length * 4);
+      doc.text(lines, margin, y); y += lines.length * 4 + 3;
+    };
+    const writeSection = (title: string) => {
+      checkY(14); y += 4;
+      doc.setFontSize(11); doc.setFont('helvetica', 'bold'); doc.setTextColor(255,24,0);
+      doc.text(title, margin, y); y += 6; doc.setTextColor(0,0,0);
+    };
+
+    const logo = await loadLogoDataUrl('/torqued-logo.png');
+    if (logo) doc.addImage(logo, 'PNG', margin, 8, 48, 16);
+    doc.setFillColor(255,24,0); doc.rect(0, 28, 210, 1.5, 'F');
+
+    const today = new Date();
+    const months = ['January','February','March','April','May','June','July','August','September','October','November','December'];
+    const todayStr = `${today.getDate()} ${months[today.getMonth()]} ${today.getFullYear()}`;
+    const workshopName = p.legal_name || p.name || '[Workshop]';
+    const address = p.address ? `${p.address}, New Zealand` : '[Workshop Address], New Zealand';
+
+    writeText('TORQUED NZ MECHANIC PLATFORM AGREEMENT', 14, true);
+    y += 2;
+    writeText(`Date: ${todayStr}`, 9, false, [80,80,80]);
+    if (p.agreement_signed_at) writeText(`Originally signed: ${new Date(p.agreement_signed_at).toLocaleDateString('en-NZ', { day: 'numeric', month: 'long', year: 'numeric' })}`, 9, false, [80,80,80]);
+    y += 3;
+
+    writeSection('PARTIES');
+    writePara(`This Agreement is entered into between:`);
+    writePara(`Platform Provider: Torqued NZ Limited ("Torqued"), a New Zealand company operating the Torqued mechanic marketplace platform.`);
+    writePara(`Workshop: ${workshopName}, trading as ${p.name || workshopName}, located at ${address}${p.nzbn ? `, NZBN: ${p.nzbn}` : ''} ("Workshop").`);
+
+    writeSection('SERVICES & COMMISSION');
+    writePara(`1.1 Torqued provides an online platform connecting vehicle owners with independent automotive workshops for the purpose of quoting, booking, and managing vehicle repair and maintenance services.`);
+    writePara(`1.2 The Workshop agrees to use the Torqued platform to receive job requests, submit quotes, and communicate with customers. Torqued will facilitate payments and handle customer-facing communications on behalf of the Workshop.`);
+    writePara(`1.3 Commission: Torqued retains a 4% commission on the value of each completed job (excluding GST) as a platform facilitation fee. Remaining funds are disbursed to the Workshop's nominated bank account within 2 business days of job completion and customer payment confirmation.`);
+
+    writeSection('SUBSCRIPTION');
+    writePara(`2.1 Workshop access to the Torqued platform is conditional on maintaining an active subscription. The current subscription plan is $99/month + GST, billed monthly.`);
+    writePara(`2.2 Torqued reserves the right to adjust subscription pricing with 30 days' written notice. Continued use of the platform after the notice period constitutes acceptance of the new pricing.`);
+
+    writeSection('WORKSHOP OBLIGATIONS');
+    writePara(`3.1 The Workshop agrees to: (a) maintain all applicable trade qualifications, certifications, and licences required to perform automotive services in New Zealand; (b) hold current public liability insurance of no less than $1,000,000 NZD; (c) respond to quote requests within 24 business hours; (d) perform all services to the standard of a competent automotive professional; (e) honour all quotes accepted by customers within the agreed timeframe.`);
+    writePara(`3.2 The Workshop must not solicit customers sourced through the Torqued platform for direct bookings that circumvent the Torqued commission structure for a period of 12 months following the last Torqued-facilitated interaction.`);
+
+    writeSection('PLATFORM RULES');
+    writePara(`4.1 The Workshop must not misrepresent their qualifications, capacity, or service offerings on the platform.`);
+    writePara(`4.2 Torqued may suspend or terminate the Workshop's access to the platform immediately for: (a) breach of this Agreement; (b) customer complaints indicating unsafe or unprofessional conduct; (c) failure to maintain required qualifications or insurance; (d) fraudulent activity.`);
+
+    writeSection('PAYMENTS & REFUNDS');
+    writePara(`5.1 Customer payments are processed by Torqued. Torqued holds funds until job completion is confirmed by the customer or 48 hours after the stated completion date (whichever is earlier).`);
+    writePara(`5.2 Refund policy: Full refund if cancellation is received more than 24 hours before the scheduled drop-off. Cancellations within 24 hours receive a 50% refund per this Agreement, with the remaining 50% disbursed to the Workshop as a cancellation fee.`);
+
+    writeSection('LIMITATION OF LIABILITY');
+    writePara(`6.1 Torqued is not liable for any indirect, special, or consequential damages arising from use of the platform, including but not limited to loss of revenue, data, or business opportunity.`);
+    writePara(`6.2 Torqued's total liability to the Workshop for any claim arising from this Agreement shall not exceed the total subscription fees paid in the 3 months preceding the claim.`);
+
+    writeSection('GENERAL');
+    writePara(`7.1 This Agreement is governed by the laws of New Zealand. Disputes shall be resolved by the parties in good faith, and if unresolved, referred to mediation before litigation.`);
+    writePara(`7.2 The parties are independent contractors. Nothing in this Agreement creates an employment, partnership, agency, or joint venture relationship.`);
+    writePara(`7.3 Torqued may amend this Agreement on 30 days' written notice. Continued use of the platform constitutes acceptance of amendments.`);
+
+    if (p.agreement_signed_at && p.owner_name) {
+      writeSection('SIGNATURE');
+      writePara(`Signed by ${p.owner_name}${p.signer_title ? `, ${p.signer_title}` : ''} on behalf of ${workshopName}.`);
+      writePara(`Electronically signed via Torqued onboarding portal on ${new Date(p.agreement_signed_at).toLocaleDateString('en-NZ', { day: 'numeric', month: 'long', year: 'numeric' })}.`);
+    }
+
+    doc.setFont('helvetica','normal'); doc.setFontSize(7.5); doc.setTextColor(150,150,150);
+    doc.text('Torqued NZ Mechanic Platform Agreement. This document constitutes a binding agreement between Torqued NZ and the Workshop.', margin, 285, { maxWidth: contentW });
+
+    doc.save(`Torqued-Agreement-${(p.name || 'Workshop').replace(/[^a-z0-9]/gi, '-')}.pdf`);
+  };
+
   const viewMechanic = async (id: string) => {
     setMechDetail({ loading: true });
     setPromoMsg(null); setPromoBusy(false);
@@ -473,7 +569,7 @@ export const AdminPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) => {
   }
 
   return (
-    <div className="min-h-screen bg-background text-foreground flex flex-col md:flex-row">
+    <div className="min-h-screen bg-background text-foreground flex flex-col md:flex-row overflow-x-hidden">
       {/* Sidebar */}
       <aside className="w-full md:w-64 bg-card border-b md:border-b-0 md:border-r border-border flex flex-col md:sticky top-0 md:h-screen z-40">
         <div className="p-6 border-b border-border flex items-center justify-between">
@@ -499,7 +595,7 @@ export const AdminPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) => {
       </aside>
 
       {/* Main content */}
-      <main className="flex-1 p-4 md:p-8 space-y-6 overflow-y-auto">
+      <main className="flex-1 p-4 md:p-8 space-y-6 overflow-y-auto overflow-x-hidden min-w-0">
 
         {tab === 'overview' && overview && (
           <>
@@ -865,6 +961,16 @@ export const AdminPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) => {
                       <p className="text-xs text-muted">{p.email} {p.phone ? `· ${p.phone}` : ''}</p>
                     </div>
                     <button onClick={() => setMechDetail(null)} className="text-muted hover:text-foreground text-2xl leading-none">×</button>
+                  </div>
+
+                  {/* Agreement PDF download */}
+                  <div className="flex gap-2">
+                    <button
+                      onClick={() => downloadAgreementPdf(p)}
+                      className="flex-1 flex items-center justify-center gap-2 py-2.5 rounded-xl border border-border bg-background text-xs font-bold hover:border-torqued-red/40 hover:text-torqued-red transition-all"
+                    >
+                      <Download size={13} /> Download Platform Agreement
+                    </button>
                   </div>
 
                   <div className="bg-background rounded-xl p-3 border border-border space-y-2">
