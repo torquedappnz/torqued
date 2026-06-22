@@ -846,19 +846,24 @@ app.post('/api/passkey/register-verify', async (req, res) => {
     const cred = verification.registrationInfo.credential;
     const supabase = getSupabaseAdmin();
     if (!supabase) return res.status(500).json({ error: 'Database not configured' });
-    const { data: insertedRows } = await supabase.from('webauthn_credentials').insert({
+    await supabase.from('webauthn_credentials').insert({
       actor_type: data.actorType, owner_ref: data.ownerRef,
       credential_id: cred.id,
       public_key: Buffer.from(cred.publicKey).toString('base64url'),
       counter: cred.counter || 0,
       transports: cred.transports || null,
-    }).select('id');
-    // Best-effort: store human-readable device label derived from user-agent
-    const ua = req.headers['user-agent'] || '';
-    const deviceName = parseUADeviceName(ua);
-    if (deviceName && insertedRows?.[0]?.id) {
-      void supabase.from('webauthn_credentials').update({ device_name: deviceName }).eq('id', insertedRows[0].id);
-    }
+    });
+    // Best-effort: store device label — silently skipped if device_name column doesn't exist yet
+    try {
+      const ua = req.headers['user-agent'] || '';
+      const deviceName = parseUADeviceName(ua);
+      if (deviceName) {
+        await supabase.from('webauthn_credentials')
+          .update({ device_name: deviceName } as any)
+          .eq('credential_id', cred.id)
+          .eq('owner_ref', String(data.ownerRef).toLowerCase());
+      }
+    } catch { /* column not yet added — ignore */ }
     res.json({ success: true });
   } catch (err) {
     console.error('[passkey/register-verify]', err);
@@ -963,13 +968,25 @@ app.get('/api/passkey/list', async (req, res) => {
     if (!actorType || !ownerRef) return res.status(400).json({ error: 'Missing actorType or ownerRef' });
     const supabase = getSupabaseAdmin();
     if (!supabase) return res.status(500).json({ error: 'Database not configured' });
-    const { data, error } = await supabase.from('webauthn_credentials')
+    let rows: any[] | null = null;
+    const q1 = await supabase.from('webauthn_credentials')
       .select('id, credential_id, created_at, transports, device_name')
       .eq('actor_type', actorType)
       .eq('owner_ref', String(ownerRef).toLowerCase())
       .order('created_at', { ascending: false });
-    if (error) return res.status(500).json({ error: error.message });
-    res.json({ passkeys: data || [] });
+    if (!q1.error) {
+      rows = q1.data;
+    } else {
+      // device_name column not yet added — fall back without it
+      const q2 = await supabase.from('webauthn_credentials')
+        .select('id, credential_id, created_at, transports')
+        .eq('actor_type', actorType)
+        .eq('owner_ref', String(ownerRef).toLowerCase())
+        .order('created_at', { ascending: false });
+      if (q2.error) return res.status(500).json({ error: q2.error.message });
+      rows = q2.data;
+    }
+    res.json({ passkeys: rows || [] });
   } catch (err) {
     console.error('[passkey/list]', err);
     res.status(500).json({ error: 'Could not list passkeys' });
