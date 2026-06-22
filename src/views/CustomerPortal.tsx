@@ -6365,57 +6365,93 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
       {/* Upload or Add Service History sheet */}
       <AnimatePresence>
         {showHistorySheet && (
-          <div className="fixed inset-0 z-[125] flex items-end sm:items-center justify-center bg-black/60 backdrop-blur-sm" onClick={() => { setShowHistorySheet(false); setShowHistoryEntry(false); }}>
+          <div className="fixed inset-0 z-[125] flex items-end sm:items-center justify-center bg-black/60 backdrop-blur-sm" onClick={() => { setShowHistorySheet(false); setShowHistoryEntry(false); setEditingLogIdx(null); }}>
             <motion.div
               initial={{ opacity: 0, y: 40 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: 40 }}
-              className="w-full max-w-md bg-card border border-border rounded-t-3xl sm:rounded-3xl p-6 space-y-4 shadow-2xl"
+              className="w-full max-w-md bg-card border border-border rounded-t-3xl sm:rounded-3xl shadow-2xl flex flex-col max-h-[88vh]"
               onClick={e => e.stopPropagation()}
             >
-              {!showHistoryEntry ? (
-                <>
-                  <div className="flex items-center justify-between">
-                    <h3 className="text-lg font-black tracking-tight">Add to Service History</h3>
-                    <button onClick={() => setShowHistorySheet(false)} className="text-muted hover:text-foreground text-2xl leading-none">×</button>
-                  </div>
-                  <p className="text-xs text-muted">Upload a receipt and we'll scan it automatically, or enter the details yourself.</p>
-                  <div className="grid grid-cols-1 gap-3">
-                    <button
-                      onClick={() => { setShowHistorySheet(false); document.getElementById('history-upload-input')?.click(); }}
-                      className="flex items-center gap-4 p-4 rounded-2xl border border-border hover:border-torqued-red/40 hover:bg-torqued-red/5 transition-all text-left"
-                    >
-                      <div className="w-10 h-10 rounded-xl bg-torqued-red/10 flex items-center justify-center shrink-0">
-                        <Upload size={18} className="text-torqued-red" />
-                      </div>
-                      <div>
-                        <p className="text-sm font-bold">Upload Receipt</p>
-                        <p className="text-xs text-muted">Choose a photo or PDF — we'll extract the details automatically.</p>
-                      </div>
+              {/* Header */}
+              <div className="flex items-center justify-between px-6 pt-6 pb-4 shrink-0">
+                <div className="flex items-center gap-2">
+                  {(showHistoryEntry || editingLogIdx !== null) && (
+                    <button onClick={() => { setShowHistoryEntry(false); setEditingLogIdx(null); }} className="text-muted hover:text-foreground">
+                      <ArrowLeft size={16} />
                     </button>
+                  )}
+                  <h3 className="text-lg font-black tracking-tight">
+                    {editingLogIdx !== null ? 'Edit Record' : showHistoryEntry ? 'Add Record' : 'Service History'}
+                  </h3>
+                </div>
+                <div className="flex items-center gap-2">
+                  {!showHistoryEntry && editingLogIdx === null && (
                     <button
                       onClick={() => { setEntryDate(''); setEntryService(''); setEntryProvider(''); setEntryMileage(''); setEntryPrice(''); setEntryNotes(''); setShowHistoryEntry(true); }}
-                      className="flex items-center gap-4 p-4 rounded-2xl border border-border hover:border-torqued-red/40 hover:bg-background transition-all text-left"
+                      className="h-7 px-3 text-[10px] font-black rounded-lg bg-torqued-red/10 text-torqued-red hover:bg-torqued-red/20 transition-all flex items-center gap-1"
                     >
-                      <div className="w-10 h-10 rounded-xl bg-border flex items-center justify-center shrink-0">
-                        <Edit2 size={18} className="text-foreground" />
+                      <Plus size={11} /> Add
+                    </button>
+                  )}
+                  <button onClick={() => { setShowHistorySheet(false); setShowHistoryEntry(false); setEditingLogIdx(null); }} className="text-muted hover:text-foreground text-2xl leading-none">×</button>
+                </div>
+              </div>
+
+              {/* Scrollable body */}
+              <div className="overflow-y-auto flex-1 px-6 pb-6 space-y-3">
+
+                {/* List view */}
+                {!showHistoryEntry && editingLogIdx === null && (
+                  <>
+                    <button
+                      onClick={() => { setShowHistorySheet(false); document.getElementById('history-upload-input')?.click(); }}
+                      className="w-full flex items-center gap-3 p-3 rounded-2xl border border-dashed border-border hover:border-torqued-red/40 hover:bg-torqued-red/5 transition-all text-left"
+                    >
+                      <div className="w-8 h-8 rounded-xl bg-torqued-red/10 flex items-center justify-center shrink-0">
+                        <Upload size={15} className="text-torqued-red" />
                       </div>
                       <div>
-                        <p className="text-sm font-bold">Enter Manually</p>
-                        <p className="text-xs text-muted">Type in the date, work done, provider, mileage and cost.</p>
+                        <p className="text-xs font-bold">Scan Receipt</p>
+                        <p className="text-[10px] text-muted">Upload a photo or PDF — we'll extract the details automatically.</p>
                       </div>
                     </button>
-                  </div>
-                </>
-              ) : (
-                <>
-                  <div className="flex items-center justify-between">
-                    <div className="flex items-center gap-2">
-                      <button onClick={() => setShowHistoryEntry(false)} className="text-muted hover:text-foreground">
-                        <ArrowLeft size={16} />
-                      </button>
-                      <h3 className="text-lg font-black tracking-tight">Service Record</h3>
-                    </div>
-                    <button onClick={() => { setShowHistorySheet(false); setShowHistoryEntry(false); }} className="text-muted hover:text-foreground text-2xl leading-none">×</button>
-                  </div>
+                    {manualHistory.length === 0 ? (
+                      <p className="text-xs text-muted text-center py-4">No records yet. Add one above.</p>
+                    ) : (
+                      <div className="space-y-2">
+                        {[...manualHistory].sort((a, b) => parseServiceDate(b.date) - parseServiceDate(a.date)).map((item, idx) => {
+                          const originalIdx = manualHistory.indexOf(item);
+                          const isTorqued = item.source_type === 'torqued_job';
+                          return (
+                            <div key={idx} className="p-3 bg-background rounded-xl border border-border">
+                              <div className="flex items-start justify-between gap-2">
+                                <div className="min-w-0 flex-1">
+                                  <p className="text-xs font-bold truncate">{item.service}</p>
+                                  <p className="text-[10px] text-muted">{item.date}{item.provider ? ` · ${item.provider}` : ''}{item.mileage ? ` · ${Number(item.mileage).toLocaleString()} km` : ''}</p>
+                                  {item.price && <p className="text-[10px] font-bold text-torqued-red mt-0.5">{String(item.price).startsWith('$') ? item.price : `$${item.price}`}</p>}
+                                </div>
+                                {!isTorqued && (
+                                  <div className="flex items-center gap-1 shrink-0">
+                                    <button
+                                      onClick={() => { setEditingLogIdx(idx); setEditLogDate(item.date||''); setEditLogService(item.service||''); setEditLogProvider(item.provider||''); setEditLogMileage(item.mileage||''); setEditLogPrice(item.price||''); setEditLogNotes(item.notes||''); }}
+                                      className="p-1.5 hover:bg-card rounded-lg text-muted hover:text-foreground transition-colors"
+                                    ><Edit2 size={12} /></button>
+                                    <button
+                                      onClick={() => { setManualHistory(prev => prev.filter((_, i) => i !== originalIdx)); setHistoryVersion(v => v + 1); }}
+                                      className="p-1.5 hover:bg-torqued-red/10 rounded-lg text-muted hover:text-torqued-red transition-colors"
+                                    ><Plus size={12} className="rotate-45" /></button>
+                                  </div>
+                                )}
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    )}
+                  </>
+                )}
+
+                {/* Add form */}
+                {showHistoryEntry && editingLogIdx === null && (
                   <div className="space-y-3">
                     <div className="grid grid-cols-2 gap-3">
                       <div className="space-y-1">
@@ -6451,19 +6487,75 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                       <input type="text" value={entryNotes} onChange={e => setEntryNotes(e.target.value)} placeholder="e.g. Full synthetic oil used"
                         className="w-full bg-background border border-border rounded-xl px-3 py-2 text-sm text-foreground outline-none focus:border-torqued-red transition-all" />
                     </div>
+                    <div className="flex gap-2 pt-1">
+                      <Button variant="ghost" size="sm" onClick={() => setShowHistoryEntry(false)}>Back</Button>
+                      <Button size="sm" className="flex-1 bg-torqued-red text-white" disabled={!entryDate || !entryService} onClick={() => {
+                        const newItem = { date: entryDate, service: entryService, provider: entryProvider || 'Unknown', mileage: entryMileage, price: entryPrice, notes: entryNotes };
+                        setManualHistory(prev => [...prev, newItem].sort((a, b) => parseServiceDate(b.date) - parseServiceDate(a.date)));
+                        setHistoryVersion(v => v + 1);
+                        setShowHistoryEntry(false);
+                        setEntryDate(''); setEntryService(''); setEntryProvider(''); setEntryMileage(''); setEntryPrice(''); setEntryNotes('');
+                      }}>Save Record</Button>
+                    </div>
                   </div>
-                  <div className="flex gap-2 pt-1">
-                    <Button variant="ghost" size="sm" onClick={() => setShowHistoryEntry(false)}>Back</Button>
-                    <Button size="sm" className="flex-1 bg-torqued-red text-white" disabled={!entryDate || !entryService} onClick={() => {
-                      const newItem = { date: entryDate, service: entryService, provider: entryProvider || 'Unknown', mileage: entryMileage, price: entryPrice, notes: entryNotes };
-                      setManualHistory(prev => [...prev, newItem].sort((a, b) => (new Date(b.date).getTime() || 0) - (new Date(a.date).getTime() || 0)));
-                      setShowHistorySheet(false);
-                      setShowHistoryEntry(false);
-                      setEntryDate(''); setEntryService(''); setEntryProvider(''); setEntryMileage(''); setEntryPrice(''); setEntryNotes('');
-                    }}>Save Record</Button>
-                  </div>
-                </>
-              )}
+                )}
+
+                {/* Edit form */}
+                {editingLogIdx !== null && (() => {
+                  const sorted = [...manualHistory].sort((a, b) => parseServiceDate(b.date) - parseServiceDate(a.date));
+                  const item = sorted[editingLogIdx];
+                  const originalIdx = manualHistory.indexOf(item);
+                  return (
+                    <div className="space-y-3">
+                      <div className="grid grid-cols-2 gap-3">
+                        <div className="space-y-1">
+                          <label className="text-[10px] font-black uppercase tracking-widest text-muted">Date</label>
+                          <input type="date" value={editLogDate} onChange={e => setEditLogDate(e.target.value)}
+                            className="w-full bg-background border border-border rounded-xl px-3 py-2 text-sm text-foreground outline-none focus:border-torqued-red transition-all" />
+                        </div>
+                        <div className="space-y-1">
+                          <label className="text-[10px] font-black uppercase tracking-widest text-muted">Mileage (km)</label>
+                          <input type="text" value={editLogMileage} onChange={e => setEditLogMileage(e.target.value)}
+                            className="w-full bg-background border border-border rounded-xl px-3 py-2 text-sm text-foreground outline-none focus:border-torqued-red transition-all" />
+                        </div>
+                      </div>
+                      <div className="space-y-1">
+                        <label className="text-[10px] font-black uppercase tracking-widest text-muted">Service Performed</label>
+                        <input type="text" value={editLogService} onChange={e => setEditLogService(e.target.value)}
+                          className="w-full bg-background border border-border rounded-xl px-3 py-2 text-sm text-foreground outline-none focus:border-torqued-red transition-all" />
+                      </div>
+                      <div className="grid grid-cols-2 gap-3">
+                        <div className="space-y-1">
+                          <label className="text-[10px] font-black uppercase tracking-widest text-muted">Provider</label>
+                          <input type="text" value={editLogProvider} onChange={e => setEditLogProvider(e.target.value)}
+                            className="w-full bg-background border border-border rounded-xl px-3 py-2 text-sm text-foreground outline-none focus:border-torqued-red transition-all" />
+                        </div>
+                        <div className="space-y-1">
+                          <label className="text-[10px] font-black uppercase tracking-widest text-muted">Price</label>
+                          <input type="text" value={editLogPrice} onChange={e => setEditLogPrice(e.target.value)}
+                            className="w-full bg-background border border-border rounded-xl px-3 py-2 text-sm text-foreground outline-none focus:border-torqued-red transition-all" />
+                        </div>
+                      </div>
+                      <div className="space-y-1">
+                        <label className="text-[10px] font-black uppercase tracking-widest text-muted">Notes</label>
+                        <input type="text" value={editLogNotes} onChange={e => setEditLogNotes(e.target.value)}
+                          className="w-full bg-background border border-border rounded-xl px-3 py-2 text-sm text-foreground outline-none focus:border-torqued-red transition-all" />
+                      </div>
+                      <div className="flex gap-2 pt-1">
+                        <Button variant="ghost" size="sm" onClick={() => setEditingLogIdx(null)}>Cancel</Button>
+                        <Button size="sm" className="flex-1 bg-torqued-red text-white" onClick={async () => {
+                          const updated = { ...item, date: editLogDate, service: editLogService, provider: editLogProvider, mileage: editLogMileage, price: editLogPrice, notes: editLogNotes };
+                          setManualHistory(prev => prev.map((h, i) => i === originalIdx ? updated : h));
+                          setHistoryVersion(v => v + 1);
+                          setEditingLogIdx(null);
+                          if (item.id) await fetch('/api/customer/update-history', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id: item.id, fields: { date: editLogDate, service: editLogService, provider: editLogProvider, mileage: editLogMileage, price: editLogPrice } }) }).catch(() => {});
+                        }}>Save Changes</Button>
+                      </div>
+                    </div>
+                  );
+                })()}
+
+              </div>
             </motion.div>
           </div>
         )}
