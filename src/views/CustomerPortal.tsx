@@ -1462,6 +1462,18 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
     }
   }, [userProfile]);
 
+  // For OTP-verified customers (no Supabase auth session), load profile name/location from server
+  useEffect(() => {
+    if (userProfile || !customerOwnerId) return;
+    fetch(`/api/customer/profile?ownerId=${encodeURIComponent(customerOwnerId)}`)
+      .then(r => r.json())
+      .then(d => {
+        if (d.name) setUserName(d.name);
+        if (d.homeLocation) setLocation(d.homeLocation);
+      })
+      .catch(() => {});
+  }, [customerOwnerId, userProfile]); // eslint-disable-line react-hooks/exhaustive-deps
+
   // Load persisted bookings from Supabase when user is available
   useEffect(() => {
     if (!user) return;
@@ -2939,113 +2951,10 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                       <div className="flex items-center justify-between gap-2">
                         <p className="text-xs font-black uppercase tracking-widest text-muted">AI Recommendations</p>
                         <button
-                          onClick={() => setShowHistorySheet(prev => !prev)}
+                          onClick={() => setShowHistorySheet(true)}
                           className="text-xs text-torqued-red font-bold hover:underline"
-                        >{showHistorySheet ? 'Hide History ↑' : 'Review Service History →'}</button>
+                        >Review / Edit →</button>
                       </div>
-
-                      {/* Inline service history with add / edit / delete */}
-                      {showHistorySheet && (
-                        <motion.div
-                          initial={{ opacity: 0, y: -6 }}
-                          animate={{ opacity: 1, y: 0 }}
-                          className="space-y-3 p-4 bg-card rounded-2xl border border-border"
-                        >
-                          <div className="flex items-center justify-between gap-2">
-                            <p className="text-xs font-black uppercase tracking-widest text-muted">Service History</p>
-                            <div className="flex items-center gap-2">
-                              <label className={cn(
-                                "h-7 px-2.5 inline-flex items-center text-[10px] font-bold rounded-lg cursor-pointer transition-all",
-                                isParsingReceipt ? "bg-card text-muted cursor-wait" : "bg-torqued-red/10 text-torqued-red hover:bg-torqued-red/20"
-                              )}>
-                                {isParsingReceipt ? <><div className="w-3 h-3 border-2 border-torqued-red/30 border-t-torqued-red rounded-full animate-spin mr-1.5" />Scanning…</> : <><Mail size={12} className="mr-1" />Scan Receipt</>}
-                                <input type="file" accept="image/*,application/pdf" className="hidden" disabled={isParsingReceipt} onChange={(e) => { handleReceiptUpload(e.target.files?.[0] || null); e.target.value = ''; }} />
-                              </label>
-                              <button
-                                onClick={() => setShowHistoryEntry(v => !v)}
-                                className="h-7 px-2.5 inline-flex items-center text-[10px] font-bold rounded-lg bg-card border border-border hover:border-torqued-red/40 transition-all"
-                              ><Plus size={11} className="mr-1" /> Add</button>
-                            </div>
-                          </div>
-
-                          {showHistoryEntry && (
-                            <div className="p-3 bg-background rounded-xl border border-border space-y-2">
-                              <div className="grid grid-cols-2 gap-2">
-                                <Input label="Date" placeholder="E.g. Oct 2025" className="bg-card text-xs" value={entryDate} onChange={e => setEntryDate(e.target.value)} />
-                                <Input label="Mileage (km)" placeholder="E.g. 103,000" className="bg-card text-xs" value={entryMileage} onChange={e => setEntryMileage(e.target.value)} />
-                              </div>
-                              <Input label="Service Performed" placeholder="Oil change..." className="bg-card text-xs" value={entryService} onChange={e => setEntryService(e.target.value)} />
-                              <div className="grid grid-cols-2 gap-2">
-                                <Input label="Provider" placeholder="Workshop name" className="bg-card text-xs" value={entryProvider} onChange={e => setEntryProvider(e.target.value)} />
-                                <Input label="Price (optional)" placeholder="E.g. $150" className="bg-card text-xs" value={entryPrice} onChange={e => setEntryPrice(e.target.value)} />
-                              </div>
-                              <div className="flex gap-2 pt-1">
-                                <button onClick={() => {
-                                  if (!entryDate || !entryService) return;
-                                  const newItem = { date: entryDate, service: entryService, provider: entryProvider || 'Unknown', mileage: entryMileage, price: entryPrice, notes: entryNotes };
-                                  setManualHistory(prev => [...prev, newItem].sort((a, b) => parseServiceDate(b.date) - parseServiceDate(a.date)));
-                                  setHistoryVersion(v => v + 1);
-                                  setShowHistoryEntry(false); setEntryDate(''); setEntryService(''); setEntryProvider(''); setEntryMileage(''); setEntryPrice(''); setEntryNotes('');
-                                }} className="flex-1 py-1.5 bg-torqued-red text-white text-xs font-bold rounded-lg">Save Record</button>
-                                <button onClick={() => setShowHistoryEntry(false)} className="px-3 py-1.5 border border-border text-xs font-bold rounded-lg">Cancel</button>
-                              </div>
-                            </div>
-                          )}
-
-                          {manualHistory.length === 0 ? (
-                            <p className="text-xs text-muted text-center py-2">No records yet. Add one above.</p>
-                          ) : (
-                            <div className="space-y-2 max-h-64 overflow-y-auto">
-                              {[...manualHistory].sort((a, b) => parseServiceDate(b.date) - parseServiceDate(a.date)).map((item, idx) => {
-                                const originalIdx = manualHistory.indexOf(item);
-                                const isTorqued = item.source_type === 'torqued_job';
-                                const isEditingThis = editingLogIdx === idx;
-                                return (
-                                  <div key={idx} className="p-3 bg-background rounded-xl border border-border space-y-2">
-                                    {isEditingThis ? (
-                                      <div className="space-y-2">
-                                        <div className="grid grid-cols-2 gap-2">
-                                          <Input label="Date" className="bg-card text-xs" value={editLogDate} onChange={e => setEditLogDate(e.target.value)} />
-                                          <Input label="Mileage" className="bg-card text-xs" value={editLogMileage} onChange={e => setEditLogMileage(e.target.value)} />
-                                        </div>
-                                        <Input label="Service" className="bg-card text-xs" value={editLogService} onChange={e => setEditLogService(e.target.value)} />
-                                        <div className="grid grid-cols-2 gap-2">
-                                          <Input label="Provider" className="bg-card text-xs" value={editLogProvider} onChange={e => setEditLogProvider(e.target.value)} />
-                                          <Input label="Price" className="bg-card text-xs" value={editLogPrice} onChange={e => setEditLogPrice(e.target.value)} />
-                                        </div>
-                                        <div className="flex gap-2">
-                                          <button onClick={async () => {
-                                            const updated = { ...item, date: editLogDate, service: editLogService, provider: editLogProvider, mileage: editLogMileage, price: editLogPrice, notes: editLogNotes };
-                                            setManualHistory(prev => prev.map((h, i) => i === originalIdx ? updated : h));
-                                            setHistoryVersion(v => v + 1);
-                                            setEditingLogIdx(null);
-                                            if (item.id) await fetch('/api/customer/update-history', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id: item.id, fields: { date: editLogDate, service: editLogService, provider: editLogProvider, mileage: editLogMileage, price: editLogPrice } }) }).catch(() => {});
-                                          }} className="flex-1 py-1.5 bg-torqued-red text-white text-xs font-bold rounded-lg">Save</button>
-                                          <button onClick={() => setEditingLogIdx(null)} className="px-3 py-1.5 border border-border text-xs rounded-lg">Cancel</button>
-                                        </div>
-                                      </div>
-                                    ) : (
-                                      <div className="flex items-start justify-between gap-2">
-                                        <div className="min-w-0">
-                                          <p className="text-xs font-bold truncate">{item.service}</p>
-                                          <p className="text-[10px] text-muted">{item.date}{item.provider ? ` · ${item.provider}` : ''}{item.mileage ? ` · ${Number(item.mileage).toLocaleString()} km` : ''}</p>
-                                          {item.price && <p className="text-[10px] font-bold text-torqued-red">{String(item.price).startsWith('$') ? item.price : `$${item.price}`}</p>}
-                                        </div>
-                                        {!isTorqued && (
-                                          <div className="flex items-center gap-1 shrink-0">
-                                            <button onClick={() => { setEditingLogIdx(idx); setEditLogDate(item.date||''); setEditLogService(item.service||''); setEditLogProvider(item.provider||''); setEditLogMileage(item.mileage||''); setEditLogPrice(item.price||''); setEditLogNotes(item.notes||''); }} className="p-1 hover:bg-card rounded text-muted hover:text-foreground transition-colors"><Edit2 size={11} /></button>
-                                            <button onClick={() => { setManualHistory(prev => prev.filter((_, i) => i !== originalIdx)); setHistoryVersion(v => v + 1); }} className="p-1 hover:bg-torqued-red/10 rounded text-muted hover:text-torqued-red transition-colors"><Plus size={11} className="rotate-45" /></button>
-                                          </div>
-                                        )}
-                                      </div>
-                                    )}
-                                  </div>
-                                );
-                              })}
-                            </div>
-                          )}
-                        </motion.div>
-                      )}
 
                       {/* AI insight cards */}
                       {healthLoading ? (
@@ -5205,7 +5114,7 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                     <button
                       className="flex items-center gap-1 px-3 py-1 rounded-lg border border-torqued-red/30 text-torqued-red text-[11px] font-bold hover:bg-torqued-red/5 transition-colors"
                       onClick={() => setShowHistorySheet(true)}>
-                      <Plus size={12} /> Upload / Add Service History
+                      Review / Edit
                     </button>
                   </div>
                 </div>
@@ -5285,8 +5194,8 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                   </div>
                 )}
 
-                {/* History log (collapsed by default if AI insights loaded) */}
-                {manualHistory.length > 0 && (
+                {/* History log — managed via the Service History sheet (Review / Edit button) */}
+                {false && manualHistory.length > 0 && (
                   <details className="group">
                     <summary className="cursor-pointer text-xs font-bold text-muted hover:text-foreground py-1 list-none flex items-center gap-1">
                       <span className="group-open:hidden">▸</span>
@@ -6402,7 +6311,7 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                       onClick={() => { setEntryDate(''); setEntryService(''); setEntryProvider(''); setEntryMileage(''); setEntryPrice(''); setEntryNotes(''); setShowHistoryEntry(true); }}
                       className="h-7 px-3 text-[10px] font-black rounded-lg bg-torqued-red/10 text-torqued-red hover:bg-torqued-red/20 transition-all flex items-center gap-1"
                     >
-                      <Plus size={11} /> Add
+                      <Plus size={11} /> Enter Manually
                     </button>
                   )}
                   <button onClick={() => { setShowHistorySheet(false); setShowHistoryEntry(false); setEditingLogIdx(null); }} className="text-muted hover:text-foreground text-2xl leading-none">×</button>

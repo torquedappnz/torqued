@@ -733,10 +733,14 @@ app.post('/api/customer/save-profile', async (req, res) => {
     if (homeLocation !== undefined) fields.home_location = homeLocation;
     if (email_update && email_update.trim() && email_update !== email) fields.email = email_update.trim();
     if (Object.keys(fields).length === 0) return res.json({ ok: true });
-    let query = supabase.from('profiles').update(fields);
-    if (ownerId) query = (query as any).eq('id', ownerId);
-    else query = (query as any).ilike('email', email.trim());
-    const { error } = await query;
+    let error: any = null;
+    if (ownerId) {
+      // Prefer upsert so the row is created if it doesn't exist yet
+      const upsertRow = { id: ownerId, ...(email ? { email } : {}), ...fields };
+      ({ error } = await supabase.from('profiles').upsert(upsertRow, { onConflict: 'id', ignoreDuplicates: false }));
+    } else {
+      ({ error } = await (supabase.from('profiles').update(fields) as any).ilike('email', email.trim()));
+    }
     if (error) { console.error('[save-profile]', error.message); return res.json({ ok: false, error: error.message }); }
     // Also update Supabase auth email if changed
     if (fields.email && ownerId) {
@@ -5215,8 +5219,8 @@ app.get('/api/customer/profile', async (req, res) => {
       owner = v?.owner_id ?? null;
     }
     if (!owner) return res.json({});
-    const { data: p } = await supabase.from('profiles').select('id, name, email, phone').eq('id', owner).single();
-    res.json({ ownerId: owner, name: p?.name ?? null, email: p?.email ?? null, phone: p?.phone ?? null });
+    const { data: p } = await supabase.from('profiles').select('id, name, email, phone, home_location').eq('id', owner).single();
+    res.json({ ownerId: owner, name: p?.name ?? null, email: p?.email ?? null, phone: p?.phone ?? null, homeLocation: p?.home_location ?? null });
   } catch (err) {
     console.error('[customer/profile]', err);
     res.json({});
