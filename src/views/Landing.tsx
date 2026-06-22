@@ -192,6 +192,11 @@ export const Landing: React.FC<LandingProps> = ({ onGetQuote, onMechanicPortal }
   const [mobileMenuOpen, setMobileMenuOpen] = React.useState(false);
   const [openPost, setOpenPost] = React.useState<BlogPost | null>(null);
   const { theme, setTheme } = useTheme();
+  const [repairStats, setRepairStats] = React.useState<{ avgLow: number; avgHigh: number } | null>(null);
+
+  React.useEffect(() => {
+    fetch('/api/platform/stats').then(r => r.json()).then(d => setRepairStats(d)).catch(() => {});
+  }, []);
 
   return (
     <div className="min-h-screen flex flex-col bg-background text-foreground transition-colors duration-300">
@@ -239,19 +244,28 @@ export const Landing: React.FC<LandingProps> = ({ onGetQuote, onMechanicPortal }
 
       {/* Hero Section */}
       <section className="relative flex-1 flex flex-col items-center justify-center px-4 py-20 text-center overflow-hidden">
-        <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[120%] h-[120%] bg-[radial-gradient(circle_at_center,rgba(255,24,0,0.08)_0%,transparent_70%)] -z-10" />
+        {/* Abstract red background */}
+        <div className="absolute inset-0 -z-10 overflow-hidden">
+          <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[140%] h-[140%] bg-[radial-gradient(ellipse_at_center,rgba(255,24,0,0.07)_0%,transparent_65%)]" />
+          <div className="absolute top-0 right-0 w-[60%] h-[60%] bg-[radial-gradient(ellipse_at_top_right,rgba(255,24,0,0.05)_0%,transparent_60%)]" />
+          <div className="absolute bottom-0 left-0 w-[50%] h-[50%] bg-[radial-gradient(ellipse_at_bottom_left,rgba(255,24,0,0.04)_0%,transparent_60%)]" />
+          <svg className="absolute inset-0 w-full h-full opacity-[0.03]" xmlns="http://www.w3.org/2000/svg">
+            <filter id="noise"><feTurbulence type="fractalNoise" baseFrequency="0.65" numOctaves="3" stitchTiles="stitch"/><feColorMatrix type="saturate" values="0"/></filter>
+            <rect width="100%" height="100%" filter="url(#noise)" fill="rgb(255,24,0)" />
+          </svg>
+        </div>
 
         <motion.div
           initial={{ opacity: 0, y: 20 }}
           animate={{ opacity: 1, y: 0 }}
           transition={{ duration: 0.6 }}
-          className="max-w-4xl space-y-6"
+          className="max-w-4xl space-y-6 flex flex-col items-center"
         >
-          <h1 className="text-4xl sm:text-5xl md:text-7xl lg:text-8xl leading-tight md:leading-none font-black italic tracking-tighter text-foreground">
+          <h1 style={{ fontFamily: "'Raleway', sans-serif" }} className="text-4xl sm:text-5xl md:text-7xl lg:text-8xl leading-tight md:leading-none font-black italic tracking-tighter text-foreground text-center">
             Fix Your Car. <br />
             <span className="text-torqued-red">Skip the Runaround.</span>
           </h1>
-          <p className="text-base sm:text-lg md:text-2xl text-muted max-w-2xl mx-auto font-medium px-4 md:px-0">
+          <p className="text-base sm:text-lg md:text-2xl text-muted max-w-2xl mx-auto font-medium px-4 md:px-0 text-center">
             Instant quotes. Verified mechanics. Flexible payments. <br className="hidden md:block" />
             New Zealand's smarter way to get your car sorted.
           </p>
@@ -266,9 +280,24 @@ export const Landing: React.FC<LandingProps> = ({ onGetQuote, onMechanicPortal }
           initial={{ opacity: 0 }}
           animate={{ opacity: 1 }}
           transition={{ delay: 0.4, duration: 0.8 }}
-          className="mt-16 flex justify-center border-y border-border py-6 w-full max-w-5xl"
+          className="mt-16 flex flex-col sm:flex-row items-center justify-center gap-8 border-y border-border py-6 w-full max-w-5xl px-4"
         >
-          <div className="font-bold text-sm italic text-torqued-red">Avg. quote in under 60 seconds</div>
+          <div className="text-center space-y-0.5">
+            <p className="font-bold text-sm italic text-torqued-red">Avg. quote in under 60 seconds</p>
+          </div>
+          {repairStats && (
+            <>
+              <div className="hidden sm:block w-px h-6 bg-border" />
+              <div className="text-center space-y-0.5">
+                <p className="font-black text-lg text-foreground">${repairStats.avgLow.toLocaleString()} – ${repairStats.avgHigh.toLocaleString()}</p>
+                <p className="text-xs text-muted uppercase tracking-widest font-bold">Typical NZ repair range</p>
+              </div>
+            </>
+          )}
+          <div className="hidden sm:block w-px h-6 bg-border" />
+          <div className="text-center space-y-0.5">
+            <p className="font-bold text-sm italic text-foreground">Verified workshops only</p>
+          </div>
         </motion.div>
       </section>
 

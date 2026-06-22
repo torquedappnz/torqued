@@ -1,10 +1,11 @@
-@import url('https://fonts.googleapis.com/css2?family=Syne:wght@400;500;600;700;800&family=Barlow+Condensed:ital,wght@0,400;0,600;0,700;1,700&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Syne:wght@400;500;600;700;800&family=Barlow+Condensed:ital,wght@0,400;0,600;0,700;1,700&family=Raleway:ital,wght@0,400;0,500;0,600;0,700;0,800;0,900;1,700;1,800;1,900&display=swap');
 @import "tailwindcss";
 
 @theme {
   --font-sans: "Syne", sans-serif;
   --font-display: "Syne", sans-serif;
   --font-accent: "Barlow Condensed", sans-serif;
+  --font-raleway: "Raleway", sans-serif;
   --color-torqued-red: #FF1800;
   --color-torqued-dark: #150402;
   
@@ -23,18 +24,44 @@
   --muted-color: rgba(21, 4, 2, 0.6);
 }
 
+/* ── Dark mode: premium warm-dark for standard LCD panels ── */
 .dark {
-  --bg-color: #150402;
+  --bg-color: #130503;            /* deep red-tinted dark — prevents backlight bleed looking grey */
   --fg-color: #ffffff;
   --card-bg: rgba(255, 255, 255, 0.05);
-  --border-color: rgba(255, 255, 255, 0.1);
-  --muted-color: rgba(255, 255, 255, 0.6);
+  --border-color: rgba(255, 255, 255, 0.10);
+  --muted-color: rgba(255, 255, 255, 0.55);
+}
+
+/*
+ * Display-aware override: Mini-LED (MacBook Pro Liquid Retina XDR) and OLED panels.
+ * (video-dynamic-range: high) = HDR display capability (Mini-LED / OLED)
+ * (color-gamut: p3)           = wide-gamut panel (rules out basic SDR LCDs)
+ * Combined: confident signal for per-pixel dimming hardware.
+ * Pure black (#000000) activates per-pixel off — infinite contrast, zero bleed.
+ */
+@media (video-dynamic-range: high) and (color-gamut: p3) {
+  .dark {
+    --bg-color: #000000;
+    --card-bg: rgba(255, 255, 255, 0.04);
+    --border-color: rgba(255, 255, 255, 0.08);
+  }
+}
+
+/* JS-observer fallback: data-display-type applied to <html> by display-observer.ts */
+html[data-display-type="oled"].dark,
+html[data-display-type="oled"] .dark {
+  --bg-color: #000000;
+  --card-bg: rgba(255, 255, 255, 0.04);
+  --border-color: rgba(255, 255, 255, 0.08);
 }
 
 @layer base {
   html, body {
     font-family: "Syne", sans-serif;
-    @apply text-foreground bg-background selection:bg-torqued-red selection:text-white antialiased transition-colors duration-300;
+    /* 300ms ease covers the LCD→OLED shift when dragging between monitors */
+    transition: background-color 0.3s ease, color 0.3s ease;
+    @apply text-foreground bg-background selection:bg-torqued-red selection:text-white antialiased;
   }
   
   h1, h2, h3, h4, h5, h6 {

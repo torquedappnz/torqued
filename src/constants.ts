@@ -15,54 +15,14 @@ export const SERVICES: Service[] = [
   { id: 'spark_plugs', name: 'Spark Plugs', icon: '🔌', basePrice: 0, category: 'maintenance' },
   { id: 'cabin_filter', name: 'Cabin Air Filter', icon: '🌬️', basePrice: 0, category: 'maintenance' },
   { id: 'brake_fluid', name: 'Brake Fluid Flush', icon: '🧪', basePrice: 0, category: 'maintenance' },
+  { id: 'coolant_flush', name: 'Coolant Flush', icon: '🧊', basePrice: 0, category: 'maintenance' },
+  { id: 'ignition_coils', name: 'Ignition Coils', icon: '⚡', basePrice: 0, category: 'repair' },
+  { id: 'water_pump', name: 'Water Pump Replacement', icon: '💧', basePrice: 0, category: 'repair' },
+  { id: 'thermostat_housing', name: 'Thermostat Housing Replacement', icon: '🌡️', basePrice: 0, category: 'repair' },
+  { id: 'ppi', name: 'Pre-Purchase Inspection', icon: '🔎', basePrice: 199, category: 'inspection' },
 ];
 
-export const MOCK_MECHANICS: Mechanic[] = [
-  {
-    id: 'm1',
-    name: 'Precision Mechanical Dunedin',
-    logo: 'https://picsum.photos/seed/precision/100/100',
-    suburb: 'South Dunedin',
-    address: '123 Anderson Bay Road, Dunedin',
-    mapsUrl: 'https://www.google.com/maps/search/Precision+Mechanical+Dunedin',
-    distance: 1.2,
-    rating: 4.9,
-    reviews: 156,
-    specialisations: ['European Vehicles', 'VAG Specialists', 'Transmission'],
-    nextAvailable: 'Tomorrow, 8am',
-    isFeatured: true,
-    estimatedPrice: 0,
-  },
-  {
-    id: 'm2',
-    name: 'R&D European',
-    logo: 'https://picsum.photos/seed/rd/100/100',
-    suburb: 'South Dunedin',
-    address: '45 Hillside Road, Dunedin',
-    mapsUrl: 'https://www.google.com/maps/search/R%26D+European+Dunedin',
-    distance: 2.3,
-    rating: 4.8,
-    reviews: 124,
-    specialisations: ['European Vehicles', 'Diagnostics', 'Transmission'],
-    nextAvailable: 'Tomorrow, 9am',
-    isFeatured: false,
-    estimatedPrice: 0,
-  },
-  {
-    id: 'm3',
-    name: 'City Auto Care',
-    logo: 'https://picsum.photos/seed/city/100/100',
-    suburb: 'Central City',
-    address: '88 Cumberland Street, Dunedin',
-    mapsUrl: 'https://www.google.com/maps/search/City+Auto+Care+Dunedin',
-    distance: 1.1,
-    rating: 4.5,
-    reviews: 89,
-    specialisations: ['General Service', 'WOF', 'Brakes'],
-    nextAvailable: 'Today, 2pm',
-    estimatedPrice: 0,
-  },
-];
+export const MOCK_MECHANICS: Mechanic[] = [];
 
 export const MOCK_VEHICLES: Record<string, Vehicle> = {
   'RAH190': {

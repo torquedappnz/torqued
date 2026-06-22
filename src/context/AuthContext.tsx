@@ -126,6 +126,47 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     // loading screen if onAuthStateChange is delayed or loadProfile throws.
     const init = async () => {
       try {
+        // detectSessionInUrl is false to prevent freezes, so we process
+        // magic-link / recovery tokens manually on first load. Supabase can deliver
+        // these two ways depending on project flow settings:
+        //   (a) implicit  → tokens in the URL hash  (#access_token=…&type=recovery)
+        //   (b) PKCE      → a single-use code in the query  (?code=…)
+        // We handle both so reset/onboarding links are not silently dropped.
+        const hashStr = window.location.hash.substring(1);
+        const queryParams = new URLSearchParams(window.location.search);
+        // Surface an expired/used link instead of leaving the user on a blank screen.
+        const errDesc = new URLSearchParams(hashStr).get('error_description') || queryParams.get('error_description');
+        if (errDesc) {
+          console.warn('Auth link error:', errDesc);
+          try { localStorage.setItem('torqued_auth_error', errDesc); } catch {}
+          window.history.replaceState({}, '', window.location.pathname);
+        }
+        if (hashStr.includes('access_token=')) {
+          const hp = new URLSearchParams(hashStr);
+          const at = hp.get('access_token');
+          const rt = hp.get('refresh_token');
+          const linkType = hp.get('type');
+          if (at && rt) {
+            try {
+              await supabase.auth.setSession({ access_token: at, refresh_token: rt });
+              if (linkType === 'recovery' || linkType === 'magiclink' || linkType === 'invite') {
+                localStorage.setItem('torqued_needs_password', '1');
+              }
+            } catch (e) { console.warn('Hash session error:', e); }
+            window.history.replaceState({}, '', window.location.pathname + window.location.search);
+          }
+        } else if (queryParams.get('code')) {
+          // PKCE flow: exchange the one-time code for a session.
+          try {
+            await supabase.auth.exchangeCodeForSession(queryParams.get('code')!);
+            // Recovery/invite/magic links should prompt a password reset on arrival.
+            const t = queryParams.get('type');
+            if (!t || t === 'recovery' || t === 'magiclink' || t === 'invite') {
+              localStorage.setItem('torqued_needs_password', '1');
+            }
+          } catch (e) { console.warn('Code exchange error:', e); }
+          window.history.replaceState({}, '', window.location.pathname);
+        }
         const { data: { session } } = await supabase.auth.getSession();
         if (!mounted) return;
         const u = session?.user ?? null;
@@ -208,7 +249,18 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
   // ── Shared ─────────────────────────────────────────────────
   const logout = async () => {
-    await supabase.auth.signOut();
+    // Clear local UI state immediately so the button always responds, even if the
+    // network sign-out call hangs or errors (e.g. an already-expired token).
+    setUser(null);
+    setUserProfile(null);
+    setUserRole(null);
+    // scope:'local' clears the persisted session without a server round-trip that
+    // can fail and leave the user "stuck" signed in.
+    try { await supabase.auth.signOut({ scope: 'local' }); } catch (e) { console.warn('signOut error (ignored):', e); }
+    // Belt-and-braces: remove any lingering supabase session keys.
+    try {
+      Object.keys(localStorage).filter(k => k.startsWith('sb-')).forEach(k => localStorage.removeItem(k));
+    } catch {}
   };
 
   const registerVehicle = async (vehicle: Vehicle) => {

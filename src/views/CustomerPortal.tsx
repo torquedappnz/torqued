@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
-import { Search, MapPin, ChevronRight, Info, Lock, CheckCircle2, Star, Calendar, CreditCard, Car, History, Wrench, AlertTriangle, Plus, Edit2, ArrowLeft, Clock, Sun, Moon, Monitor, Download, Ticket, Mail, Send, Smartphone, X, Upload, Sparkles, Camera } from 'lucide-react';
+import { Search, MapPin, ChevronRight, Info, Lock, CheckCircle2, Star, Calendar, CreditCard, Car, History, Wrench, AlertTriangle, Plus, Edit2, ArrowLeft, Clock, Sun, Moon, Monitor, Download, Ticket, Mail, Send, Smartphone, X, Upload, Sparkles, Camera, Settings, Trash2 } from 'lucide-react';
 import { jsPDF } from 'jspdf';
 import { Logo } from '../components/Logo';
 import { Button } from '../components/Button';
@@ -13,7 +13,491 @@ import { useTheme } from '../context/ThemeContext';
 
 import { useAuth } from '../context/AuthContext';
 import { supabase } from '../lib/supabase';
-import { authPasskey, registerPasskey, passkeysSupported } from '../lib/passkey';
+import { authPasskey, registerPasskey, passkeysSupported, hasPasskey } from '../lib/passkey';
+
+const BRAND_LOGOS: Record<string, string> = {
+  volkswagen: 'https://upload.wikimedia.org/wikipedia/commons/thumb/6/6d/Volkswagen_logo_2019.svg/120px-Volkswagen_logo_2019.svg.png',
+  vw: 'https://upload.wikimedia.org/wikipedia/commons/thumb/6/6d/Volkswagen_logo_2019.svg/120px-Volkswagen_logo_2019.svg.png',
+  toyota: 'https://upload.wikimedia.org/wikipedia/commons/thumb/9/9d/Toyota_carlogo.svg/120px-Toyota_carlogo.svg.png',
+  lexus: 'https://upload.wikimedia.org/wikipedia/commons/thumb/6/6f/Lexus_division_emblem.svg/120px-Lexus_division_emblem.svg.png',
+  audi: 'https://upload.wikimedia.org/wikipedia/commons/thumb/9/92/Audi-Logo_2016.svg/120px-Audi-Logo_2016.svg.png',
+  skoda: 'https://upload.wikimedia.org/wikipedia/commons/thumb/e/e8/ŠKODA_AUTO_logo.svg/120px-ŠKODA_AUTO_logo.svg.png',
+  ford: 'https://upload.wikimedia.org/wikipedia/commons/thumb/3/3e/Ford_logo_flat.svg/120px-Ford_logo_flat.svg.png',
+  nissan: 'https://upload.wikimedia.org/wikipedia/commons/thumb/2/2a/Nissan_2020_logo.svg/120px-Nissan_2020_logo.svg.png',
+  honda: 'https://upload.wikimedia.org/wikipedia/commons/thumb/3/38/Honda.svg/120px-Honda.svg.png',
+  mazda: 'https://upload.wikimedia.org/wikipedia/commons/thumb/1/10/Mazda_logo.svg/120px-Mazda_logo.svg.png',
+  hyundai: 'https://upload.wikimedia.org/wikipedia/commons/thumb/4/44/Hyundai_Motor_Company_logo.svg/120px-Hyundai_Motor_Company_logo.svg.png',
+  kia: 'https://upload.wikimedia.org/wikipedia/commons/thumb/1/13/Kia-logo.svg/120px-Kia-logo.svg.png',
+  subaru: 'https://upload.wikimedia.org/wikipedia/commons/thumb/b/b5/Subaru_logo.svg/120px-Subaru_logo.svg.png',
+  mitsubishi: 'https://upload.wikimedia.org/wikipedia/commons/thumb/8/8e/Mitsubishi_logo.svg/120px-Mitsubishi_logo.svg.png',
+  suzuki: 'https://upload.wikimedia.org/wikipedia/commons/thumb/1/11/Suzuki_logo_2.svg/120px-Suzuki_logo_2.svg.png',
+  mercedes: 'https://upload.wikimedia.org/wikipedia/commons/thumb/9/90/Mercedes-Logo.svg/120px-Mercedes-Logo.svg.png',
+  'mercedes-benz': 'https://upload.wikimedia.org/wikipedia/commons/thumb/9/90/Mercedes-Logo.svg/120px-Mercedes-Logo.svg.png',
+  bmw: 'https://upload.wikimedia.org/wikipedia/commons/thumb/4/44/BMW.svg/120px-BMW.svg.png',
+  tesla: 'https://upload.wikimedia.org/wikipedia/commons/thumb/b/bb/Tesla_T_symbol.svg/120px-Tesla_T_symbol.svg.png',
+  byd: 'https://upload.wikimedia.org/wikipedia/commons/thumb/9/99/BYD_Auto_logo.svg/120px-BYD_Auto_logo.svg.png',
+  holden: 'https://upload.wikimedia.org/wikipedia/commons/thumb/4/41/Holden_logo.svg/120px-Holden_logo.svg.png',
+  isuzu: 'https://upload.wikimedia.org/wikipedia/commons/thumb/9/9d/Isuzu_logo.svg/120px-Isuzu_logo.svg.png',
+  jeep: 'https://upload.wikimedia.org/wikipedia/commons/thumb/5/5c/Jeep_logo.svg/120px-Jeep_logo.svg.png',
+  land_rover: 'https://upload.wikimedia.org/wikipedia/commons/thumb/a/a3/Land_Rover_logo_2020.svg/120px-Land_Rover_logo_2020.svg.png',
+  'land rover': 'https://upload.wikimedia.org/wikipedia/commons/thumb/a/a3/Land_Rover_logo_2020.svg/120px-Land_Rover_logo_2020.svg.png',
+  peugeot: 'https://upload.wikimedia.org/wikipedia/commons/thumb/8/8e/Peugeot_2021_logo.svg/120px-Peugeot_2021_logo.svg.png',
+  volvo: 'https://upload.wikimedia.org/wikipedia/commons/thumb/5/5a/Volvo_logo.svg/120px-Volvo_logo.svg.png',
+};
+
+function getCarBrandLogo(make: string): string | null {
+  if (!make) return null;
+  return BRAND_LOGOS[make.toLowerCase().trim()] || null;
+}
+
+// Turn a quote's line items into a short job summary, e.g. "Brake Service".
+function summariseQuote(qi: any, isDiag: boolean): string {
+  const parts: string[] = Array.isArray(qi?.parts) ? qi.parts.filter((p: any) => p?.name).map((p: any) => String(p.name)) : [];
+  const text = (parts.join(' ') + ' ' + (qi?.notes || '')).toLowerCase();
+  const categories: [RegExp, string][] = [
+    [/brake|rotor|caliper|pad|disc/, 'Brake Service'],
+    [/control arm|bush|suspension|strut|shock|ball joint|tie rod/, 'Suspension Repair'],
+    [/clutch|flywheel/, 'Clutch Repair'],
+    [/cambelt|timing belt|timing chain/, 'Cambelt Service'],
+    [/spark plug|ignition coil/, 'Spark Plugs & Ignition'],
+    [/oil|filter|service/, 'Vehicle Service'],
+    [/battery|alternator|starter/, 'Electrical Repair'],
+    [/radiator|coolant|water pump|thermostat/, 'Cooling System Repair'],
+    [/transmission|gearbox/, 'Transmission Service'],
+    [/exhaust|muffler|catalytic/, 'Exhaust Repair'],
+    [/wof|warrant/, 'WoF Repairs'],
+  ];
+  for (const [re, label] of categories) if (re.test(text)) return label;
+  if (parts.length === 1) return parts[0];
+  if (parts.length > 1) return `${parts[0]} + ${parts.length - 1} more`;
+  return isDiag ? 'Repair Quote' : 'Your Quote';
+}
+
+// Map a health-insight title to a bookable SERVICES id (best-effort).
+function insightToServiceId(title: string): string | null {
+  const t = title.toLowerCase();
+  if (t.includes('spark plug') || t.includes('ignition coil')) return 'spark_plugs';
+  if (t.includes('cambelt') || t.includes('timing belt') || t.includes('timing chain')) return 'timing';
+  if (t.includes('brake fluid')) return 'brake_fluid';
+  if (t.includes('coolant')) return 'coolant_flush';
+  if (t.includes('cabin filter') || t.includes('pollen filter')) return 'cabin_filter';
+  if (t.includes('transmission')) return 'transmission';
+  if (t.includes('battery')) return 'battery';
+  if (t.includes('water pump')) return 'water_pump';
+  if (t.includes('front brake')) return 'brakes_front_pads';
+  if (t.includes('rear brake')) return 'brakes_rear_pads';
+  if (t.includes('brake')) return 'brakes_front_pads';
+  if (t.includes('oil') || t.includes('service')) return 'oil';
+  if (t.includes('wof') || t.includes('warrant')) return 'wof';
+  return null;
+}
+
+// ── ProfileView ──────────────────────────────────────────────────────────────
+interface ProfileViewProps {
+  userName: string | null; setUserName: (n: string) => void;
+  customerEmail: string | null;
+  customerOwnerId: string | null;
+  location: string; setLocation: (l: string) => void;
+  user: any; updateProfile: (p: any) => Promise<any>;
+  rego: string; vehicle: any; garageVehicles: any[];
+  passkeyCardState: string; setPasskeyCardState: (s: any) => void;
+  mechanicAccess: any[]; accessLoading: boolean;
+  loadMechanicAccess: () => void; revokeMechanicAccess: (id: string) => void;
+  clearCustomerSession: () => void; logout: () => void;
+  setView: (v: string) => void;
+}
+
+// ── EVQuoteRequest ────────────────────────────────────────────────────────────
+const EVQuoteRequest: React.FC<{
+  vehicle: any; rego: string; realMechanics: any[];
+  customerEmail: string | null; customerOwnerId: string | null;
+  userName: string | null;
+  customerCoords: { lat: number; lng: number } | null;
+  requestLocation: () => void;
+  locationAsked: boolean;
+  onSubmitted: (job: any) => void;
+}> = ({ vehicle, rego, realMechanics, customerEmail, customerOwnerId, userName, customerCoords, requestLocation, locationAsked, onSubmitted }) => {
+  const [evStep, setEvStep] = React.useState<'details' | 'mechanic' | 'done'>('details');
+  const [concern, setConcern] = React.useState('');
+  const [mechId, setMechId] = React.useState('');
+  const [busy, setBusy] = React.useState(false);
+
+  React.useEffect(() => {
+    if (realMechanics.length === 1 && !mechId) setMechId(realMechanics[0].id);
+  }, [realMechanics]);
+
+  const submit = async () => {
+    if (!concern.trim() || !mechId) return;
+    setBusy(true);
+    const bookingId = (crypto as any).randomUUID ? crypto.randomUUID() : `ev_${Date.now()}`;
+    const mech = realMechanics.find((m: any) => m.id === mechId);
+    const payload = {
+      id: bookingId,
+      mechanicId: mechId,
+      vehicleId: (vehicle?.rego || rego || '').toUpperCase(),
+      serviceIds: ['diag_inspection'],
+      totalPrice: 0,
+      paymentMethod: 'TBD',
+      paymentStatus: 'pending',
+      status: 'pending',
+      date: null,
+      customerName: userName || '',
+      email: customerEmail || '',
+      description: `[EV Quote Request] ${concern.trim()}`,
+      customerId: customerOwnerId || undefined,
+    };
+    try {
+      const r = await fetch('/api/bookings/persist', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ bookingData: payload, userId: customerOwnerId }),
+      });
+      if (r.ok) {
+        setEvStep('done');
+        onSubmitted({
+          id: bookingId, mechanicId: mechId,
+          mechanicName: mech?.name || 'Your mechanic',
+          serviceIds: ['diag_inspection'],
+          date: null, status: 'pending',
+          paymentStatus: 'pending', paymentMethod: 'TBD',
+          totalPrice: 0,
+          description: `[EV Quote Request] ${concern.trim()}`,
+        });
+      }
+    } catch {}
+    setBusy(false);
+  };
+
+  if (evStep === 'done') return (
+    <div className="p-6 bg-emerald-500/10 border border-emerald-500/20 rounded-2xl text-center space-y-2">
+      <p className="text-lg font-black text-emerald-400">Quote request sent ✓</p>
+      <p className="text-sm text-muted">Your mechanic will review this and send you a quote. You'll receive an email when it's ready.</p>
+    </div>
+  );
+
+  if (evStep === 'mechanic') return (
+    <div className="space-y-4">
+      <div className="flex items-center gap-3">
+        <button onClick={() => setEvStep('details')} className="text-muted hover:text-foreground transition-all">
+          <ArrowLeft size={18} />
+        </button>
+        <div>
+          <p className="text-sm font-black">Choose your workshop</p>
+          <p className="text-xs text-muted">Select a Torqued mechanic to send this quote request to.</p>
+        </div>
+      </div>
+      {!customerCoords && realMechanics.length === 0 && (
+        <div className="p-4 bg-card border border-border rounded-xl flex items-center justify-between gap-3">
+          <div>
+            <p className="text-sm font-bold flex items-center gap-1.5"><MapPin size={14} className="text-torqued-red" /> Find workshops near you</p>
+            <p className="text-xs text-muted mt-0.5">{locationAsked ? 'Location unavailable — showing all workshops.' : 'Allow location to see the closest mechanics near you.'}</p>
+          </div>
+          {!locationAsked && <button onClick={requestLocation} className="shrink-0 h-8 px-3 rounded-lg bg-torqued-red text-white text-xs font-bold">Use my location</button>}
+        </div>
+      )}
+      <div className="space-y-2">
+        {!customerCoords && realMechanics.length === 0 && locationAsked && (
+          <p className="text-xs text-muted text-center py-4">Loading nearby workshops…</p>
+        )}
+        {customerCoords && realMechanics.length === 0 && (
+          <p className="text-xs text-muted text-center py-4">Loading nearby workshops…</p>
+        )}
+        {realMechanics.map((m: any) => (
+          <button
+            key={m.id}
+            onClick={() => setMechId(m.id)}
+            className={cn(
+              'w-full flex items-center gap-4 p-4 rounded-2xl border text-left transition-all',
+              mechId === m.id
+                ? 'border-torqued-red bg-torqued-red/8'
+                : 'border-border bg-card hover:border-torqued-red/40'
+            )}
+          >
+            <div className="w-10 h-10 rounded-xl bg-torqued-red/10 flex items-center justify-center shrink-0 text-torqued-red font-black text-sm">
+              {(m.name || '?').charAt(0).toUpperCase()}
+            </div>
+            <div className="flex-1 min-w-0">
+              <p className="font-bold text-sm truncate">{m.name}</p>
+              {m.address && <p className="text-xs text-muted truncate">{m.address}</p>}
+            </div>
+            {mechId === m.id && <CheckCircle2 size={18} className="text-torqued-red shrink-0" />}
+          </button>
+        ))}
+      </div>
+      <button
+        onClick={submit}
+        disabled={busy || !mechId}
+        className="w-full h-12 rounded-2xl bg-torqued-red text-white text-[10px] font-black uppercase tracking-widest disabled:opacity-50 transition-all"
+      >
+        {busy ? 'Sending…' : 'Request Quote →'}
+      </button>
+    </div>
+  );
+
+  return (
+    <div className="space-y-4">
+      <div className="space-y-1">
+        <p className="text-sm font-black">What do you need quoted?</p>
+        <p className="text-xs text-muted">Describe the work — your mechanic will send you a price. No inspection fee.</p>
+      </div>
+      <textarea
+        value={concern}
+        onChange={e => setConcern(e.target.value)}
+        placeholder="e.g. Annual service, tyre rotation, software check, brake pad inspection…"
+        rows={4}
+        className="w-full bg-background border border-border rounded-xl px-3 py-2.5 text-sm text-foreground placeholder:text-muted outline-none focus:border-torqued-red resize-none transition-all"
+        autoFocus
+      />
+      <button
+        onClick={() => setEvStep('mechanic')}
+        disabled={!concern.trim()}
+        className="w-full h-12 rounded-2xl bg-torqued-red text-white text-[10px] font-black uppercase tracking-widest disabled:opacity-50 transition-all"
+      >
+        Next — Choose Workshop →
+      </button>
+    </div>
+  );
+};
+
+const ProfileView: React.FC<ProfileViewProps> = (props) => {
+  const { userName, setUserName, customerEmail, customerOwnerId, location, setLocation, user, updateProfile,
+    rego, vehicle, garageVehicles, passkeyCardState, setPasskeyCardState,
+    mechanicAccess, accessLoading, loadMechanicAccess, revokeMechanicAccess,
+    clearCustomerSession, logout } = props;
+
+  const [editName, setEditName] = React.useState(userName || '');
+  const [editEmail, setEditEmail] = React.useState(customerEmail || '');
+  const [editLocation, setEditLocation] = React.useState(location || '');
+  const [saving, setSaving] = React.useState(false);
+  const [saved, setSaved] = React.useState(false);
+  const [passkeys, setPasskeys] = React.useState<any[]>([]);
+  const [passkeysLoading, setPasskeysLoading] = React.useState(false);
+  const [removingId, setRemovingId] = React.useState<string | null>(null);
+  const [locating, setLocating] = React.useState(false);
+
+  const useMyLocation = () => {
+    if (!navigator.geolocation) { alert('Geolocation is not supported on this device.'); return; }
+    setLocating(true);
+    navigator.geolocation.getCurrentPosition(async (pos) => {
+      try {
+        const { latitude, longitude } = pos.coords;
+        const r = await fetch(`https://api.bigdatacloud.net/data/reverse-geocode-client?latitude=${latitude}&longitude=${longitude}&localityLanguage=en`);
+        const d = await r.json();
+        const place = [d.city || d.locality, d.principalSubdivision].filter(Boolean).join(', ');
+        if (place) setEditLocation(place);
+      } catch { alert('Could not resolve your location.'); }
+      finally { setLocating(false); }
+    }, () => { setLocating(false); alert('Location permission denied.'); }, { enableHighAccuracy: true, timeout: 10000 });
+  };
+
+  React.useEffect(() => { setEditName(userName || ''); }, [userName]);
+  React.useEffect(() => { setEditEmail(customerEmail || ''); }, [customerEmail]);
+  React.useEffect(() => { setEditLocation(location || ''); }, [location]);
+
+  React.useEffect(() => {
+    if (!customerEmail) return;
+    setPasskeysLoading(true);
+    fetch(`/api/passkey/list?actorType=customer&ownerRef=${encodeURIComponent(customerEmail)}`)
+      .then(r => r.json()).then(d => setPasskeys(d.passkeys || [])).catch(() => {}).finally(() => setPasskeysLoading(false));
+  }, [customerEmail]);
+
+  const removePasskey = async (id: string) => {
+    if (!customerEmail) return;
+    setRemovingId(id);
+    await fetch('/api/passkey/delete', { method: 'DELETE', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id, actorType: 'customer', ownerRef: customerEmail }) });
+    setPasskeys(prev => prev.filter(p => p.id !== id));
+    setRemovingId(null);
+  };
+
+  const addPasskey = async () => {
+    const plate = (rego || vehicle?.rego || garageVehicles[0]?.rego || '').toUpperCase();
+    if (!plate) return;
+    setPasskeyCardState('adding');
+    try {
+      await registerPasskey('customer', customerEmail || plate);
+      setPasskeyCardState('added');
+      // Re-fetch list
+      if (customerEmail) {
+        const d = await fetch(`/api/passkey/list?actorType=customer&ownerRef=${encodeURIComponent(customerEmail)}`).then(r => r.json());
+        setPasskeys(d.passkeys || []);
+      }
+    } catch { setPasskeyCardState('error'); }
+  };
+
+  const saveProfile = async () => {
+    setSaving(true);
+    setUserName(editName);
+    setLocation(editLocation);
+    let ok = false;
+    try {
+      // Always prefer the admin-keyed server endpoint when we have an ownerId — it bypasses RLS
+      // and is reliable regardless of Supabase auth session state.
+      if (customerOwnerId || customerEmail) {
+        const r = await fetch('/api/customer/save-profile', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ email: customerEmail, ownerId: customerOwnerId, name: editName, email_update: editEmail !== customerEmail ? editEmail : undefined, homeLocation: editLocation }),
+        });
+        const d = await r.json().catch(() => ({}));
+        ok = d.ok === true;
+      } else if (user) {
+        await updateProfile({ name: editName, homeLocation: editLocation });
+        ok = true;
+      }
+    } catch { ok = false; }
+    setSaving(false);
+    if (ok) {
+      setSaved(true);
+      setTimeout(() => setSaved(false), 2000);
+    } else {
+      alert('Could not save profile — please try again.');
+    }
+  };
+
+  return (
+    <motion.div initial={{ opacity: 0, x: 20 }} animate={{ opacity: 1, x: 0 }} exit={{ opacity: 0, x: -20 }} className="space-y-8 max-w-lg">
+      <div className="space-y-1">
+        <h2 className="text-3xl font-black tracking-tight">My Profile</h2>
+        <p className="text-sm text-muted">Manage your account details and security.</p>
+      </div>
+
+      {/* Account details */}
+      <Card className="p-6 bg-card border-border space-y-5">
+        <p className="text-[10px] font-black uppercase tracking-widest text-muted">Account Details</p>
+        <div className="space-y-4">
+          <div className="space-y-1.5">
+            <label className="text-[10px] font-black uppercase tracking-widest text-muted">Display Name</label>
+            <input value={editName} onChange={e => setEditName(e.target.value)}
+              className="w-full bg-background border border-border rounded-xl px-3 py-2.5 text-sm text-foreground outline-none focus:border-torqued-red transition-all"
+              placeholder="Your name" />
+          </div>
+          <div className="space-y-1.5">
+            <label className="text-[10px] font-black uppercase tracking-widest text-muted">Email Address</label>
+            <input value={editEmail} onChange={e => setEditEmail(e.target.value)}
+              className="w-full bg-background border border-border rounded-xl px-3 py-2.5 text-sm text-foreground outline-none focus:border-torqued-red transition-all"
+              placeholder="your@email.com" />
+            <p className="text-[10px] text-muted">Changing your email will require re-verification on next login.</p>
+          </div>
+          <div className="space-y-1.5">
+            <label className="text-[10px] font-black uppercase tracking-widest text-muted">City / Location</label>
+            <div className="flex gap-2">
+              <input value={editLocation} onChange={e => setEditLocation(e.target.value)}
+                className="flex-1 bg-background border border-border rounded-xl px-3 py-2.5 text-sm text-foreground outline-none focus:border-torqued-red transition-all"
+                placeholder="e.g. Dunedin, Wellington" />
+              <button type="button" onClick={useMyLocation} disabled={locating}
+                className="shrink-0 px-3 rounded-xl border border-border text-torqued-red text-xs font-bold flex items-center gap-1.5 hover:bg-torqued-red/5 disabled:opacity-50 transition-all">
+                <MapPin size={14} /> {locating ? 'Locating…' : 'Use GPS'}
+              </button>
+            </div>
+            <p className="text-[10px] text-muted">Used to find nearby workshops for your quotes. Tap "Use GPS" for live location.</p>
+          </div>
+        </div>
+        <button
+          onClick={saveProfile}
+          disabled={saving}
+          className="w-full h-11 rounded-2xl bg-torqued-red text-white text-[10px] font-black uppercase tracking-widest disabled:opacity-60 transition-all"
+        >
+          {saving ? 'Saving…' : saved ? '✓ Saved' : 'Save Changes'}
+        </button>
+      </Card>
+
+      {/* Passkeys */}
+      {passkeysSupported() && (
+        <Card className="p-6 bg-card border-border space-y-4">
+          <div className="flex items-center justify-between">
+            <p className="text-[10px] font-black uppercase tracking-widest text-muted">Passkeys</p>
+            <button
+              onClick={addPasskey}
+              disabled={passkeyCardState === 'adding'}
+              className="text-[10px] font-black uppercase tracking-widest text-torqued-red hover:opacity-70 disabled:opacity-40 transition-all"
+            >
+              {passkeyCardState === 'adding' ? 'Adding…' : '+ Add Passkey'}
+            </button>
+          </div>
+          {passkeyCardState === 'error' && <p className="text-xs text-torqued-red font-bold">Could not add passkey — try again.</p>}
+          {passkeyCardState === 'added' && <p className="text-xs text-emerald-500 font-bold">Passkey added successfully.</p>}
+          {passkeysLoading ? (
+            <p className="text-xs text-muted">Loading passkeys…</p>
+          ) : passkeys.length === 0 ? (
+            <div className="p-4 bg-background rounded-xl border border-border text-center space-y-2">
+              <p className="text-sm font-bold">No passkeys yet</p>
+              <p className="text-xs text-muted">Add a passkey to sign in instantly without an email code.</p>
+            </div>
+          ) : (
+            <div className="space-y-2">
+              {passkeys.map(pk => (
+                <div key={pk.id} className="flex items-center justify-between p-3 bg-background border border-border rounded-xl">
+                  <div className="space-y-0.5">
+                    <p className="text-sm font-bold">🔑 Passkey</p>
+                    <p className="text-[10px] text-muted">Added {new Date(pk.created_at).toLocaleDateString('en-NZ')}</p>
+                  </div>
+                  <button
+                    onClick={() => removePasskey(pk.id)}
+                    disabled={removingId === pk.id}
+                    className="text-[10px] font-black uppercase tracking-widest text-torqued-red hover:opacity-70 disabled:opacity-40 transition-all"
+                  >
+                    {removingId === pk.id ? 'Removing…' : 'Remove'}
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
+        </Card>
+      )}
+
+      {/* Mechanic Access */}
+      <Card className="p-6 bg-card border-border space-y-4">
+        <div className="flex items-center justify-between">
+          <p className="text-[10px] font-black uppercase tracking-widest text-muted">Mechanic Access</p>
+          <button onClick={loadMechanicAccess} disabled={accessLoading} className="text-[10px] font-black uppercase tracking-widest text-torqued-red hover:opacity-70 disabled:opacity-40">
+            {accessLoading ? 'Loading…' : 'Refresh'}
+          </button>
+        </div>
+        {mechanicAccess.length === 0 ? (
+          <p className="text-xs text-muted text-center py-3">No mechanics currently have access to your profile.</p>
+        ) : (
+          <div className="space-y-3">
+            {mechanicAccess.map((m: any) => (
+              <div key={m.mechanicId} className="p-4 bg-background border border-border rounded-xl space-y-3">
+                <div className="flex items-start justify-between gap-3">
+                  <div className="space-y-0.5">
+                    <p className="text-sm font-bold text-foreground">{m.mechanicName}</p>
+                    {m.mechanicAddress && <p className="text-xs text-muted">{m.mechanicAddress}</p>}
+                    {m.mechanicPhone && <p className="text-xs text-muted">{m.mechanicPhone}</p>}
+                  </div>
+                  <div className="text-right shrink-0 space-y-1">
+                    <p className="text-[10px] font-bold uppercase tracking-wider text-muted">Access since</p>
+                    <p className="text-xs text-foreground font-bold">{m.accessStarted ? new Date(m.accessStarted).toLocaleDateString('en-NZ', { day: 'numeric', month: 'short', year: 'numeric' }) : 'Unknown'}</p>
+                  </div>
+                </div>
+                <div className="space-y-1 border-t border-border pt-2">
+                  {m.vehicles?.length > 0 && (
+                    <p className="text-xs text-muted">Vehicle{m.vehicles.length > 1 ? 's' : ''}: <span className="text-foreground font-bold">{m.vehicles.join(', ')}</span></p>
+                  )}
+                  <p className="text-xs text-muted">Data: <span className="text-foreground">{(m.dataTypes?.length ? m.dataTypes : ['Service history', 'Job records']).join(' · ')}</span></p>
+                  <p className="text-xs text-muted">{m.bookingCount || 0} booking{(m.bookingCount || 0) !== 1 ? 's' : ''} through Torqued</p>
+                </div>
+                <button
+                  onClick={() => revokeMechanicAccess(m.mechanicId)}
+                  className="w-full h-8 rounded-xl border border-torqued-red/30 text-torqued-red text-[10px] font-black uppercase tracking-widest hover:bg-torqued-red/5 transition-all"
+                >
+                  Revoke Access
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
+      </Card>
+
+      {/* Sign out */}
+      <button
+        onClick={() => { clearCustomerSession(); logout(); }}
+        className="w-full h-11 rounded-2xl border border-border text-sm font-bold text-muted hover:text-torqued-red hover:border-torqued-red/30 hover:bg-torqued-red/5 transition-all"
+      >
+        Sign Out
+      </button>
+    </motion.div>
+  );
+};
 
 export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) => {
   const { theme, setTheme } = useTheme();
@@ -32,285 +516,128 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
         .catch(() => resolve(null));
     });
 
+  // One branded document in the Torqued QUOTE design language. It becomes an INVOICE
+  // once paid, and grows BOOKING/PAYMENT + CANCELLATION sections only when relevant.
   const generateBookingPDF = async (job: Job) => {
-    const doc = new jsPDF({
-      orientation: 'portrait',
-      unit: 'mm',
-      format: 'a4'
-    });
+    const j = job as any;
+    const doc = new jsPDF({ unit: 'mm', format: 'a4' });
 
-    const mech = MOCK_MECHANICS.find(m => m.id === job.mechanicId);
+    const detail = jobDetail[job.id] || {};
+    const qi = j.quoteItems || detail.quoteItems || null;
+    const isPaid = job.paymentStatus === 'confirmed';
+    const isCompleted = job.status === 'completed';
+    const isBooked = isPaid || (!!job.date && ['booked', 'in_progress', 'completed'].includes(job.status));
+    const isInvoice = isPaid || isCompleted;
+    const docTitle = isInvoice ? 'TAX INVOICE' : 'SERVICE QUOTE';
 
-    // 1. Dark Header Ribbon - Torqued Charcoal Carbon Background
-    doc.setFillColor(21, 4, 2);
-    doc.rect(0, 0, 210, 42, 'F');
+    const mechName  = j.mechanicName || 'Your Workshop';
+    const mechAddr  = j.mechanicAddress || '';
+    const noticeHrs = j.cancellationNoticeHours ?? 24;
+    const refundPct = j.cancellationRefundPct ?? 50;
+    const cName  = job.customerName || userProfile?.name || '';
+    const cEmail = job.email || userProfile?.email || customerEmail || '';
+    const rego = (job.vehicleId || vehicle?.rego || '').toUpperCase();
+    const vehicleDesc = vehicle ? [vehicle.year, vehicle.make, vehicle.model, (vehicle as any).variant || null].filter(Boolean).join(' ') : '';
+    const mileage = vehicle?.mileage || null;
 
-    // Racing Red Trim Line under header
-    doc.setFillColor(255, 24, 0);
-    doc.rect(0, 42, 210, 2, 'F');
+    let bookingDateStr = '';
+    if (job.date) { const d = new Date(job.date); bookingDateStr = isNaN(d.getTime()) ? String(job.date) : d.toLocaleDateString('en-NZ', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' }); }
 
-    // Torqued logo (falls back to text if the image can't be loaded)
-    const logoDataUrl = await loadImageDataUrl('/torqued-logo.png');
-    if (logoDataUrl) {
-      // logo is ~2.985:1; render 55mm wide
-      doc.addImage(logoDataUrl, 'PNG', 15, 11, 55, 18.4);
+    const parts = qi && Array.isArray(qi.parts) ? qi.parts.filter((p: any) => p.name) : [];
+    const labourTotal = qi ? (qi.labourHours || 0) * (qi.labourRate || 0) : 0;
+    const other = qi && Array.isArray(qi.other) ? qi.other.filter((o: any) => o.name || o.label) : [];
+    const shopFee = qi ? Number(qi.shopFee) || 0 : 0;
+    const discount = qi ? qi.discount || 0 : 0;
+    const total = detail.total > 0 ? detail.total : (j.quotedPrice ?? job.totalPrice);
+    const notes = qi?.notes || j.quoteNote || j.description || '';
+
+    // ── Header (Torqued quote style) ──
+    const logo = await loadImageDataUrl('/torqued-logo.png');
+    if (logo) doc.addImage(logo, 'PNG', 15, 8, 52, 17.4);
+    doc.setFillColor(255, 24, 0); doc.rect(0, 30, 210, 2, 'F');
+    doc.setTextColor(21, 4, 2); doc.setFont('Helvetica', 'bold'); doc.setFontSize(11);
+    doc.text(docTitle, 195, 16, { align: 'right' });
+    doc.setFont('Helvetica', 'normal'); doc.setFontSize(8.5); doc.setTextColor(80, 80, 80);
+    doc.text(`Ref #${job.id.toUpperCase()}`, 195, 22, { align: 'right' });
+    doc.text(new Date().toLocaleDateString('en-NZ', { day: 'numeric', month: 'short', year: 'numeric' }), 195, 27, { align: 'right' });
+
+    // ── Workshop / Customer / Vehicle ──
+    doc.setTextColor(21, 4, 2); doc.setFontSize(9.5);
+    doc.setFont('Helvetica', 'bold'); doc.text('WORKSHOP', 15, 44);
+    doc.setFont('Helvetica', 'normal'); doc.text(mechName, 15, 50);
+    if (mechAddr) doc.splitTextToSize(mechAddr, 90).forEach((ln: string, i: number) => doc.text(ln, 15, 55 + i * 5));
+    doc.setFont('Helvetica', 'bold'); doc.text('CUSTOMER', 115, 44);
+    doc.setFont('Helvetica', 'normal');
+    if (cName) doc.text(cName, 115, 50);
+    if (cEmail) doc.text(cEmail.length > 32 ? cEmail.slice(0, 30) + '…' : cEmail, 115, cName ? 55 : 50);
+    doc.setFont('Helvetica', 'bold'); doc.text('VEHICLE', 165, 44);
+    doc.setFont('Helvetica', 'normal');
+    let vY = 50;
+    if (vehicleDesc) { doc.splitTextToSize(vehicleDesc, 40).forEach((ln: string) => { doc.text(ln, 165, vY); vY += 5; }); }
+    doc.text(rego, 165, vY); vY += 5;
+    if (mileage) doc.text(`${Number(mileage).toLocaleString()} km`, 165, vY);
+
+    let y = 72;
+    const row = (label: string, amt: string, bold = false) => { doc.setFont('Helvetica', bold ? 'bold' : 'normal'); const ll = doc.splitTextToSize(label, 150); doc.text(ll, 15, y); if (amt) doc.text(amt, 195, y, { align: 'right' }); y += 6.5 + (ll.length - 1) * 4.5; };
+    const heading = (label: string) => { doc.setFont('Helvetica', 'bold'); doc.setFontSize(10); doc.setTextColor(255, 24, 0); doc.text(label, 15, y); doc.setDrawColor(226, 232, 240); doc.line(15, y + 2, 195, y + 2); y += 9; doc.setFontSize(9); doc.setTextColor(21, 4, 2); };
+
+    // ── Itemised ──
+    heading(isInvoice ? 'ITEMISED INVOICE' : 'ITEMISED QUOTE');
+    if (qi) {
+      parts.forEach((p: any) => row(`${p.name}  x${p.qty || 1}`, `$${((p.qty || 1) * (p.unitPrice || 0)).toFixed(2)}`));
+      if (labourTotal > 0) row(`Labour (${qi.labourHours}h @ $${qi.labourRate}/hr)`, `$${labourTotal.toFixed(2)}`);
+      other.forEach((o: any) => row(o.name || o.label, `$${Number(o.amount || 0).toFixed(2)}`));
+      if (shopFee > 0) row('Workshop fee (freight, sundries & consumables)', `$${shopFee.toFixed(2)}`);
+      if (discount > 0) row('Discount', `-$${discount.toFixed(2)}`);
     } else {
-      doc.setTextColor(255, 255, 255);
-      doc.setFont('Helvetica', 'bold');
-      doc.setFontSize(26);
-      doc.text('TORQ', 15, 22);
-      doc.setTextColor(255, 24, 0);
-      doc.text('UED', 44, 22);
+      job.serviceIds.forEach((sid: string) => row(SERVICES.find((s: any) => s.id === sid)?.name || sid, ''));
+    }
+    y += 2; doc.setDrawColor(226, 232, 240); doc.line(15, y, 195, y); y += 7;
+    doc.setFontSize(12); doc.setTextColor(255, 24, 0); row('TOTAL (GST incl.)', `$${Number(total).toFixed(2)}`, true);
+
+    // ── Booking & payment (only when relevant) ──
+    if (isBooked) {
+      y += 4; heading('BOOKING & PAYMENT');
+      if (bookingDateStr) row('Drop-off', bookingDateStr);
+      row('Payment method', job.paymentMethod || 'Card');
+      row('Payment status', isPaid ? 'PAID IN FULL' : 'Awaiting payment');
+      if (isCompleted) row('Job status', 'Completed');
     }
 
-    // Sub Header details
-    doc.setFont('Helvetica', 'normal');
-    doc.setFontSize(8.5);
-    doc.setTextColor(180, 180, 180);
-    doc.text('NZ REPAIR MARKETPLACE', 15, 35);
-
-    // Receipt Ref & Date on white-right part of header
-    doc.setFontSize(9);
-    doc.setFont('Helvetica', 'bold');
-    doc.setTextColor(255, 255, 255);
-    doc.text(`RECEIPT REF: #${job.id.toUpperCase()}`, 130, 20);
-    doc.setFont('Helvetica', 'normal');
-    doc.setTextColor(180, 180, 180);
-    doc.text(`ISSUED: ${new Date().toLocaleDateString('en-NZ', { day: 'numeric', month: 'short', year: 'numeric' })}`, 130, 27);
-    doc.text('TORQUED NZ', 130, 33);
-
-    // 2. Document Title
-    doc.setTextColor(21, 4, 2);
-    doc.setFont('Helvetica', 'bold');
-    doc.setFontSize(14);
-    doc.text('BOOKING CONFIRMATION & QUOTE', 15, 58);
-    
-    doc.setDrawColor(226, 232, 240);
-    doc.setLineWidth(0.4);
-    doc.line(15, 62, 195, 62);
-    
-    // 3. Left Column / Right Column Grid Alignment for Logistics
-    // Left Grid: Booking & Schedule
-    doc.setFontSize(10);
-    doc.setFont('Helvetica', 'bold');
-    doc.setTextColor(255, 24, 0); // red headings
-    doc.text('LOGISTICS / SCHEDULING', 15, 72);
-    
-    doc.setFontSize(9.5);
-    doc.setFont('Helvetica', 'normal');
-    doc.setTextColor(100, 116, 139);
-    doc.text('Appointment Date:', 15, 80);
-    doc.setFont('Helvetica', 'bold');
-    doc.setTextColor(21, 4, 2);
-    doc.text(job.date, 52, 80);
-    
-    doc.setFont('Helvetica', 'normal');
-    doc.setTextColor(100, 116, 139);
-    doc.text('Arrival Drop Window:', 15, 87);
-    doc.setFont('Helvetica', 'bold');
-    doc.setTextColor(255, 24, 0); // red accent for drop off
-    doc.text(selectedTime || '09:00 AM', 52, 87);
-
-    doc.setFont('Helvetica', 'normal');
-    doc.setTextColor(100, 116, 139);
-    doc.text('Pickup Deadline:', 15, 94);
-    doc.setFont('Helvetica', 'bold');
-    doc.setTextColor(21, 4, 2);
-    doc.text(estimatedReadyTime || '04:30 PM (Same-Day)', 52, 94);
-
-    // Right Grid: Workshop details
-    doc.setFontSize(10);
-    doc.setFont('Helvetica', 'bold');
-    doc.setTextColor(255, 24, 0);
-    doc.text('ASSIGNED REPAIR SERVICE', 115, 72);
-
-    doc.setFontSize(9.5);
-    doc.setFont('Helvetica', 'bold');
-    doc.setTextColor(21, 4, 2);
-    doc.text(mech?.name || 'Selected Workshop Service', 115, 80);
-    
-    doc.setFont('Helvetica', 'normal');
-    doc.setTextColor(100, 116, 139);
-    doc.setFontSize(8.5);
-    doc.text(mech?.address || 'your mechanics address', 115, 85);
-    doc.text('Authorized Torqued Certified Tech Partner', 115, 90);
-
-    // 4. Vehicle & Customer Specifications Box (Styled split grid matching TORQUED Design Language)
-    doc.setFillColor(248, 250, 252);
-    doc.rect(15, 102, 180, 28, 'F');
-    doc.setDrawColor(226, 232, 240);
-    doc.rect(15, 102, 180, 28, 'D');
-
-    // Vertical Divider Line between Vehicle specs and Client specs
-    doc.setDrawColor(226, 232, 240);
-    doc.line(105, 102, 105, 130);
-
-    // Left Column: Vehicle Details
-    doc.setFont('Helvetica', 'bold');
-    doc.setTextColor(21, 4, 2);
-    doc.setFontSize(9);
-    doc.text('ENROLLED VEHICLE SPECIFICATION', 20, 108);
-    
-    doc.setFont('Helvetica', 'normal');
-    doc.setFontSize(8.5);
-    doc.setTextColor(100, 116, 139);
-    doc.text('Model:', 20, 115);
-    doc.setFont('Helvetica', 'bold');
-    doc.setTextColor(21, 4, 2);
-    const vehicleName = vehicle ? `${vehicle.year} ${vehicle.make} ${vehicle.model}` : `${MOCK_VEHICLE.year} ${MOCK_VEHICLE.make} ${MOCK_VEHICLE.model}`;
-    doc.text(vehicleName, 32, 115);
-
-    doc.setFont('Helvetica', 'normal');
-    doc.setTextColor(100, 116, 139);
-    doc.text('Plate:', 20, 122);
-    
-    // Reg plate pill
-    doc.setFillColor(21, 4, 2);
-    doc.rect(32, 118, 30, 6, 'F');
-    doc.setTextColor(255, 255, 255);
-    doc.setFont('Helvetica', 'bold');
-    doc.setFontSize(8.5);
-    const vehicleReg = vehicle?.rego || MOCK_VEHICLE.rego;
-    doc.text(vehicleReg.toUpperCase(), 37, 122.5);
-
-    // Right Column: Client / Owner File (Name, Email, Phone Number)
-    doc.setFont('Helvetica', 'bold');
-    doc.setTextColor(255, 24, 0); // Solid Scarlet Heading
-    doc.setFontSize(9);
-    doc.text('VERIFIED CLIENT / BILLING DOSSIER', 110, 108);
-
-    doc.setFont('Helvetica', 'normal');
-    doc.setFontSize(8.5);
-    doc.setTextColor(100, 116, 139);
-    doc.text('Name:', 110, 115);
-    doc.setFont('Helvetica', 'bold');
-    doc.setTextColor(21, 4, 2);
-    const cName = job.customerName || userProfile?.name || cardName || '';
-    doc.text(cName, 126, 115);
-
-    doc.setFont('Helvetica', 'normal');
-    doc.setTextColor(100, 116, 139);
-    doc.text('Email:', 110, 121);
-    doc.setFont('Helvetica', 'bold');
-    doc.setTextColor(21, 4, 2);
-    const cEmail = job.email || userProfile?.email || stripeInputEmail || 'sri.140nz@gmail.com';
-    doc.text(cEmail.length > 34 ? cEmail.substring(0, 31) + '...' : cEmail, 126, 121);
-
-    doc.setFont('Helvetica', 'normal');
-    doc.setTextColor(100, 116, 139);
-    doc.text('Phone:', 110, 127);
-    doc.setFont('Helvetica', 'bold');
-    doc.setTextColor(21, 4, 2);
-    const cPhone = job.phone || userProfile?.phone || stripeInputPhone || '+64 21 029 3848';
-    doc.text(cPhone, 126, 127);
-
-    // 5. Booked services list section (shifted Y coordinate for professional breathing room)
-    doc.setFont('Helvetica', 'bold');
-    doc.setTextColor(21, 4, 2);
-    doc.setFontSize(10.5);
-    doc.text('WORK REQUIREMENTS & SPECIALIST SERVICES', 15, 143);
-    doc.setDrawColor(226, 232, 240);
-    doc.line(15, 146, 195, 146);
-    
-    let currentY = 154;
-    job.serviceIds.forEach((sid, idx) => {
-      const sObj = SERVICES.find(s => s.id === sid);
-      const sName = sObj?.name || 'Diagnostic Mechanical Inspection';
-      const sDesc = sObj?.category ? `Service Category: ${sObj.category.toUpperCase()}` : 'Full high-value component calibration';
-      
-      doc.setFont('Helvetica', 'bold');
-      doc.setTextColor(21, 4, 2);
-      doc.setFontSize(9.5);
-      doc.text(`[🛠️]  ${idx + 1}. ${sName}`, 15, currentY);
-      
-      doc.setFont('Helvetica', 'normal');
-      doc.setTextColor(100, 116, 139);
-      doc.setFontSize(8.5);
-      doc.text(sDesc, 20, currentY + 4.5);
-      
-      currentY += 13;
-    });
-
-    // Divider before pricing
-    doc.setDrawColor(241, 245, 249);
-    doc.line(15, currentY + 2, 195, currentY + 2);
-    
-    // 6. Pricing Breakdown Box
-    doc.setFillColor(248, 250, 252);
-    doc.rect(115, currentY + 8, 80, 42, 'F');
-    doc.setDrawColor(226, 232, 240);
-    doc.rect(115, currentY + 8, 80, 42, 'D');
-    
-    doc.setFont('Helvetica', 'normal');
-    doc.setFontSize(9);
-    doc.setTextColor(71, 85, 105);
-    doc.text('Subtotal:', 120, currentY + 16);
-    doc.setFont('Helvetica', 'bold');
-    doc.setTextColor(21, 4, 2);
-    doc.text(`$${job.totalPrice}.00 NZD`, 165, currentY + 16);
-    
-    // On Torqued the customer prepays — either the full amount or a deposit.
-    const amountPaid = job.depositPaid ?? job.totalPrice;
-    const balanceDue = Math.max(0, job.totalPrice - amountPaid);
-
-    doc.setFont('Helvetica', 'normal');
-    doc.setTextColor(71, 85, 105);
-    doc.text('Prepaid via Torqued:', 120, currentY + 24);
-    doc.setFont('Helvetica', 'bold');
-    doc.setTextColor(21, 4, 2);
-    doc.text(`$${amountPaid.toFixed(2)} NZD`, 165, currentY + 24);
-
-    doc.setFont('Helvetica', 'bold');
-    doc.setFontSize(10.5);
-    if (balanceDue <= 0) {
-      doc.setTextColor(16, 150, 70); // green
-      doc.text('Balance Due:', 120, currentY + 40);
-      doc.text('PAID IN FULL', 165, currentY + 40);
-    } else {
-      doc.setTextColor(255, 24, 0);
-      doc.text('Balance at Workshop:', 120, currentY + 40);
-      doc.text(`$${balanceDue.toFixed(2)} NZD`, 165, currentY + 40);
+    // ── Notes ──
+    if (notes) {
+      y += 4; doc.setFont('Helvetica', 'bold'); doc.setFontSize(9); doc.setTextColor(21, 4, 2); doc.text('Notes', 15, y);
+      y += 5; doc.setFont('Helvetica', 'normal'); doc.setFontSize(8.5); doc.setTextColor(80, 80, 80);
+      doc.splitTextToSize(notes.trim(), 180).forEach((line: string) => { doc.text(line, 15, y); y += 4.5; });
     }
 
-    // Left block of financial: secure clearance badge
-    doc.setFillColor(255, 24, 0, 0.04);
-    doc.rect(15, currentY + 8, 92, 42, 'F');
-    doc.setDrawColor(255, 24, 0, 0.15);
-    doc.rect(15, currentY + 8, 92, 42, 'D');
+    // ── Cancellation policy (only for upcoming, not-yet-completed jobs) ──
+    if (isBooked && !isCompleted) {
+      y += 6; doc.setFont('Helvetica', 'bold'); doc.setFontSize(9); doc.setTextColor(21, 4, 2); doc.text('Cancellation policy', 15, y);
+      y += 5; doc.setFont('Helvetica', 'normal'); doc.setFontSize(8); doc.setTextColor(80, 80, 80);
+      const policyText = `Full refund if cancelled ${noticeHrs}+ hours before drop-off (excluding weekends & public holidays). Cancellations within ${noticeHrs} hours receive a ${refundPct}% refund per ${mechName}'s policy.`;
+      doc.splitTextToSize(policyText, 180).forEach((line: string) => { doc.text(line, 15, y); y += 4.5; });
+    }
 
-    doc.setFont('Helvetica', 'bold');
-    doc.setFontSize(9);
-    doc.setTextColor(255, 24, 0);
-    doc.text('TORQUED BOOKING', 20, 16 + currentY);
+    // ── QR "book" block — only for an open, unbooked quote ──
+    if (!isBooked) {
+      const quoteUrl = `https://torqued-psi.vercel.app/customer?quote=${encodeURIComponent(job.id)}`;
+      const qr = await loadImageDataUrl('https://api.qrserver.com/v1/create-qr-code/?size=240x240&data=' + encodeURIComponent(quoteUrl));
+      if (qr) doc.addImage(qr, 'PNG', 15, 240, 32, 32);
+      doc.setTextColor(21, 4, 2); doc.setFont('Helvetica', 'bold'); doc.setFontSize(11);
+      doc.text('Book on your own terms with Torqued', 52, 250);
+      doc.setFont('Helvetica', 'normal'); doc.setFontSize(9); doc.setTextColor(100, 100, 100);
+      doc.text('Scan the QR code to accept this quote and book instantly.', 52, 256);
+    } else {
+      doc.setTextColor(21, 4, 2); doc.setFont('Helvetica', 'bold'); doc.setFontSize(11);
+      doc.text(isCompleted ? 'Thank you — this job is complete.' : 'Thank you — your booking is confirmed.', 15, 252);
+    }
 
-    doc.setFont('Helvetica', 'normal');
-    doc.setFontSize(8);
-    doc.setTextColor(115, 115, 115);
-    doc.text('This is your official quote and booking confirmation.', 20, 23 + currentY);
-    doc.text('Present this document to your workshop on arrival.', 20, 27 + currentY);
-    doc.text(`Booking ref: #${job.id.toUpperCase()}`, 20, 31 + currentY);
-    
-    // 7. Sign-Off
-    const signY = currentY + 62;
-    doc.setDrawColor(226, 232, 240);
-    doc.line(15, signY, 195, signY);
+    // ── Footer ──
+    doc.setFont('Helvetica', 'normal'); doc.setFontSize(7.5); doc.setTextColor(150, 150, 150);
+    doc.text(`${isInvoice ? 'Tax invoice' : 'Quote'} provided via Torqued — NZ's smarter way to get your car sorted. Prices include 15% GST.`, 15, 285);
 
-    doc.setFontSize(8);
-    doc.setTextColor(148, 163, 184);
-    doc.setFont('Helvetica', 'bold');
-    doc.text('AUTHORISED DIGITAL RECEIPT', 15, signY + 8);
-    doc.setFont('Helvetica', 'normal');
-    doc.text('Generated by Torqued • torquedapp.nz@gmail.com • 022 389 5249', 15, signY + 13);
-
-    // 8. Legal and Footer fineprint
-    doc.setFont('Helvetica', 'italic');
-    doc.setFontSize(7.5);
-    doc.setTextColor(156, 163, 175);
-    const lineY = signY + 24;
-    doc.text('All rates include 15% New Zealand Goods and Services Tax (GST). Present this document to your workshop on arrival.', 15, lineY);
-    doc.text('Privacy Policy: torqued-psi.vercel.app/privacy-policy.pdf  ·  torqued.nz@icloud.com  ·  NZ Privacy Act 2020 compliant.', 15, lineY + 4);
-
-    doc.save(`Torqued-Quote-${job.id.toUpperCase()}.pdf`);
+    doc.save(`Torqued-${isInvoice ? 'Invoice' : 'Quote'}-${job.id.toUpperCase()}.pdf`);
   };
   const [step, setStep] = useState(1);
   const [rego, setRego] = useState('');
@@ -326,8 +653,10 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
   const [selectedMechanic, setSelectedMechanic] = useState<Mechanic | null>(null);
   const [paymentOption, setPaymentOption] = useState<'full' | 'deposit'>('full');
   const [paymentMethod, setPaymentMethod] = useState<string | null>(null);
-  const [view, setView] = useState<'quote' | 'dashboard'>('quote');
+  const [view, setView] = useState<'quote' | 'dashboard' | 'profile'>('quote');
   const [activeJobs, setActiveJobs] = useState<Job[]>([]);
+  // Split the garage job list: current/upcoming work vs finished history
+  const [jobsView, setJobsView] = useState<'active' | 'past'>('active');
   const [isEditingDate, setIsEditingDate] = useState<string | null>(null);
   const [newDate, setNewDate] = useState('');
   const [userServiceItems, setUserServiceItems] = useState<UserServiceItem[]>([
@@ -340,8 +669,22 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
   const [suggestedJobs, setSuggestedJobs] = useState<string[]>([]);
 
   // Scheduling state
-  const [selectedDate, setSelectedDate] = useState<string>('2026-04-23'); // Default to Thursday (2 days from Tuesday)
+  const [selectedDate, setSelectedDate] = useState<string>(() => {
+    // Default to next weekday 2 business days from today
+    const d = new Date();
+    let added = 0;
+    while (added < 2) {
+      d.setDate(d.getDate() + 1);
+      const day = d.getDay();
+      if (day !== 0 && day !== 6) added++;
+    }
+    return d.toISOString().slice(0, 10);
+  });
   const [selectedTime, setSelectedTime] = useState<string>('09:00');
+  // Real next-available drop-off dates computed server-side from the workshop's
+  // availability + parts lead time + business-day calendar.
+  const [availableDates, setAvailableDates] = useState<{ date: string; day: string; label: string }[]>([]);
+  const [availabilityLoading, setAvailabilityLoading] = useState(false);
   const [estimatedReadyTime, setEstimatedReadyTime] = useState<string>('5:00 PM');
   const [collectNextDay, setCollectNextDay] = useState(false);
   
@@ -349,8 +692,9 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
   const [isNewVehicle, setIsNewVehicle] = useState(false);
   const [purchaseDate, setPurchaseDate] = useState('');
   const [purchaseMileage, setPurchaseMileage] = useState('');
-  const [manualHistory, setManualHistory] = useState<{date: string, service: string, provider: string, mileage?: string, price?: string, notes?: string}[]>([]);
+  const [manualHistory, setManualHistory] = useState<{date: string, service: string, provider: string, mileage?: string, price?: string, notes?: string, source_type?: string, id?: string, ai_summary?: string | null}[]>([]);
   const [showHistoryEntry, setShowHistoryEntry] = useState(false);
+  const [showHistorySheet, setShowHistorySheet] = useState(false);
   const [entryDate, setEntryDate] = useState('');
   const [entryService, setEntryService] = useState('');
   const [entryProvider, setEntryProvider] = useState('');
@@ -359,6 +703,10 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
   const [entryNotes, setEntryNotes] = useState('');
   const [isParsingReceipt, setIsParsingReceipt] = useState(false);
   const [receiptError, setReceiptError] = useState<string | null>(null);
+
+  // Mechanic access permissions
+  const [mechanicAccess, setMechanicAccess] = useState<Array<{ mechanicId: string; mechanicName: string; mechanicEmail: string; grantedAt: string; accessType: string }>>([]);
+  const [accessLoading, setAccessLoading] = useState(false);
   // Multi-file drag-and-drop service-history import
   type ParsedRecord = { id: string; date: string; service: string; provider: string; mileage: string; price: string; notes: string; fileName: string };
   const [parsedBatch, setParsedBatch] = useState<ParsedRecord[]>([]);
@@ -368,6 +716,7 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
   const [showBatchReview, setShowBatchReview] = useState(false);
   const [isDiagnosticMode, setIsDiagnosticMode] = useState(false);
   const [diagnosticComment, setDiagnosticComment] = useState('');
+  const [evQuoteConcern, setEvQuoteConcern] = useState('');
   const [isDiagnosticSimulatedComplete, setIsDiagnosticSimulatedComplete] = useState(false);
   const [isRepairFromDiagnostic, setIsRepairFromDiagnostic] = useState(false);
   const [insurancePolicyNumber, setInsurancePolicyNumber] = useState('');
@@ -432,8 +781,13 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
   const [fleetQuoteState, setFleetQuoteState] = useState<'loading' | 'instant' | 'fallback' | null>(null);
   const [fleetQuoteRange, setFleetQuoteRange] = useState<{ low: number; high: number } | null>(null);
   const [fleetVehicleId, setFleetVehicleId] = useState<string | null>(null);
-  const [fleetPricesRaw, setFleetPricesRaw] = useState<Record<string, { low: number; high: number; midpoint: number; partsLow: number; partsHigh: number; labourLow: number; labourHigh: number; labourHours: string | null }>>({});
+  const [fleetPricesRaw, setFleetPricesRaw] = useState<Record<string, any>>({});
+  const [waterPumpInDB, setWaterPumpInDB] = useState(false);
   const [vehicleTimingDrive, setVehicleTimingDrive] = useState<'belt' | 'chain' | 'na' | null>(null);
+  const isEV = vehicle?.make?.toLowerCase() === 'tesla' ||
+               !!vehicle?.fuelType?.toLowerCase()?.includes('electric') ||
+               (vehicleTimingDrive === 'na' && !!vehicle?.make);
+  const [fleetShopFee, setFleetShopFee] = useState<number | null>(null);
   const [waterPumpRecommended, setWaterPumpRecommended] = useState(false);
   const [waterPump, setWaterPump] = useState<{ partsLow: number; partsHigh: number; labourExtra: number; low: number; high: number } | null>(null);
   const [addWaterPump, setAddWaterPump] = useState(false);
@@ -441,6 +795,18 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
   const [customSearchResults, setCustomSearchResults] = useState<Array<{ id: string; name: string; indicativePrice: number }>>([]);
   const [customSearchDone, setCustomSearchDone] = useState(false);
   const [customSearchLoading, setCustomSearchLoading] = useState(false);
+
+  // Service log inline editing
+  const [editingLogIdx, setEditingLogIdx] = useState<number | null>(null);
+  const [editLogDate, setEditLogDate] = useState('');
+  const [editLogService, setEditLogService] = useState('');
+  const [editLogProvider, setEditLogProvider] = useState('');
+  const [editLogMileage, setEditLogMileage] = useState('');
+  const [editLogPrice, setEditLogPrice] = useState('');
+  const [editLogNotes, setEditLogNotes] = useState('');
+
+  // "Job not listed here" quote request
+  const [showUnlistedQuote, setShowUnlistedQuote] = useState(false);
   const [carjamVehicle, setCarjamVehicle] = useState<{
     make: string; model: string; year: number; variant: string;
     vin: string | null; engineCc: number | null; transmissionType: string | null;
@@ -455,17 +821,23 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
   const [showSubmodelPicker, setShowSubmodelPicker] = useState(false);
   const [quoteFallbackCategoryId, setQuoteFallbackCategoryId] = useState<number | null>(null);
 
+  const [mechanicsLoading, setMechanicsLoading] = useState(true);
   useEffect(() => {
     fetch('/api/mechanics')
       .then(r => r.json())
       .then(d => {
         const mapped: Mechanic[] = (d.mechanics || []).map((m: any) => ({
-          id: m.id,                       // real account UUID — bookings route here
+          id: m.id,
           name: m.name || 'Workshop',
           logo: `https://ui-avatars.com/api/?name=${encodeURIComponent(m.name || 'W')}&background=FF1800&color=fff&bold=true`,
           suburb: m.address ? String(m.address).split(',').slice(-1)[0].trim() : 'NZ',
           address: m.address || undefined,
-          distance: 1.2,
+          mapsUrl: m.latitude && m.longitude
+            ? `https://www.google.com/maps?q=${m.latitude},${m.longitude}`
+            : m.address
+              ? `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(m.address)}`
+              : undefined,
+          distance: 999,
           rating: m.rating || 5.0,
           reviews: m.review_count || 0,
           labourRate: m.labour_rate || undefined,
@@ -477,10 +849,13 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
           partsLeadDays: m.parts_lead_days ?? 1,
           latitude: m.latitude ?? undefined,
           longitude: m.longitude ?? undefined,
-        }));
+          offersPpi: !!m.offers_ppi,
+          wofDisabled: !!m.wof_disabled,
+        }) as any);
         setRealMechanics(mapped);
+        setMechanicsLoading(false);
       })
-      .catch(() => {});
+      .catch(() => { setMechanicsLoading(false); });
   }, []);
 
   // Consumer location for distance-based mechanic search (Google/device location services)
@@ -546,7 +921,7 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
   const mechanicsByDistance = useMemo(() => {
     if (!customerCoords) return realMechanics;
     return realMechanics
-      .map(m => (m.latitude != null && m.longitude != null)
+      .map(m => (m.latitude != null && m.longitude != null && m.latitude !== 0 && m.longitude !== 0)
         ? { ...m, distance: haversineKm(customerCoords, { lat: m.latitude, lng: m.longitude }) }
         : m)
       .sort((a, b) => a.distance - b.distance);
@@ -577,6 +952,12 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
         if (Array.isArray(s.vehicles) && s.vehicles.length) {
           setGarageVehicles(s.vehicles.map((r: any) => ({ id: r.rego, rego: r.rego, make: r.make, model: r.model, year: r.year, variant: r.variant ?? undefined, mileage: r.mileage ?? 0, thumbnail: r.thumbnail ?? undefined })));
         }
+        // A returning, verified customer should land on their garage — not the quote flow —
+        // unless they arrived via a special link (standalone quote, payment return, etc.).
+        const sp = new URLSearchParams(window.location.search);
+        if (!sp.get('quote') && !sp.get('session_id') && !sp.get('reschedule_accept') && !sp.get('vt')) {
+          setView('dashboard');
+        }
       } else {
         localStorage.removeItem(SESSION_KEY);
       }
@@ -599,12 +980,23 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
         .map((r: any) => ({
           id: r.id, vehicleId: r.vehicle_rego || '', serviceIds: r.service_ids || [],
           mechanicId: r.mechanic_id || '', status: r.status || 'booked',
-          paymentStatus: r.payment_status === 'confirmed' ? 'confirmed' : 'pending',
+          paymentStatus: r.payment_status === 'confirmed' ? 'confirmed' : r.payment_status || 'pending',
           paymentMethod: r.payment_method || '', date: r.date || '',
-          totalPrice: parseFloat(r.total_price) || 0, depositPaid: r.deposit_paid ?? undefined,
+          totalPrice: parseFloat(r.total_price) || 0,
+          quotedPrice: r.quoted_price != null ? parseFloat(r.quoted_price) : undefined,
+          quoteNote: r.quote_note || undefined,
+          quoteItems: r.quote_items || undefined,
+          depositPaid: r.deposit_paid ?? undefined,
           description: r.description || undefined, customerName: r.customer_name || undefined,
           email: r.email || undefined, phone: r.phone || undefined,
-        }));
+          // Mechanic profile fields — enriched server-side
+          transactionId: r.transaction_id || undefined,
+          mechanicName: r.mechanic_name || undefined,
+          mechanicAddress: r.mechanic_address || undefined,
+          mechanicPhone: r.mechanic_phone || undefined,
+          cancellationNoticeHours: r.cancellation_notice_hours ?? 24,
+          cancellationRefundPct: r.cancellation_partial_refund_pct ?? 50,
+        } as any));
       setActiveJobs(mapped);
     } catch { /* keep local jobs */ }
   };
@@ -660,12 +1052,13 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
   // QR deep-link → review-and-pay with the mechanic's quote pre-loaded
   const [quoteReview, setQuoteReview] = useState<any | null>(null);
   const [quotePaying, setQuotePaying] = useState(false);
+  const [quoteOnlyMode, setQuoteOnlyMode] = useState(() => !!new URLSearchParams(window.location.search).get('quote'));
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
     const qid = params.get('quote');
     if (!qid) return;
     window.history.replaceState({}, document.title, window.location.pathname);
-    fetch(`/api/quote/${encodeURIComponent(qid)}`).then(r => r.json()).then(d => { if (d && d.id) setQuoteReview(d); }).catch(() => {});
+    fetch(`/api/quote/${encodeURIComponent(qid)}`).then(r => r.json()).then(d => { if (d && d.id) setQuoteReview(d); else setQuoteOnlyMode(false); }).catch(() => setQuoteOnlyMode(false));
   }, []);
   const payQuote = async () => {
     if (!quoteReview) return;
@@ -681,7 +1074,7 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
     } catch { setQuotePaying(false); }
   };
 
-  // Verify a returning customer with a passkey (Face/Touch ID). Magic link remains the fallback.
+  // Verify a returning customer with a passkey. Magic link remains the fallback.
   const [passkeyError, setPasskeyError] = useState<string | null>(null);
   const [passkeyCardState, setPasskeyCardState] = useState<'idle' | 'adding' | 'added' | 'error'>('idle');
   const verifyWithPasskey = async (plate: string) => {
@@ -700,7 +1093,7 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
       setView('dashboard');
       await loadVehicleByRego(r.rego || plate);
     } catch (e: any) {
-      setPasskeyError(e?.message || 'Passkey sign-in failed — use the email link instead.');
+      setPasskeyError(e?.message?.toLowerCase().includes('passkey') ? 'No passkey on this device — use “Email me a verification code” above instead.' : (e?.message || 'Passkey sign-in failed — use the verification code instead.'));
     } finally {
       setMagicVerifying(false);
     }
@@ -720,9 +1113,10 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
     setPkPrompted(true);
     const t = setTimeout(async () => {
       try {
-        if (window.confirm('Booking confirmed! 🎉\n\nWant faster access next time? Create a passkey to sign in with Face ID / Touch ID — no email link needed.')) {
+        if (await hasPasskey('customer', customerEmail || plate)) return; // already has one
+        if (window.confirm('Booking confirmed! 🎉\n\nWant faster access next time? Create a passkey to sign in with passkey — no email link needed.')) {
           await registerPasskey('customer', customerEmail || plate);
-          window.alert('Passkey created. Next time you enter your plate, just tap "Verify with Face / Touch ID".');
+          window.alert('Passkey created. Next time you enter your plate, just tap "Verify with passkey".');
         }
       } catch { /* cancelled — magic link still works */ }
     }, 1200);
@@ -744,11 +1138,43 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
       window.history.replaceState({}, document.title, window.location.pathname);
     }
   }, []);
+
+  // Service-history grant link: ?grant_history=<token>
+  const [grantHistoryMode] = useState(() => !!new URLSearchParams(window.location.search).get('grant_history'));
+  const [grantState, setGrantState] = useState<'idle' | 'loading' | 'done' | 'error'>('idle');
+  useEffect(() => {
+    const token = new URLSearchParams(window.location.search).get('grant_history');
+    if (!token) return;
+    window.history.replaceState({}, document.title, window.location.pathname);
+    setGrantState('loading');
+    fetch('/api/history/grant', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ token }) })
+      .then(r => r.json()).then(d => setGrantState(d.success ? 'done' : 'error')).catch(() => setGrantState('error'));
+  }, []);
+
+  // Handle reschedule accept links: ?reschedule_accept=<bookingId>&proposed=<datetime>
+  // Captured before the query string is stripped so the standalone page can render.
+  const [rescheduleMode] = useState(() => !!new URLSearchParams(window.location.search).get('reschedule_accept'));
+  const [rescheduleAcceptState, setRescheduleAcceptState] = useState<'idle' | 'loading' | 'done' | 'error'>('idle');
+  const [rescheduleAcceptDate, setRescheduleAcceptDate] = useState('');
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const bookingId = params.get('reschedule_accept');
+    const proposed = params.get('proposed');
+    if (!bookingId || !proposed) return;
+    window.history.replaceState({}, document.title, window.location.pathname);
+    setRescheduleAcceptState('loading');
+    fetch('/api/mechanic/accept-reschedule', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ bookingId, proposedDate: proposed }),
+    })
+      .then(r => r.json())
+      .then(d => {
+        if (d.success) { setRescheduleAcceptDate(d.dateStr || proposed); setRescheduleAcceptState('done'); }
+        else setRescheduleAcceptState('error');
+      })
+      .catch(() => setRescheduleAcceptState('error'));
+  }, []);
   const [isBookingLoading, setIsBookingLoading] = useState(false);
-  const [stripeCheckoutUrl, setStripeCheckoutUrl] = useState<string | null>(null);
-  const [isStripeSessionLoading, setIsStripeSessionLoading] = useState(false);
-  const [stripeSessionError, setStripeSessionError] = useState<string | null>(null);
-  const [stripeIsMock, setStripeIsMock] = useState(false);
 
   // New state to tracking the last booked job for dynamic Step 7 messaging
   const [latestBooking, setLatestBooking] = useState<Job | null>(null);
@@ -772,27 +1198,33 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
 
   const triggerEmailConfirmation = async (job: any) => {
     try {
-      const mechanic = MOCK_MECHANICS.find(m => m.id === job.mechanicId) || selectedMechanic || MOCK_MECHANICS[0];
+      const mechanic = realMechanics.find(m => m.id === (job.mechanicId || selectedMechanic?.id)) || selectedMechanic || null;
       const serviceNames = job.serviceIds.map((id: string) => SERVICES.find(s => s.id === id)?.name || id);
-      
+      const rawDate = job.date || selectedDate || '';
+      let formattedDate = rawDate;
+      if (rawDate) {
+        const d = new Date(rawDate);
+        if (!isNaN(d.getTime())) formattedDate = d.toLocaleDateString('en-NZ', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' });
+      }
+      const custName = userProfile?.name || userName || (job.email || userProfile?.email || user?.email || '').split('@')[0] || '';
+
       const payload = {
-        email: job.email || userProfile?.email || user?.email || 'customer@torqued.nz',
-        customerName: userProfile?.name || cardName || 'Valued Customer',
+        email: job.email || userProfile?.email || user?.email || customerEmail || 'customer@torqued.nz',
+        customerName: custName,
         bookingId: job.id,
-        date: job.date,
+        date: formattedDate,
         time: selectedTime || '09:00 AM',
         readyTime: estimatedReadyTime || '04:30 PM',
         vehicle: vehicle ? `${vehicle.year} ${vehicle.make} ${vehicle.model}` : '',
         plate: vehicle?.plate || vehicle?.rego || '',
-        mechanicName: mechanic?.name || 'R&D European',
-        mechanicAddress: mechanic?.address || 'your mechanics address',
+        mechanicName: mechanic?.name || 'Your Workshop',
+        mechanicAddress: mechanic?.address || '',
+        mechanicId: mechanic?.id || job.mechanicId || '',
         paymentMethod: job.paymentMethod || 'Credit / Debit',
         services: serviceNames,
         price: job.totalPrice,
         paymentOption: paymentOption,
         depositPaid: job.depositPaid,
-
-
       };
 
       const res = await fetch('/api/email/confirm-booking', {
@@ -833,7 +1265,7 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
         recipient: testEmailAddress,
         templateType: selectedEmailTab,
         bookingData: {
-          customerName: userProfile?.name || cardName || '',
+          customerName: userProfile?.name || userName || '',
           bookingId: latestBooking?.id || '',
           date: latestBooking?.date || selectedDate,
           time: selectedTime || '09:00 AM',
@@ -892,17 +1324,6 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
   }, [showEmailModal, latestBooking]);
 
   // Custom Embedded Stripe states
-  const [showStripeModal, setShowStripeModal] = useState(false);
-  const [stripeFormStep, setStripeFormStep] = useState<'input' | 'processing' | 'success'>('input');
-  const [stripeLoadingMessage, setStripeLoadingMessage] = useState('Initiating payment... Please wait.');
-  const [stripeInputEmail, setStripeInputEmail] = useState('');
-  const [stripeInputPhone, setStripeInputPhone] = useState('');
-  const [cardNum, setCardNum] = useState('');
-  const [cardExp, setCardExp] = useState('');
-  const [cardCvc, setCardCvc] = useState('');
-  const [cardName, setCardName] = useState('');
-  const [cardPostalCode, setCardPostalCode] = useState('');
-  const [cardError, setCardError] = useState('');
 
   const filteredProviders: string[] = [];
 
@@ -946,6 +1367,20 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
     if (sessionId && bookingId) {
       const initPaymentVerification = async () => {
         const savedPending = localStorage.getItem('pending_booking');
+        let pendingDraft: any = null;
+        try { pendingDraft = savedPending ? JSON.parse(savedPending) : null; } catch { pendingDraft = null; }
+        // Only treat this as a standard-flow confirmation if the saved draft is for THIS
+        // booking. Otherwise it's a repair/quote payment (or a stale draft) — never show
+        // another job's summary. This was causing the wrong "Diagnostic + Spark Plugs"
+        // confirmation + emails for unrelated payments.
+        if (!pendingDraft || pendingDraft.id !== bookingId) {
+          try { await fetch(`/api/stripe/verify-session?session_id=${sessionId}`); } catch {}
+          localStorage.removeItem('pending_booking'); // clear any stale draft
+          window.history.replaceState({}, document.title, window.location.pathname);
+          await loadCustomerBookings();
+          setJobsView('active');
+          return;
+        }
         if (savedPending) {
           try {
             const booking = JSON.parse(savedPending);
@@ -985,6 +1420,7 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
             
             setActiveJobs(prev => [...prev, booking]);
             setLatestBooking(booking);
+            localStorage.removeItem('pending_booking'); // consumed — never reuse for another payment
             setStep(7); // Jump straight to confirmed step!
             setView('quote');
             
@@ -1057,11 +1493,15 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
 
   // Dynamic display name for a service — timing name depends on vehicle's drive type.
   const serviceDisplayName = (id: string, fallback: string) => {
-    if (id !== 'timing') return fallback;
-    if (vehicleTimingDrive === 'belt') return 'Cambelt';
-    if (vehicleTimingDrive === 'chain') return 'Timing Chain';
-    if (vehicleTimingDrive === 'na') return 'Timing Service'; // electric / no timing job
-    return fallback; // unknown — use the catalog default
+    if (id === 'timing') {
+      if (vehicleTimingDrive === 'belt') return 'Cambelt';
+      if (vehicleTimingDrive === 'chain') return 'Timing Chain';
+      if (vehicleTimingDrive === 'na') return 'Timing Service';
+      return fallback;
+    }
+    if (id === 'water_pump') return 'Water Pump & Thermostat Housing';
+    if (id === 'thermostat_housing') return 'Thermostat Housing (with Water Pump)';
+    return fallback;
   };
 
   // Price for a service on the ACTIVE vehicle: use the vehicle's real DB pricing
@@ -1078,8 +1518,13 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
     if (addWaterPump && waterPump && selectedServices.includes('timing')) {
       t += waterPump.high;
     }
+    // Workshop fee applies to every job EXCEPT a standalone $99 diagnostic inspection.
+    const isDiagOnly = selectedServices.length === 1 && selectedServices[0] === 'diag_inspection';
+    if (t > 0 && !isDiagOnly && fleetShopFee) {
+      t += fleetShopFee;
+    }
     return t;
-  }, [selectedServices, vehiclePrices, addWaterPump, waterPump]);
+  }, [selectedServices, vehiclePrices, addWaterPump, waterPump, fleetShopFee]);
 
   const handleConfirmOTP = async () => {
     if (otpCode.trim().length !== 6) {
@@ -1100,27 +1545,47 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
         setOtpVerificationError(verifyData.error || 'Invalid or expired code. Please try again.');
         return;
       }
+      const verifiedEmail = verifyData.email || customerEmail || '';
+      const verifiedOwnerId = verifyData.ownerId || customerOwnerId || null;
+      let verifiedVehicles = garageVehicles;
       if (verifyData.email) setCustomerEmail(verifyData.email);
       if (verifyData.ownerId) setCustomerOwnerId(verifyData.ownerId);
       if (Array.isArray(verifyData.vehicles) && verifyData.vehicles.length) {
-        setGarageVehicles(verifyData.vehicles.map((r: any) => ({
+        verifiedVehicles = verifyData.vehicles.map((r: any) => ({
           id: r.rego, rego: r.rego, make: r.make, model: r.model,
           year: r.year, variant: r.variant ?? undefined, mileage: r.mileage ?? 0,
           thumbnail: r.thumbnail ?? undefined,
-        })));
+        }));
+        setGarageVehicles(verifiedVehicles);
       }
+      // Unlock the garage: this sets customerVerifiedAt (→ garageUnlocked) and a 48h
+      // session. Without it the gate just re-renders and the user "goes back a step".
+      persistCustomerSession({ ownerId: verifiedOwnerId, email: verifiedEmail, rego: formattedRego, vehicles: verifiedVehicles });
     } catch {
       setOtpVerificationError('Verification failed. Please try again.');
       return;
     }
 
-    await loadVehicleByRego(formattedRego);
+    // No setView here: the garage gate lives under view==='dashboard' (so the user is
+    // already there), while the booking flow uses view==='quote' and must stay put.
+    // persistCustomerSession above flips garageUnlocked, which re-renders the garage.
     setShowOTPModal(false);
     setOtpCode('');
     setOtpVerificationError('');
+    await loadVehicleByRego(formattedRego);
+  };
+
+  // Parses DD/MM/YYYY, ISO, and other common date formats → ms timestamp (0 if unparseable)
+  const parseServiceDate = (dateStr: string): number => {
+    if (!dateStr) return 0;
+    // DD/MM/YYYY
+    const ddmm = dateStr.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
+    if (ddmm) return new Date(`${ddmm[3]}-${ddmm[2].padStart(2,'0')}-${ddmm[1].padStart(2,'0')}`).getTime() || 0;
+    return new Date(dateStr).getTime() || 0;
   };
 
   const loadVehicleByRego = async (rego: string) => {
+    setManualHistory([]);
     try {
       const res = await fetch(`/api/vehicles/${rego}`);
       if (!res.ok) throw new Error('Vehicle not found');
@@ -1173,6 +1638,7 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
           setWaterPumpRecommended(!!fp?.waterPumpRecommended);
           setWaterPump(fp?.waterPump ?? null);
           setAddWaterPump(false);
+          if (fp?.shopFee) setFleetShopFee(fp.shopFee);
           if (fp?.prices && Object.keys(fp.prices).length > 0) {
             const fleetHighs: Record<string, number> = {};
             for (const [svcId, p] of Object.entries(fp.prices as Record<string, any>)) {
@@ -1180,19 +1646,28 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
             }
             setVehiclePrices({ ...legacyPrices, ...fleetHighs });
             setFleetPricesRaw(fp.prices);
+            if (fp?.waterPumpInDB !== undefined) setWaterPumpInDB(!!fp.waterPumpInDB);
           }
         })
         .catch(() => {/* fleet prices are best-effort */});
       // Load any saved/imported service history for this vehicle
       if (Array.isArray(data.history) && data.history.length) {
         setManualHistory(data.history.map((h: any) => ({
+          id: h.id || undefined,
           date: h.service_date || '', service: h.work_done || '', provider: h.provider || '',
           mileage: h.mileage != null ? String(h.mileage) : '', price: h.price || '', notes: h.notes || '',
+          source_type: h.source_type || 'customer_manual',
+          ai_summary: h.ai_summary || null,
         })));
       }
-      // Ensure this car is in the garage list
+      // Ensure this car is in the garage list + auto-save to account if logged in
       setGarageVehicles(prev => prev.some(g => g.rego === v.rego) ? prev : [...prev, v]);
-      if (user) {
+      if (customerOwnerId) {
+        fetch('/api/customer/add-vehicle', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ ownerId: customerOwnerId, rego: v.rego, make: v.make, model: v.model, year: v.year, variant: v.variant }),
+        }).catch(() => {});
+      } else if (user) {
         try { await registerVehicle(v); } catch {}
       }
     } catch {
@@ -1233,12 +1708,16 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
         stolenFlag: false, latestOdometer: null, power: null,
       });
 
-      // Use the first selected service's pre-computed low/high from fleet-prices
-      // (which already includes parts + labour + GST — no parts-only DB query needed)
-      const firstSvcId = selectedServices.find(id => fleetPricesRaw[id]);
-      if (firstSvcId && fleetPricesRaw[firstSvcId]) {
-        const { low, high } = fleetPricesRaw[firstSvcId];
-        setFleetQuoteRange({ low, high });
+      // Sum all selected services' pre-computed low/high from fleet-prices.
+      // Thermostat housing is bundled inside water_pump so exclude it when both are selected.
+      const pricedServices = selectedServices
+        .filter(id => !(id === 'thermostat_housing' && selectedServices.includes('water_pump')))
+        .filter(id => fleetPricesRaw[id]);
+      if (pricedServices.length > 0) {
+        const shopFeeAmt = fleetShopFee || 0;
+        const totalLow  = pricedServices.reduce((s, id) => s + (fleetPricesRaw[id].low  || 0), 0) + shopFeeAmt;
+        const totalHigh = pricedServices.reduce((s, id) => s + (fleetPricesRaw[id].high || 0), 0) + shopFeeAmt;
+        setFleetQuoteRange({ low: totalLow, high: totalHigh });
         setFleetQuoteState('instant');
         return;
       }
@@ -1252,7 +1731,7 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
       if (firstSlug) {
         const { data: cat } = await supabase.from('part_categories').select('id').eq('slug', firstSlug).single();
         if (cat) setQuoteFallbackCategoryId((cat as any).id);
-        await _resolveSegmentFallback(matchedId, vmData, { make, model, year: vehicle?.year ?? 0, bodyType: '', fuel: '' }, cat ? (cat as any).id : null);
+        await _resolveSegmentFallback(matchedId, vmData, { make, model, year: vehicle?.year ?? 0, bodyType: '', fuel: '' }, cat ? (cat as any).id : null, firstSlug);
       } else {
         await _resolveSegmentFallback(matchedId, vmData, { make, model, year: vehicle?.year ?? 0, bodyType: '', fuel: '' }, null);
       }
@@ -1261,11 +1740,21 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
     }
   };
 
+  const SERVICE_INDICATIVE_RANGES: Record<string, [number, number]> = {
+    ignition_coils: [220, 480], spark_plugs: [200, 420],
+    cabin_air_filter: [80, 180], battery_12v: [220, 450],
+    front_brake_pads: [250, 500], rear_brake_pads: [220, 450],
+    front_rotors: [300, 600], rear_rotors: [280, 550],
+    transmission_filter: [350, 900], cambelt: [500, 1400],
+    oil_filter: [90, 200], wheel_bearings: [280, 550],
+  };
+
   const _resolveSegmentFallback = async (
     matchedVehicleId: string | null,
     vmData: { body_type?: string; fuel?: string } | null,
     carjam: { make: string; model: string; year: number; bodyType: string; fuel: string },
     catId: number | null,
+    slug?: string,
   ) => {
     let rangeLow = 150;
     let rangeHigh = 2500;
@@ -1289,6 +1778,10 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
         }
       }
     } catch {}
+    // If DB found nothing, use service-specific indicative range instead of 150/2500
+    if (rangeLow === 150 && rangeHigh === 2500 && slug && SERVICE_INDICATIVE_RANGES[slug]) {
+      [rangeLow, rangeHigh] = SERVICE_INDICATIVE_RANGES[slug];
+    }
     setFleetQuoteRange({ low: rangeLow, high: rangeHigh });
     setFleetQuoteState('fallback');
 
@@ -1327,6 +1820,99 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
   // ── Active-job cancellation + reschedule (uses the shared backend policy/refund engine) ──
   const [jobDetail, setJobDetail] = useState<Record<string, any>>({});   // bookingId → detail
   const [jobBusy, setJobBusy] = useState<string | null>(null);
+  // Repair-quote acceptance: pick a real drop-off date from the workshop's schedule, then pay.
+  const [repairAccept, setRepairAccept] = useState<{ job: any; amount: number } | null>(null);
+  const [repairDates, setRepairDates] = useState<{ date: string; day: string; label: string }[]>([]);
+  const [repairDatesLoading, setRepairDatesLoading] = useState(false);
+  const [repairSelectedDate, setRepairSelectedDate] = useState('');
+  const [repairDropTime, setRepairDropTime] = useState('09:00');
+  const [repairBusy, setRepairBusy] = useState(false);
+
+  // Estimated collection. Turnaround = 2× the job's labour hours (e.g. a 2-hour job
+  // dropped at 9am is ready ~1pm). The mechanic can adjust the ETA later.
+  const repairReadyEstimate = (job: any, dropTime: string): string => {
+    const qi = (job as any)?.quoteItems || jobDetail[job?.id]?.quoteItems;
+    const labour = Number(qi?.labourHours) || 1;
+    const turnaround = Math.ceil(labour * 2);
+    const [h] = dropTime.split(':').map(Number);
+    let readyHour = h + turnaround;
+    if (turnaround >= 8 || readyHour >= 17) return 'Ready next business day — collect any time';
+    const ampm = readyHour >= 12 ? 'PM' : 'AM';
+    if (readyHour > 12) readyHour -= 12;
+    return `Estimated ready ~${readyHour}:00 ${ampm} (mechanic confirms the final ETA)`;
+  };
+
+  const openRepairAccept = async (job: any, amount: number) => {
+    setRepairAccept({ job, amount });
+    setRepairDates([]); setRepairSelectedDate(''); setRepairDropTime('09:00'); setRepairDatesLoading(true);
+    try {
+      const qi = (job as any).quoteItems;
+      const leadDays = (qi?.leadTimeDays != null && qi.leadTimeDays > 0) ? qi.leadTimeDays : null;
+      const params = new URLSearchParams({ mechanicId: job.mechanicId, needsParts: '1', count: '3' });
+      if (leadDays !== null) params.set('leadDays', String(leadDays));
+      const r = await fetch(`/api/mechanic/next-available?${params}`);
+      const d = await r.json();
+      const dates = Array.isArray(d.dates) ? d.dates : [];
+      setRepairDates(dates);
+      if (dates[0]?.date) setRepairSelectedDate(dates[0].date);
+    } catch { setRepairDates([]); }
+    finally { setRepairDatesLoading(false); }
+  };
+
+  const confirmRepairAccept = async () => {
+    if (!repairAccept) return;
+    const { job, amount } = repairAccept;
+    if (!amount) return;
+    setRepairBusy(true);
+    try {
+      // Persist the chosen drop-off date (default 9am) before sending them to checkout.
+      if (repairSelectedDate) {
+        await fetch('/api/customer/reschedule', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ bookingId: job.id, date: `${repairSelectedDate}T${repairDropTime}` }),
+        }).catch(() => {});
+      }
+      const res = await fetch('/api/stripe/create-payment', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ amount, bookingId: job.id, customerEmail: customerEmail || user?.email, description: `Torqued repair quote ${job.id}` }),
+      });
+      const session = await res.json();
+      if (session?.url) { window.location.href = session.url; return; }
+      alert('Could not open checkout. Please try again.');
+    } catch { alert('Could not open checkout.'); }
+    finally { setRepairBusy(false); }
+  };
+  // Pre-Purchase Inspection booking ($199 flat, PPI-offering workshops only)
+  const [ppiOpen, setPpiOpen] = useState(false);
+  const [ppiRego, setPpiRego] = useState('');
+  const [ppiMechId, setPpiMechId] = useState('');
+  const [ppiBusy, setPpiBusy] = useState(false);
+  const ppiWorkshops = realMechanics.filter(m => (m as any).offersPpi);
+  const bookPPI = async () => {
+    const mech = realMechanics.find(m => m.id === ppiMechId);
+    if (!ppiRego.trim() || !mech) return;
+    setPpiBusy(true);
+    try {
+      const bookingId = (crypto as any).randomUUID ? crypto.randomUUID() : `ppi_${Date.now()}`;
+      const res = await fetch('/api/stripe/create-payment', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          amount: 199, bookingId, customerEmail: customerEmail || user?.email,
+          description: 'Pre-Purchase Inspection',
+          bookingData: {
+            id: bookingId, mechanicId: mech.id, vehicleId: ppiRego.toUpperCase().trim(),
+            serviceIds: ['ppi'], totalPrice: 199, paymentMethod: 'Card',
+            customerName: userProfile?.name || undefined, email: customerEmail || user?.email || undefined,
+            description: 'Pre-Purchase Inspection',
+          },
+        }),
+      });
+      const session = await res.json();
+      if (session?.url) { window.location.href = session.url; return; }
+      alert('Could not open checkout. Please try again.');
+    } catch { alert('Could not open checkout.'); }
+    finally { setPpiBusy(false); }
+  };
   const [reschedJob, setReschedJob] = useState<string | null>(null);
   const [reschedDate, setReschedDate] = useState('');
   const [reschedTime, setReschedTime] = useState('09:00');
@@ -1409,6 +1995,7 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
         model: vehicle.model,
         year: vehicle.year,
         mileage: vehicle.mileage,
+        ownerId: customerOwnerId,
       }),
     })
       .then(async r => { const d = await r.json(); if (!r.ok) throw new Error(d?.error); return d; })
@@ -1459,30 +2046,51 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
         const d = await r.json();
         if (cancelled || !r.ok) return;
         const imported = (d.imported || []).map((h: any) => ({
+          id: h.id || undefined,
           date: h.service_date || '', service: h.work_done || 'Service', provider: h.provider || 'Customer record',
           mileage: h.mileage != null ? String(h.mileage) : '', price: h.price || '', notes: h.notes || '',
+          source_type: h.source_type || 'customer_manual',
         }));
         const jobs = (d.jobs || []).filter((j: any) => j.status === 'completed').map((j: any) => ({
+          id: j.id || undefined,
           date: j.completed_at || j.date || '',
-          service: (j.service_ids || []).map((id: string) => SERVICES.find(s => s.id === id)?.name || id).join(', ') || 'Torqued service',
-          provider: 'Torqued', mileage: j.mileage_out != null ? String(j.mileage_out) : '', price: '', notes: '',
+          // Describe the work: standard services, else summarise the quote items.
+          service: (j.service_ids || []).map((id: string) => SERVICES.find(s => s.id === id)?.name || id).join(', ')
+            || (j.quote_items ? summariseQuote(j.quote_items, false) : 'Torqued service'),
+          provider: j.mechanic_name || 'Torqued workshop',
+          mileage: j.mileage_out != null ? String(j.mileage_out) : '',
+          price: j.total_price != null ? String(j.total_price) : '',
+          notes: '',
+          source_type: 'torqued_job',
         }));
-        if (imported.length || jobs.length) setManualHistory([...imported, ...jobs]);
+        // Newest first, by service/completed date.
+        const merged = [...imported, ...jobs].sort((a, b) => {
+          const ta = new Date(a.date).getTime() || 0;
+          const tb = new Date(b.date).getTime() || 0;
+          return tb - ta;
+        });
+        if (merged.length) setManualHistory(merged);
       } catch {}
     })();
     return () => { cancelled = true; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [vehicle?.rego]);
 
-  // Summarise long work descriptions into a short headline ("Cambelt & Water Pump Replaced, Oil & Filter Service").
+  // Summarise long work descriptions into a short 5-word headline, cached in vehicle_history.ai_summary.
   useEffect(() => {
+    // Pre-populate from DB-saved summaries first (zero API calls for already-summarised entries)
+    const preloaded: Record<string, string> = {};
+    manualHistory.forEach(h => { if (h.ai_summary && h.service) preloaded[h.service] = h.ai_summary; });
+    if (Object.keys(preloaded).length > 0) setHistSummaries(prev => ({ ...preloaded, ...prev }));
+
+    // Only call AI for long entries without a saved summary
     manualHistory.forEach(async (h) => {
       const key = h.service;
-      if (!key || key.length < 40 || histSummaries[key]) return;
+      if (!key || key.length < 40 || h.ai_summary || histSummaries[key]) return;
       try {
         const r = await fetch('/api/ai/summarize', {
           method: 'POST', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ text: key, style: 'title' }),
+          body: JSON.stringify({ text: key, style: 'title', historyId: h.id }),
         });
         const d = await r.json();
         if (r.ok && d.summary) setHistSummaries(prev => ({ ...prev, [key]: d.summary }));
@@ -1699,10 +2307,10 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
         }
         setShowNewCustomerForm(true);
       } else {
-        // Returning customer — magic link emailed
+        // Returning customer — 6-digit code emailed
         setReturningCustomerName(data.customerName);
-        setMagicSentTo(data.maskedEmail || 'your registered email');
-        setMagicFallbackLink(data.fallbackLink || null);
+        setOtpSentEmail(data.maskedEmail || 'your registered email');
+        setShowOTPModal(true);
       }
     } catch (err) {
       setPlateMatchError('Could not connect. Please try again.');
@@ -1720,7 +2328,7 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
         const res = await fetch('/api/ai/fault-code', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ code: faultCode, make: vehicle?.make, model: vehicle?.model, year: vehicle?.year, mileage }),
+          body: JSON.stringify({ code: faultCode, make: vehicle?.make, model: vehicle?.model, year: vehicle?.year, mileage, ownerId: customerOwnerId }),
         });
         const data = await res.json();
         setAiTranslation(data.translation || '');
@@ -1732,9 +2340,15 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
   }, [faultCode, vehicle]);
 
   const toggleService = (id: string) => {
-    setSelectedServices(prev => 
-      prev.includes(id) ? prev.filter(s => s !== id) : [...prev, id]
-    );
+    setSelectedServices(prev => {
+      // Water pump and thermostat housing are always a combined job
+      if (id === 'water_pump' || id === 'thermostat_housing') {
+        const bundle = ['water_pump', 'thermostat_housing'];
+        const removing = bundle.some(b => prev.includes(b));
+        return removing ? prev.filter(s => !bundle.includes(s)) : [...prev, ...bundle.filter(b => !prev.includes(b))];
+      }
+      return prev.includes(id) ? prev.filter(s => s !== id) : [...prev, id];
+    });
   };
 
   // Typical job durations (minutes) per service
@@ -1742,9 +2356,10 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
     oil: 45, wof: 60, full: 180, brakes_front_pads: 90, brakes_front_rotors: 120,
     brakes_rear_pads: 90, brakes_rear_rotors: 120, timing: 480, transmission: 240,
     battery: 30, diag_inspection: 60, spark_plugs: 90, cabin_filter: 20, brake_fluid: 60,
+    coolant_flush: 60, ignition_coils: 120, water_pump: 150, thermostat_housing: 120,
   };
   // Services that usually need parts ordered in (incur the workshop's parts lead time)
-  const NEEDS_PARTS = new Set(['timing', 'transmission', 'brakes_front_rotors', 'brakes_rear_rotors', 'spark_plugs']);
+  const NEEDS_PARTS = new Set(['timing', 'transmission', 'brakes_front_rotors', 'brakes_rear_rotors', 'spark_plugs', 'ignition_coils', 'water_pump', 'thermostat_housing']);
 
   const addBusinessDays = (from: Date, days: number) => {
     const d = new Date(from);
@@ -1768,11 +2383,13 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
     setSelectedDate(earliestDrop.toISOString().slice(0, 10));
 
     const [hour, min] = selectedTime.split(':').map(Number);
-    if (effectiveHours > 7) {
-      // Multi-day job → ready next business day 5pm
+    // Turnaround = 2× the hands-on job time (e.g. a 2-hour job dropped at 9am → ready ~1pm).
+    const turnaround = effectiveHours * 2;
+    if (turnaround >= 8) {
+      // Full-day+ job → ready next business day 5pm
       setEstimatedReadyTime('Next day, 5:00 PM');
     } else {
-      let readyHour = hour + Math.ceil(effectiveHours);
+      let readyHour = hour + Math.ceil(turnaround);
       if (readyHour >= 17) { setEstimatedReadyTime('Same day, 5:00 PM'); return; }
       const ampm = readyHour >= 12 ? 'PM' : 'AM';
       if (readyHour > 12) readyHour -= 12;
@@ -1780,48 +2397,56 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
     }
   }, [selectedServices, selectedTime, selectedMechanic]);
 
-  const handleMockPaymentSuccess = async () => {
-    if (!stripeInputEmail || !stripeInputEmail.includes('@')) {
-      setCardError('Please enter a valid email address to complete the reservation.');
-      return;
-    }
-    setCardError('');
-    setStripeFormStep('processing');
-    setStripeLoadingMessage('Running sandbox booking engine & state update...');
-    
-    setTimeout(async () => {
-      const pending = localStorage.getItem('pending_booking');
-      if (pending) {
-        try {
-          const booking = JSON.parse(pending);
-          booking.paymentStatus = 'confirmed';
-          booking.status = 'booked';
-          booking.email = stripeInputEmail;
-          booking.phone = stripeInputPhone;
-          booking.customerName = cardName || userProfile?.name || 'Torqued Owner';
-          
-          if (updateProfile) {
-            updateProfile({ 
-              email: stripeInputEmail,
-              phone: stripeInputPhone,
-              name: cardName || userProfile?.name || ''
-            });
-          }
-          
-          setActiveJobs(prev => [...prev, booking]);
-          setLatestBooking(booking);
-          await triggerEmailConfirmation(booking);
-        } catch (err) {
-          console.error(err);
-        }
-      }
-      setStripeFormStep('success');
-    }, 2000);
-  };
+  // Fetch the workshop's genuine next-available drop-off dates whenever the chosen
+  // mechanic or services change, then default the selection to the soonest one.
+  useEffect(() => {
+    const mechId = selectedMechanic?.id;
+    if (!mechId) { setAvailableDates([]); return; }
+    const needsParts = selectedServices.some(id => NEEDS_PARTS.has(id));
+    let cancelled = false;
+    setAvailabilityLoading(true);
+    fetch(`/api/mechanic/next-available?mechanicId=${encodeURIComponent(mechId)}&needsParts=${needsParts ? 1 : 0}&count=3`)
+      .then(r => r.json())
+      .then(d => {
+        if (cancelled) return;
+        const dates = Array.isArray(d.dates) ? d.dates : [];
+        setAvailableDates(dates);
+        if (dates[0]?.date) setSelectedDate(dates[0].date);
+      })
+      .catch(() => { if (!cancelled) setAvailableDates([]); })
+      .finally(() => { if (!cancelled) setAvailabilityLoading(false); });
+    return () => { cancelled = true; };
+  }, [selectedMechanic?.id, selectedServices]);
 
   const handleBooking = async () => {
     if (!selectedMechanic || !paymentMethod) return;
     setIsBookingLoading(true);
+
+    // Auto-save separate EV quote job when mixed mode (pre-qualified + EV concern)
+    if (isEV && evQuoteConcern.trim()) {
+      const evQuoteId = (crypto as any).randomUUID ? crypto.randomUUID() : `ev_${Date.now()}`;
+      fetch('/api/bookings/persist', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          bookingData: {
+            id: evQuoteId,
+            mechanicId: selectedMechanic.id,
+            vehicleId: vehicle?.rego || rego,
+            serviceIds: ['diag_inspection'],
+            totalPrice: 0,
+            paymentMethod: 'TBD',
+            paymentStatus: 'pending',
+            status: 'pending',
+            date: null,
+            customerName: userName || '',
+            email: customerEmail || '',
+            description: `[EV Quote Request] ${evQuoteConcern.trim()}`,
+          },
+          userId: user?.id ?? customerOwnerId ?? null,
+        }),
+      }).catch(e => console.error('Failed to save EV quote alongside booking:', e));
+      setEvQuoteConcern('');
+    }
 
     const isFinanceNow = paymentMethod === 'Finance Now';
     const isImmediatePayment = ['Afterpay', 'Klarna', 'Latitude', 'Q Card', 'Credit / Debit', 'Credit or Debit Card'].includes(paymentMethod);
@@ -1838,10 +2463,13 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
       vehicleId: vehicle?.id || 'v1',
       serviceIds: selectedServices,
       mechanicId: selectedMechanic.id,
+      mechanicName: selectedMechanic.name,
+      mechanicAddress: (selectedMechanic as any).address || undefined,
+      mechanicPhone: (selectedMechanic as any).phone || undefined,
       status: (isFinanceNow || mbiStatus === 'not-claimed') ? 'pending' : 'booked',
       paymentStatus: isClaimApproved ? 'confirmed' : (isFinanceNow || mbiStatus === 'not-claimed' ? 'awaiting_approval' : 'confirmed'),
       paymentMethod: mbiStatus === 'not-claimed' ? 'Provident Insurance' : paymentMethod,
-      date: selectedDate,
+      date: selectedDate ? `${selectedDate}T${selectedTime || '09:00'}` : undefined,
       totalPrice: finalCalculatedPrice,
       depositPaid: undefined,
       description: diagnosticComment?.trim() || faultCode || undefined,
@@ -1876,23 +2504,7 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
       }
 
       localStorage.setItem('pending_booking', JSON.stringify(newJob));
-      setStripeFormStep('input');
-      const initialEmail = userProfile?.email || user?.email || '';
-      setStripeInputEmail(initialEmail && initialEmail !== 'customer@torqued.nz' ? initialEmail : '');
-      setStripeInputPhone(userProfile?.phone || '');
-      setCardNum('');
-      setCardExp('');
-      setCardCvc('');
-      setCardName(userProfile?.name || '');
-      setCardPostalCode('');
-      setCardError('');
-      
-      setIsStripeSessionLoading(true);
-      setStripeSessionError(null);
-      setStripeIsMock(false);
-      setShowStripeModal(true);
-      setIsBookingLoading(false);
-      
+
       try {
         const response = await fetch('/api/stripe/create-payment', {
           method: 'POST',
@@ -1906,36 +2518,35 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
             userId: user?.id ?? customerOwnerId ?? null,
           })
         });
-        
+
         if (!response.ok) {
           let errorMsg = `HTTP Error Status ${response.status}`;
           try {
             const errData = await response.json();
-            if (errData && errData.error) {
-              errorMsg = errData.error;
-            }
+            if (errData && errData.error) { errorMsg = errData.error; }
           } catch (e) {}
           throw new Error(errorMsg);
         }
-        
+
         const session = await response.json();
-        if (session && session.url) {
-          if (!session.isMock) {
-            // Real Stripe — redirect straight to hosted checkout, no modal needed
-            window.location.href = session.url;
-            return;
-          }
-          setStripeCheckoutUrl(session.url);
-          setStripeIsMock(true);
-        } else {
-          throw new Error(session?.error || 'Unable to retrieve Stripe Checkout Session');
+        if (session && session.url && !session.isMock) {
+          // Real Stripe — redirect straight to hosted checkout
+          window.location.href = session.url;
+          return;
         }
+
+        // No Stripe keys configured (dev / not-yet-live) — confirm the booking directly.
+        newJob.paymentStatus = 'confirmed';
+        newJob.status = 'booked';
+        setActiveJobs(prev => [...prev, newJob]);
+        setLatestBooking(newJob);
+        await triggerEmailConfirmation(newJob);
+        setIsBookingLoading(false);
+        setStep(7);
       } catch (err) {
         console.error('Error fetching checkout session:', err);
-        setStripeSessionError(err instanceof Error ? err.message : 'Unknown gateway connection error');
-        setStripeCheckoutUrl(null);
-      } finally {
-        setIsStripeSessionLoading(false);
+        setIsBookingLoading(false);
+        alert(err instanceof Error ? err.message : 'Could not start payment. Please try again.');
       }
 
       return;
@@ -1985,6 +2596,50 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
               <h2 className="text-3xl sm:text-4xl md:text-5xl tracking-tighter">
                 Step 1: Enter Your Car
               </h2>
+
+              {/* Rego input — always shown first, auto-filled when coming from garage */}
+              {!vehicle && (
+                <div className="flex gap-2">
+                  <div className="flex-1">
+                    <Input
+                      placeholder="ENTER NUMBER PLATE (E.G. RAH190)"
+                      value={rego}
+                      onChange={(e) => { setRego(e.target.value.toUpperCase()); setCarjamVehicle(null); setCarjamStolenWarning(false); }}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter' && rego && !isSearchingRego) {
+                          e.preventDefault();
+                          handleRegoLookup();
+                        }
+                      }}
+                      className="text-lg sm:text-2xl font-display font-bold placeholder:font-normal bg-card border-border text-foreground placeholder:text-muted focus:ring-1 focus:ring-torqued-red"
+                    />
+                  </div>
+                  <Button onClick={handleRegoLookup} disabled={isSearchingRego || !rego} className="bg-torqued-red">
+                    {isSearchingRego ? <div className="w-5 h-5 border-2 border-white/30 border-t-white rounded-full animate-spin" /> : <Search size={20} />}
+                  </Button>
+                </div>
+              )}
+
+              {carjamStolenWarning && (
+                <div className="flex items-start gap-3 p-4 rounded-2xl bg-red-500/10 border border-red-500/30">
+                  <span className="text-red-500 text-lg leading-none mt-0.5">⚠️</span>
+                  <div>
+                    <p className="text-sm font-bold text-red-500">Stolen vehicle alert</p>
+                    <p className="text-xs text-muted mt-0.5">This plate (<span className="font-bold text-foreground">{rego.toUpperCase()}</span>) has been reported as stolen on the NZ Motor Vehicle Register. We cannot process a booking for this vehicle. Please contact NZ Police if you believe this is an error.</p>
+                  </div>
+                </div>
+              )}
+
+              {carjamVehicle && !vehicle && !carjamStolenWarning && (
+                <div className="flex items-start gap-3 p-3.5 rounded-2xl bg-emerald-500/10 border border-emerald-500/20">
+                  <span className="text-emerald-500 text-base leading-none mt-0.5">✓</span>
+                  <div>
+                    <p className="text-xs font-bold text-emerald-600 dark:text-emerald-400">Vehicle identified via NZ Motor Vehicle Register</p>
+                    <p className="text-xs text-muted mt-0.5">{carjamVehicle.year} {carjamVehicle.make} {carjamVehicle.model}{carjamVehicle.variant ? ` · ${carjamVehicle.variant}` : ''}{carjamVehicle.engineCc ? ` · ${(carjamVehicle.engineCc / 1000).toFixed(1)}L` : ''}</p>
+                  </div>
+                </div>
+              )}
+
               {manualHistory.length > 0 ? (
                 <div className="space-y-4">
                   <p className="text-muted">
@@ -2147,14 +2802,8 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                         <div className="flex gap-2 pt-2">
                           <Button size="sm" className="flex-1 bg-torqued-red text-white" onClick={() => {
                             if (!entryDate || !entryService) return;
-                            setManualHistory([{
-                              date: entryDate, 
-                              service: entryService, 
-                              provider: entryProvider || 'Unknown',
-                              mileage: entryMileage,
-                              price: entryPrice,
-                              notes: entryNotes
-                            }, ...manualHistory]);
+                            const newItem = { date: entryDate, service: entryService, provider: entryProvider || 'Unknown', mileage: entryMileage, price: entryPrice, notes: entryNotes };
+                            setManualHistory(prev => [...prev, newItem].sort((a, b) => parseServiceDate(b.date) - parseServiceDate(a.date)));
                             setShowHistoryEntry(false);
                             setEntryDate('');
                             setEntryService('');
@@ -2176,50 +2825,17 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
               )}
             </div>
 
-            <div className="flex gap-2">
-              <div className="flex-1">
-                <Input 
-                  placeholder="ENTER NUMBER PLATE (E.G. RAH190)" 
-                  value={rego}
-                  onChange={(e) => { setRego(e.target.value.toUpperCase()); setCarjamVehicle(null); setCarjamStolenWarning(false); }}
-                  onKeyDown={(e) => {
-                    if (e.key === 'Enter' && rego && !isSearchingRego) {
-                      e.preventDefault();
-                      handleRegoLookup();
-                    }
-                  }}
-                  className="text-lg sm:text-2xl font-display font-bold placeholder:font-normal bg-card border-border text-foreground placeholder:text-muted focus:ring-1 focus:ring-torqued-red"
-                />
-              </div>
-              <Button onClick={handleRegoLookup} disabled={isSearchingRego || !rego} className="bg-torqued-red">
-                {isSearchingRego ? <div className="w-5 h-5 border-2 border-white/30 border-t-white rounded-full animate-spin" /> : <Search size={20} />}
-              </Button>
-            </div>
-
-            {carjamStolenWarning && (
-              <div className="flex items-start gap-3 p-4 rounded-2xl bg-red-500/10 border border-red-500/30">
-                <span className="text-red-500 text-lg leading-none mt-0.5">⚠️</span>
-                <div>
-                  <p className="text-sm font-bold text-red-500">Stolen vehicle alert</p>
-                  <p className="text-xs text-muted mt-0.5">This plate (<span className="font-bold text-foreground">{rego.toUpperCase()}</span>) has been reported as stolen on the NZ Motor Vehicle Register. We cannot process a booking for this vehicle. Please contact NZ Police if you believe this is an error.</p>
-                </div>
-              </div>
-            )}
-
-            {carjamVehicle && !vehicle && !carjamStolenWarning && (
-              <div className="flex items-start gap-3 p-3.5 rounded-2xl bg-emerald-500/10 border border-emerald-500/20">
-                <span className="text-emerald-500 text-base leading-none mt-0.5">✓</span>
-                <div>
-                  <p className="text-xs font-bold text-emerald-600 dark:text-emerald-400">Vehicle identified via NZ Motor Vehicle Register</p>
-                  <p className="text-xs text-muted mt-0.5">{carjamVehicle.year} {carjamVehicle.make} {carjamVehicle.model}{carjamVehicle.variant ? ` · ${carjamVehicle.variant}` : ''}{carjamVehicle.engineCc ? ` · ${(carjamVehicle.engineCc / 1000).toFixed(1)}L` : ''}</p>
-                </div>
-              </div>
-            )}
-
             {vehicle && (
               <motion.div initial={{ opacity: 0, scale: 0.95 }} animate={{ opacity: 1, scale: 1 }}>
                 <Card className="p-3 sm:p-4 flex flex-col sm:flex-row items-center gap-4 sm:gap-6 border-border bg-card shadow-2xl">
-                  <img src={vehicle.thumbnail} alt="Vehicle" className="w-16 h-16 sm:w-24 sm:h-24 rounded-xl object-cover" />
+                  {(() => {
+                    const logo = getCarBrandLogo(vehicle.make);
+                    return vehicle.thumbnail
+                      ? <img src={vehicle.thumbnail} alt="Vehicle" className="w-16 h-16 sm:w-24 sm:h-24 rounded-xl object-cover" onError={e => { (e.target as HTMLImageElement).style.display = 'none'; }} />
+                      : logo
+                        ? <div className="w-16 h-16 sm:w-24 sm:h-24 rounded-xl bg-card border border-border flex items-center justify-center p-2 shrink-0"><img src={logo} alt={vehicle.make} className="w-full h-full object-contain" /></div>
+                        : <div className="w-16 h-16 sm:w-24 sm:h-24 rounded-xl bg-card border border-border flex items-center justify-center shrink-0"><Car size={28} className="text-muted" /></div>;
+                  })()}
                   <div className="flex-1 text-center sm:text-left">
                     <div className="torqued-badge mb-1">{vehicle.rego}</div>
                     <h3 className="text-xl sm:text-2xl">{vehicle.year} {vehicle.make} {vehicle.model}</h3>
@@ -2248,7 +2864,30 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                           return (
                             <button
                               key={i}
-                              onClick={() => { setVehicleModelSpec(opt); setShowSubmodelPicker(false); }}
+                              onClick={() => {
+                                setVehicleModelSpec(opt);
+                                setShowSubmodelPicker(false);
+                                // Re-fetch fleet prices using the confirmed vehicle_models row
+                                if (opt.id) {
+                                  const regoParam = vehicle?.rego || rego;
+                                  fetch(`/api/fleet-prices?rego=${encodeURIComponent(regoParam)}&vehicleModelId=${encodeURIComponent(opt.id)}`)
+                                    .then(r => r.json())
+                                    .then((fp: any) => {
+                                      if (fp?.vehicleId) setFleetVehicleId(fp.vehicleId);
+                                      if (fp?.timingDrive) setVehicleTimingDrive(fp.timingDrive as 'belt' | 'chain' | 'na');
+                                      setWaterPumpRecommended(!!fp?.waterPumpRecommended);
+                                      setWaterPump(fp?.waterPump ?? null);
+                                      if (fp?.shopFee) setFleetShopFee(fp.shopFee);
+                                      if (fp?.prices && Object.keys(fp.prices).length > 0) {
+                                        const highs: Record<string, number> = {};
+                                        for (const [svcId, p] of Object.entries(fp.prices as Record<string, any>)) highs[svcId] = (p as any).high;
+                                        setVehiclePrices(prev => ({ ...prev, ...highs }));
+                                        setFleetPricesRaw(fp.prices);
+                                        if (fp?.waterPumpInDB !== undefined) setWaterPumpInDB(!!fp.waterPumpInDB);
+                                      }
+                                    }).catch(() => {});
+                                }
+                              }}
                               className="w-full text-left px-3 py-2.5 rounded-xl border border-border hover:border-torqued-red/50 bg-background hover:bg-card transition-all space-y-0.5"
                             >
                               <div className="flex items-center justify-between gap-2">
@@ -2421,12 +3060,8 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                                   </div>
                                   <Button size="sm" fullWidth onClick={() => {
                                     if (!entryDate || !entryService) return;
-                                    setManualHistory([...manualHistory, {
-                                      date: entryDate, 
-                                      service: entryService, 
-                                      provider: entryProvider || 'Unknown',
-                                      mileage: entryMileage
-                                    }]);
+                                    const newItem = { date: entryDate, service: entryService, provider: entryProvider || 'Unknown', mileage: entryMileage };
+                                    setManualHistory(prev => [...prev, newItem].sort((a, b) => parseServiceDate(b.date) - parseServiceDate(a.date)));
                                     setShowHistoryEntry(false);
                                     setEntryDate('');
                                     setEntryService('');
@@ -2440,6 +3075,65 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                         </motion.div>
                       )}
                     </div>
+
+                  {/* AI Recommendations inline — shown when health insights are available */}
+                  {(healthInsights.length > 0 || healthLoading) && garageUnlocked && (
+                    <div className="space-y-3 pt-4 border-t border-border">
+                      <div className="flex items-center justify-between gap-2">
+                        <p className="text-xs font-black uppercase tracking-widest text-muted">AI Recommendations</p>
+                        <button
+                          onClick={() => setShowHistorySheet(true)}
+                          className="text-xs text-torqued-red font-bold hover:underline"
+                        >Review Service History →</button>
+                      </div>
+                      {healthLoading ? (
+                        <div className="space-y-2">
+                          {[...Array(3)].map((_, i) => <div key={i} className="h-14 rounded-xl bg-background animate-pulse" />)}
+                        </div>
+                      ) : (
+                        <div className="space-y-2">
+                          {healthInsights.filter(ins => ins.severity !== 'good').map((insight, i) => {
+                            const sid = insightToServiceId(insight.title);
+                            const isAdded = sid ? selectedServices.includes(sid) : false;
+                            return (
+                              <div key={i} className={cn(
+                                "flex items-start gap-3 p-3 rounded-xl border",
+                                insight.severity === 'overdue' ? "border-torqued-red/30 bg-torqued-red/5" : "border-amber-500/20 bg-amber-500/5"
+                              )}>
+                                <div className="flex-1 min-w-0">
+                                  <p className={cn("text-xs font-bold", insight.severity === 'overdue' ? "text-torqued-red" : "text-amber-400")}>{insight.title}</p>
+                                  <p className="text-[10px] text-muted mt-0.5 leading-snug">{insight.detail}</p>
+                                </div>
+                                {sid && (
+                                  <button
+                                    onClick={() => {
+                                      setSelectedServices(prev => isAdded ? prev.filter(s => s !== sid) : [...prev, sid]);
+                                    }}
+                                    className={cn(
+                                      "shrink-0 px-2.5 py-1 rounded-lg text-[10px] font-black uppercase tracking-widest transition-all",
+                                      isAdded
+                                        ? "bg-emerald-500/20 text-emerald-400"
+                                        : "bg-torqued-red text-white hover:bg-red-600"
+                                    )}
+                                  >
+                                    {isAdded ? '✓ Added' : '+ Add'}
+                                  </button>
+                                )}
+                              </div>
+                            );
+                          })}
+                          {selectedServices.length > 0 && (
+                            <button
+                              onClick={() => setStep(2)}
+                              className="w-full mt-1 py-2 text-xs font-black uppercase tracking-widest text-torqued-red border border-torqued-red/40 rounded-xl hover:bg-torqued-red/5 transition-all"
+                            >
+                              Review Work Order ({selectedServices.length} item{selectedServices.length !== 1 ? 's' : ''}) →
+                            </button>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  )}
 
                   <Button fullWidth onClick={() => setStep(2)} disabled={!mileage} className="bg-torqued-red">Continue to Services →</Button>
                 </div>
@@ -2468,12 +3162,87 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
               </div>
             </div>
 
+            {/* Submodel confirmation — shown when multiple variants exist and user hasn't picked one */}
+            {vehicleModelOptions.length > 1 && !vehicleModelSpec && (
+              <div className="p-4 rounded-2xl border border-amber-500/30 bg-amber-500/5 space-y-3">
+                <div className="flex items-start gap-3">
+                  <span className="text-amber-500 text-lg leading-none mt-0.5">⚠</span>
+                  <div>
+                    <p className="text-sm font-bold text-foreground">Confirm your exact variant for accurate pricing</p>
+                    <p className="text-xs text-muted mt-0.5">We found multiple engine/transmission options for your vehicle. Prices for parts like oil and transmission fluid differ by spec.</p>
+                  </div>
+                </div>
+                <div className="space-y-1.5">
+                  {vehicleModelOptions.map((opt: any, i: number) => {
+                    const variant = [opt.submodel, opt.engine_code].filter(Boolean).join(' · ') || opt.model;
+                    const specs = [
+                      opt.engine_cc ? `${(opt.engine_cc / 1000).toFixed(1)}L` : null,
+                      opt.fuel, opt.transmission,
+                      opt.timing_drive ? `Timing ${opt.timing_drive}` : null,
+                    ].filter(Boolean).join(' · ');
+                    const years = opt.year_from ? `${opt.year_from}–${opt.year_to || 'present'}` : null;
+                    return (
+                      <button key={i} onClick={() => {
+                        setVehicleModelSpec(opt);
+                        const regoParam = vehicle?.rego || rego;
+                        if (opt.id) {
+                          fetch(`/api/fleet-prices?rego=${encodeURIComponent(regoParam)}&vehicleModelId=${encodeURIComponent(opt.id)}`)
+                            .then(r => r.json())
+                            .then((fp: any) => {
+                              if (fp?.vehicleId) setFleetVehicleId(fp.vehicleId);
+                              if (fp?.timingDrive) setVehicleTimingDrive(fp.timingDrive as 'belt' | 'chain' | 'na');
+                              setWaterPumpRecommended(!!fp?.waterPumpRecommended);
+                              setWaterPump(fp?.waterPump ?? null);
+                              if (fp?.shopFee) setFleetShopFee(fp.shopFee);
+                              if (fp?.prices && Object.keys(fp.prices).length > 0) {
+                                const highs: Record<string, number> = {};
+                                for (const [svcId, p] of Object.entries(fp.prices as Record<string, any>)) highs[svcId] = (p as any).high;
+                                setVehiclePrices(prev => ({ ...prev, ...highs }));
+                                setFleetPricesRaw(fp.prices);
+                                if (fp?.waterPumpInDB !== undefined) setWaterPumpInDB(!!fp.waterPumpInDB);
+                              }
+                            }).catch(() => {});
+                        }
+                      }}
+                        className="w-full text-left px-3 py-2.5 rounded-xl border border-border hover:border-torqued-red/50 bg-background hover:bg-card transition-all space-y-0.5"
+                      >
+                        <div className="flex items-center justify-between gap-2">
+                          <span className="text-xs font-bold text-foreground">{variant}</span>
+                          {years && <span className="text-[10px] text-muted shrink-0">{years}</span>}
+                        </div>
+                        {specs && <p className="text-[10px] text-muted">{specs}</p>}
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
+            {vehicleModelSpec && (
+              <div className="flex items-center gap-2 p-3 rounded-xl bg-emerald-500/10 border border-emerald-500/20 text-xs">
+                <span className="text-emerald-500 font-bold">✓</span>
+                <span className="text-foreground font-bold">
+                  {[vehicleModelSpec.submodel, vehicleModelSpec.engine_code].filter(Boolean).join(' · ') || vehicle?.variant || 'Variant confirmed'}
+                  {vehicleModelSpec.engine_cc ? ` · ${(vehicleModelSpec.engine_cc / 1000).toFixed(1)}L` : ''}
+                  {vehicleModelSpec.transmission ? ` · ${vehicleModelSpec.transmission}` : ''}
+                </span>
+                <button onClick={() => { setVehicleModelSpec(null); setShowSubmodelPicker(true); }} className="ml-auto text-muted hover:text-foreground underline text-[10px]">change</button>
+              </div>
+            )}
+
             {quotePath === 'service' ? (
               <div className="space-y-6">
                 <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-3">
-                  {SERVICES.map(service => {
+                  {SERVICES.filter(service => {
+                    if (service.id === 'thermostat_housing') return false;
+                    if (service.id === 'water_pump' && !waterPumpInDB) return false;
+                    if (isEV) {
+                      const EV_OK = new Set(['wof','brakes_front_pads','brakes_front_rotors','brakes_rear_pads','brakes_rear_rotors','diag_inspection','cabin_filter','brake_fluid','ppi']);
+                      return EV_OK.has(service.id);
+                    }
+                    return true;
+                  }).map(service => {
                     const fp = fleetPricesRaw[service.id];
-                    const selected = selectedServices.includes(service.id);
+                    const selected = selectedServices.includes(service.id) || (service.id === 'water_pump' && selectedServices.includes('thermostat_housing'));
                     return (
                       <button
                         key={service.id}
@@ -2490,16 +3259,59 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                           <span className="text-xs font-bold uppercase tracking-tight leading-tight">{serviceDisplayName(service.id, service.name)}</span>
                           {fp && <span className="text-[10px] text-muted">${fp.high}</span>}
                         </div>
-                        {selected && fp && (fp.partsLow > 0 || fp.labourLow > 0) && (
-                          <div className="w-full border-t border-border pt-2 space-y-0.5">
-                            {fp.partsLow > 0 && <div className="flex justify-between text-[10px] text-muted"><span>Parts</span><span>${fp.partsHigh}</span></div>}
-                            {fp.labourLow > 0 && <div className="flex justify-between text-[10px] text-muted"><span>Labour{fp.labourHours ? ` (${fp.labourHours} hrs)` : ''}</span><span>${fp.labourLow}</span></div>}
-                          </div>
-                        )}
                       </button>
                     );
                   })}
+                  {/* Job not listed here */}
+                  <button
+                    onClick={() => setShowUnlistedQuote(true)}
+                    className={cn(
+                      "p-4 rounded-xl border text-left transition-all flex flex-col gap-2",
+                      showUnlistedQuote
+                        ? "border-torqued-red bg-torqued-red/10"
+                        : "border-dashed border-border bg-card hover:border-torqued-red/40 text-foreground"
+                    )}
+                  >
+                    <div className="flex flex-col items-center gap-1 w-full text-center">
+                      <span className="text-2xl">💬</span>
+                      <span className="text-xs font-bold uppercase tracking-tight leading-tight text-muted">Job Not Listed Here</span>
+                      <span className="text-[10px] text-muted/70">Know what you need?</span>
+                    </div>
+                  </button>
                 </div>
+
+                {/* Unlisted job request panel */}
+                {showUnlistedQuote && (
+                  <motion.div
+                    initial={{ opacity: 0, y: -8 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    className="p-4 bg-card border border-border rounded-2xl space-y-3"
+                  >
+                    <div className="flex items-start justify-between gap-2">
+                      <div>
+                        <p className="text-sm font-bold">Request a Custom Quote</p>
+                        <p className="text-xs text-muted mt-0.5">Describe the work you need — your chosen mechanic will send you a price. No inspection fee.</p>
+                      </div>
+                      <button onClick={() => setShowUnlistedQuote(false)} className="p-1 hover:bg-background rounded text-muted hover:text-foreground transition-all"><X size={14} /></button>
+                    </div>
+                    <EVQuoteRequest
+                      vehicle={vehicle}
+                      rego={rego}
+                      realMechanics={realMechanics}
+                      customerEmail={customerEmail}
+                      customerOwnerId={customerOwnerId}
+                      userName={userName}
+                      customerCoords={customerCoords}
+                      requestLocation={requestLocation}
+                      locationAsked={locationAsked}
+                      onSubmitted={(job) => {
+                        setActiveJobs(prev => [job, ...prev]);
+                        setShowUnlistedQuote(false);
+                        setView('dashboard');
+                      }}
+                    />
+                  </motion.div>
+                )}
 
                 {/* Service comparison card — shown when Standard Service or Full Service is selected */}
                 {(selectedServices.includes('oil') || selectedServices.includes('full')) && (
@@ -2531,13 +3343,16 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                   <div className="p-4 bg-orange-500/10 border border-orange-500/30 rounded-xl space-y-3">
                     <div className="flex items-start gap-3">
                       <AlertTriangle size={16} className="text-orange-400 mt-0.5 shrink-0" />
-                      <div className="flex-1 space-y-1">
-                        <p className="text-sm font-bold text-orange-500">Water Pump strongly recommended</p>
-                        <p className="text-[11px] text-muted">On this engine the water pump is belt-driven. Replacing both together avoids a second belt removal and saves significant labour cost later.</p>
+                      <div className="flex-1 space-y-2">
+                        <p className="text-sm font-bold text-orange-500">Water Pump & Thermostat Housing strongly recommended</p>
+                        <p className="text-[11px] text-muted">On this engine the water pump is belt-driven and the thermostat housing is replaced at the same time. Doing all this while the covers are off avoids a second labour charge. Includes pump, thermostat housing, auxiliary belt, and coolant refill.</p>
+                        <div className="space-y-1 text-[10px] text-muted border-t border-orange-500/20 pt-2">
+                          <div className="flex justify-between"><span>Parts (pump kit + auxiliary belt)</span><span>${waterPump.partsHigh}</span></div>
+                          {(waterPump as any).coolantHigh > 0 && <div className="flex justify-between"><span>Coolant refill</span><span>${(waterPump as any).coolantHigh}</span></div>}
+                          <div className="flex justify-between"><span>Labour (1 hr extra)</span><span>${waterPump.labourExtra}</span></div>
+                        </div>
                         <div className="flex justify-between items-center pt-1">
-                          <div className="text-[11px] text-muted">
-                            Parts ${waterPump.partsHigh} + ${waterPump.labourExtra} labour
-                          </div>
+                          <div className="text-[11px] font-bold text-orange-500">Add-on total: ${waterPump.high}</div>
                           <button
                             onClick={() => setAddWaterPump(v => !v)}
                             className={cn(
@@ -2555,22 +3370,38 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                   </div>
                 )}
 
-                {totalPrice > 0 && (
+                {(totalPrice > 0 || selectedServices.length > 0) && (
                   <div className="p-4 bg-card rounded-xl border border-border space-y-2">
-                    {selectedServices.map(id => {
-                      const fp = fleetPricesRaw[id];
-                      const svc = SERVICES.find(s => s.id === id);
-                      if (!fp || !svc) return null;
-                      return (
-                        <div key={id} className="flex justify-between text-xs text-muted">
-                          <span>{serviceDisplayName(id, svc.name)}</span>
-                          <span>${fp.high}</span>
-                        </div>
-                      );
-                    })}
+                    {(() => {
+                      const INDICATIVE: Record<string, number> = {
+                        oil: 180, wof: 65, full: 350, brakes_front_pads: 220, brakes_front_rotors: 580,
+                        brakes_rear_pads: 190, brakes_rear_rotors: 480, timing: 1200, transmission: 480,
+                        battery: 280, diag_inspection: 99, spark_plugs: 240, cabin_filter: 110,
+                        brake_fluid: 145, coolant_flush: 220, ignition_coils: 350, water_pump: 695,
+                        thermostat_housing: 380, alignment: 130, ac_regas: 180, wiper_blades: 60,
+                        power_steering_fluid: 120,
+                      };
+                      const hasTH = selectedServices.includes('thermostat_housing');
+                      const displayServices = selectedServices.filter(id => id !== 'thermostat_housing');
+                      return displayServices.map(id => {
+                        const fp = fleetPricesRaw[id];
+                        const svc = SERVICES.find(s => s.id === id);
+                        if (!svc) return null;
+                        const price = fp?.high ?? INDICATIVE[id];
+                        const combinedPrice = (id === 'water_pump' && hasTH)
+                          ? (fp?.high ?? INDICATIVE['water_pump']) + (fleetPricesRaw['thermostat_housing']?.high ?? INDICATIVE['thermostat_housing'])
+                          : price;
+                        return (
+                          <div key={id} className="flex justify-between text-xs text-muted">
+                            <span>{id === 'water_pump' && hasTH ? 'Water Pump & Thermostat Housing' : serviceDisplayName(id, svc.name)}</span>
+                            <span>{combinedPrice ? `$${combinedPrice}` : 'Quoted by workshop'}</span>
+                          </div>
+                        );
+                      });
+                    })()}
                     {addWaterPump && waterPump && selectedServices.includes('timing') && (
                       <div className="flex justify-between text-xs text-orange-500">
-                        <span>Water Pump</span>
+                        <span>Water Pump &amp; Thermostat Housing</span>
                         <span>${waterPump.high}</span>
                       </div>
                     )}
@@ -2578,6 +3409,46 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                       <span className="text-xs font-bold uppercase text-muted">Estimated Total</span>
                       <span className="text-xl font-bold text-torqued-red">${totalPrice}</span>
                     </div>
+                  </div>
+                )}
+                {isEV && (
+                  <div className="mt-6 space-y-4">
+                    <div className="p-4 bg-amber-500/10 border border-amber-500/30 rounded-2xl space-y-2">
+                      <p className="text-sm font-bold text-amber-400">Limited Tesla & EV coverage</p>
+                      <p className="text-xs text-muted">At this stage, there are a limited number of workshops that provide service for your Tesla. We're sorry about this — we can still request a quote to your chosen mechanic, and we're actively working on expanding our Tesla & Electric Vehicle network.</p>
+                    </div>
+                    {selectedServices.length === 0 ? (
+                      // EV-only: full self-contained quote request flow (mechanic picker + submit)
+                      <EVQuoteRequest
+                        vehicle={vehicle}
+                        rego={rego}
+                        realMechanics={realMechanics}
+                        customerEmail={customerEmail}
+                        customerOwnerId={customerOwnerId}
+                        userName={userName}
+                        customerCoords={customerCoords}
+                        requestLocation={requestLocation}
+                        locationAsked={locationAsked}
+                        onSubmitted={(job) => {
+                          setActiveJobs(prev => [job, ...prev]);
+                          setView('dashboard');
+                        }}
+                      />
+                    ) : (
+                      // Mixed mode: pre-qualified services selected — collect concern text only.
+                      // Auto-submitted as a separate quote job alongside the standard booking.
+                      <div className="p-4 bg-card border border-border rounded-xl space-y-2">
+                        <p className="text-xs font-bold uppercase tracking-wider text-muted">Anything else to quote? <span className="normal-case text-muted/60 font-normal">(optional)</span></p>
+                        <p className="text-[11px] text-muted">We'll send a separate quote request to your chosen workshop for any additional EV work — no extra steps needed.</p>
+                        <textarea
+                          value={evQuoteConcern}
+                          onChange={e => setEvQuoteConcern(e.target.value)}
+                          placeholder="e.g. Annual service, battery health check, software update…"
+                          rows={3}
+                          className="w-full bg-background border border-border rounded-xl px-3 py-2.5 text-sm text-foreground placeholder:text-muted outline-none focus:border-torqued-red resize-none transition-all"
+                        />
+                      </div>
+                    )}
                   </div>
                 )}
                 {/* Something else — service search */}
@@ -2616,69 +3487,88 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                       {customSearchLoading ? '…' : 'Search'}
                     </button>
                   </div>
-                  {customSearchDone && customSearchResults.length === 0 && (
+                  {customSearchDone && customSearchResults.length === 0 && customServiceQuery.trim() && (
                     <div className="space-y-2">
-                      <p className="text-xs text-muted">No pricing found for that service.</p>
+                      <p className="text-xs text-muted">No fixed pricing for "{customServiceQuery.trim()}" — add it and your workshop will quote it.</p>
                       <button
                         onClick={() => {
-                          toggleService('diag_inspection');
-                          if (customServiceQuery.trim()) setDiagnosticComment(prev => `Customer query: ${customServiceQuery.trim()}${prev ? '\n' + prev : ''}`);
+                          const q = customServiceQuery.trim();
+                          if (!q) return;
+                          if (!selectedServices.includes('diag_inspection')) toggleService('diag_inspection');
+                          setDiagnosticComment(prev => prev.includes(q) ? prev : `Requested: ${q}${prev ? '\n' + prev : ''}`);
+                          setCustomServiceQuery('');
+                          setCustomSearchDone(false);
+                          setCustomSearchResults([]);
                         }}
-                        className="text-xs font-bold text-torqued-red underline"
+                        className="w-full px-4 py-2 bg-torqued-red text-white text-sm font-bold rounded-lg"
                       >
-                        Book a diagnostic inspection instead →
+                        + Add "{customServiceQuery.trim()}" to my booking
                       </button>
                     </div>
                   )}
                   {customSearchDone && customSearchResults.length > 0 && (
                     <div className="space-y-2">
-                      {customSearchResults.map(r => (
-                        <button
-                          key={r.id}
-                          onClick={() => toggleService(r.id)}
-                          className={cn(
-                            "w-full flex justify-between items-center px-3 py-2 rounded-lg text-sm border transition-all",
-                            selectedServices.includes(r.id)
-                              ? "border-torqued-red bg-torqued-red/10 text-torqued-red"
-                              : "border-border bg-card text-foreground hover:border-border/60"
-                          )}
-                        >
-                          <span className="font-medium">{r.name}</span>
-                          {r.indicativePrice > 0 && <span className="text-xs opacity-60">from ${r.indicativePrice}</span>}
-                        </button>
-                      ))}
+                      {customSearchResults.map((r, idx) => {
+                        const isSelected = selectedServices.includes(r.id);
+                        return (
+                          <button
+                            key={`${r.id}-${idx}`}
+                            type="button"
+                            onClick={() => toggleService(r.id)}
+                            className={cn(
+                              "w-full flex justify-between items-center px-3 py-2 rounded-lg text-sm border transition-all cursor-pointer",
+                              isSelected
+                                ? "border-torqued-red bg-torqued-red/10 text-torqued-red"
+                                : "border-border bg-card text-foreground hover:border-torqued-red/40 hover:bg-background"
+                            )}
+                          >
+                            <span className="font-medium">{r.name}</span>
+                            <span className="text-xs opacity-60 flex items-center gap-1.5">
+                              {isSelected && <span className="font-bold">✓ Added</span>}
+                              {!isSelected && r.indicativePrice > 0 && `from $${r.indicativePrice}`}
+                            </span>
+                          </button>
+                        );
+                      })}
                     </div>
                   )}
                 </div>
 
-                <div className="space-y-2">
-                  <label className="text-xs font-bold uppercase tracking-wider text-muted">
-                    {selectedServices.includes('diag_inspection') ? 'Describe your concern *' : 'Additional Notes'}
-                  </label>
-                  <textarea
-                    value={diagnosticComment}
-                    onChange={e => setDiagnosticComment(e.target.value)}
-                    className={cn(
-                      "w-full bg-background border rounded-xl px-4 py-3 outline-none focus:bg-card transition-all min-h-[100px] text-foreground",
-                      selectedServices.includes('diag_inspection') && !diagnosticComment.trim()
-                        ? "border-torqued-red/60 focus:border-torqued-red"
-                        : "border-border focus:border-torqued-red/30"
+                {!(isEV && selectedServices.length === 0) && (
+                  <div className="space-y-2">
+                    <label className="text-xs font-bold uppercase tracking-wider text-muted">
+                      {selectedServices.includes('diag_inspection') ? 'Describe your concern *' : 'Additional Notes'}
+                    </label>
+                    <textarea
+                      value={diagnosticComment}
+                      onChange={e => setDiagnosticComment(e.target.value)}
+                      className={cn(
+                        "w-full bg-background border rounded-xl px-4 py-3 outline-none focus:bg-card transition-all min-h-[100px] text-foreground",
+                        selectedServices.includes('diag_inspection') && !diagnosticComment.trim()
+                          ? "border-torqued-red/60 focus:border-torqued-red"
+                          : "border-border focus:border-torqued-red/30"
+                      )}
+                      placeholder={selectedServices.includes('diag_inspection')
+                        ? `Describe your concern about your ${[vehicle?.make, vehicle?.model].filter(Boolean).join(' ') || 'vehicle'} here`
+                        : 'Anything else we should know?'}
+                    />
+                    {selectedServices.includes('diag_inspection') && !diagnosticComment.trim() && (
+                      <p className="text-[10px] text-torqued-red">Required for diagnostic bookings — your mechanic reviews this before the inspection.</p>
                     )}
-                    placeholder={selectedServices.includes('diag_inspection')
-                      ? `Describe your concern about your ${[vehicle?.make, vehicle?.model].filter(Boolean).join(' ') || 'vehicle'} here`
-                      : 'Anything else we should know?'}
-                  />
-                  {selectedServices.includes('diag_inspection') && !diagnosticComment.trim() && (
-                    <p className="text-[10px] text-torqued-red">Required for diagnostic bookings — your mechanic reviews this before the inspection.</p>
-                  )}
-                </div>
-                <div className="flex gap-4">
-                  <Button variant="outline" onClick={() => setStep(1)}>Back</Button>
-                  <Button className="flex-1 bg-torqued-red" onClick={() => { lookupFleetQuote(); setStep(3); }}
-                    disabled={selectedServices.length === 0 || (selectedServices.includes('diag_inspection') && !diagnosticComment.trim())}>
-                    Continue →
-                  </Button>
-                </div>
+                  </div>
+                )}
+                {!(isEV && selectedServices.length === 0) && (
+                  <div className="flex gap-4">
+                    <Button variant="outline" onClick={() => setStep(1)}>Back</Button>
+                    <Button className="flex-1 bg-torqued-red" onClick={() => { lookupFleetQuote(); setStep(3); }}
+                      disabled={selectedServices.length === 0 || (selectedServices.includes('diag_inspection') && !diagnosticComment.trim())}>
+                      Continue →
+                    </Button>
+                  </div>
+                )}
+                {isEV && selectedServices.length === 0 && (
+                  <Button variant="outline" onClick={() => setStep(1)}>← Back</Button>
+                )}
               </div>
             ) : (
               <div className="space-y-6">
@@ -2876,15 +3766,18 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                   <div className="flex justify-between items-end">
                     <div className="space-y-1">
                       <p className="text-muted text-[10px] font-bold uppercase tracking-widest">Estimated Price Range</p>
-                      <h3 className="text-4xl sm:text-5xl text-torqued-red tracking-tighter font-black">${fleetQuoteRange.low} – ${fleetQuoteRange.high}</h3>
+                      <h3 className="text-4xl sm:text-5xl text-torqued-red tracking-tighter font-black">${fleetQuoteRange.low.toLocaleString()} – ${fleetQuoteRange.high.toLocaleString()}</h3>
                     </div>
                     <div className="text-right">
                       <p className="text-[10px] text-muted uppercase font-bold tracking-widest">Fleet data</p>
                     </div>
                   </div>
-                  <p className="text-xs text-muted italic border-t border-border pt-4">
-                    *Final price confirmed by your matched mechanic before work begins.
-                  </p>
+                  <div className="border-t border-border pt-4 space-y-1">
+                    {fleetShopFee && fleetShopFee > 0 && (
+                      <p className="text-[10px] text-muted">Includes ${fleetShopFee} workshop fee (freight, sundries & consumables).</p>
+                    )}
+                    <p className="text-xs text-muted italic">*Final price confirmed by your matched mechanic before work begins.</p>
+                  </div>
                 </Card>
               ) : (
                 <Card className="p-8 bg-card border-border text-foreground space-y-6 shadow-xl">
@@ -2908,9 +3801,17 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
           </motion.div>
         );
 
-      case 4:
+      case 4: {
+        // Workshops without a WoF Authority can be excluded from WoF jobs by an admin.
+        const needsWof = selectedServices.includes('wof');
+        const wofFiltered = needsWof
+          ? mechanicsByDistance.filter(m => !(m as any).wofDisabled)
+          : mechanicsByDistance;
+        const visibleMechanics = customerCoords
+          ? wofFiltered.filter(m => !m.latitude || !m.longitude || m.distance <= 100)
+          : wofFiltered;
         return (
-          <motion.div 
+          <motion.div
             initial={{ opacity: 0, x: 20 }}
             animate={{ opacity: 1, x: 0 }}
             exit={{ opacity: 0, x: -20 }}
@@ -2920,7 +3821,9 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
               <button onClick={() => setStep(3)} className="p-2 hover:bg-card rounded-full transition-all">
                 <ArrowLeft size={24} />
               </button>
-              <h2 className="text-3xl sm:text-4xl font-bold tracking-tight">3 Mechanics Found</h2>
+              <h2 className="text-3xl sm:text-4xl font-bold tracking-tight">
+                {mechanicsLoading ? 'Finding Mechanics…' : `${visibleMechanics.length} Mechanic${visibleMechanics.length !== 1 ? 's' : ''} Found`}
+              </h2>
             </div>
 
             <div className="bg-torqued-red/5 p-4 sm:p-6 rounded-2xl border border-torqued-red/10 flex items-start gap-4">
@@ -2938,32 +3841,28 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
             </div>
 
             <div className="space-y-4">
-              {!customerCoords && (
+              {mechanicsLoading && (
+                <div className="flex items-center justify-center h-32">
+                  <div className="w-8 h-8 border-4 border-border border-t-torqued-red rounded-full animate-spin" />
+                </div>
+              )}
+              {!mechanicsLoading && !customerCoords && (
                 <Card className="p-4 bg-card border-border flex items-center justify-between gap-3">
                   <div>
                     <p className="text-sm font-bold flex items-center gap-1.5"><MapPin size={14} className="text-torqued-red" /> Find workshops near you</p>
-                    <p className="text-xs text-muted mt-0.5">{locationAsked ? 'Location unavailable — showing all workshops.' : 'Allow location to see the closest mechanics within 75 km.'}</p>
+                    <p className="text-xs text-muted mt-0.5">{locationAsked ? 'Location unavailable — showing all workshops.' : 'Allow location to see the closest mechanics within 100 km.'}</p>
                   </div>
                   {!locationAsked && <Button size="sm" className="bg-torqued-red text-white shrink-0" onClick={requestLocation}>Use my location</Button>}
                 </Card>
               )}
-              {(() => {
-                // When we know the consumer's location, only show workshops within 75 km
-                const within = customerCoords
-                  ? mechanicsByDistance.filter(m => m.latitude != null && m.distance <= 75)
-                  : mechanicsByDistance;
-                if (within.length === 0) {
-                  return (
-                    <Card className="p-8 text-center bg-card border-border">
-                      <div className="w-12 h-12 mx-auto rounded-2xl bg-torqued-red/10 flex items-center justify-center text-torqued-red mb-3"><MapPin size={20} /></div>
-                      <p className="text-sm font-bold">Coming soon to your area</p>
-                      <p className="text-xs text-muted mt-1">{customerCoords ? 'No Torqued workshops within 75 km yet.' : 'We\'re onboarding trusted local mechanics.'} We\'ll notify you the moment one is available nearby.</p>
-                    </Card>
-                  );
-                }
-                return null;
-              })()}
-              {(customerCoords ? mechanicsByDistance.filter(m => m.latitude != null && m.distance <= 75) : mechanicsByDistance)
+              {!mechanicsLoading && visibleMechanics.length === 0 && (
+                <Card className="p-8 text-center bg-card border-border">
+                  <div className="w-12 h-12 mx-auto rounded-2xl bg-torqued-red/10 flex items-center justify-center text-torqued-red mb-3"><MapPin size={20} /></div>
+                  <p className="text-sm font-bold">Coming soon to your area</p>
+                  <p className="text-xs text-muted mt-1">{customerCoords ? 'No Torqued workshops within 100 km yet.' : 'We\'re onboarding trusted local mechanics.'} We\'ll notify you the moment one is available nearby.</p>
+                </Card>
+              )}
+              {!mechanicsLoading && visibleMechanics
                 .map((mechanic, idx) => (
                 <motion.div
                   key={mechanic.id}
@@ -2986,7 +3885,12 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                           <h3 className="text-xl sm:text-2xl leading-tight tracking-tight font-black">{mechanic.name}</h3>
                           <div className="flex items-center gap-1.5 text-xs text-muted font-medium">
                             <MapPin size={12} className="text-torqued-red" />
-                            <span>{mechanic.suburb} • {mechanic.distance} km away</span>
+                            <span>
+                              {mechanic.suburb}
+                              {customerCoords && mechanic.latitude && mechanic.longitude && mechanic.distance < 900
+                                ? ` • ${mechanic.distance.toFixed(1)} km away`
+                                : ''}
+                            </span>
                           </div>
                           <div className="flex items-center gap-1.5 mt-2">
                             <Star size={12} className="text-yellow-400 fill-current" />
@@ -3187,6 +4091,7 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
             )}
           </motion.div>
         );
+      }
 
       case 5:
         return (
@@ -3210,24 +4115,27 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
               <div className="space-y-8">
                 <div className="space-y-4">
                    <label className="text-xs font-black uppercase tracking-widest text-muted">Drop off Day</label>
+                   {availabilityLoading ? (
+                     <p className="text-xs text-muted italic">Checking {selectedMechanic?.name || 'the workshop'}'s availability…</p>
+                   ) : availableDates.length === 0 ? (
+                     <p className="text-xs text-muted italic">No upcoming availability published — we'll confirm a drop-off date with you after booking.</p>
+                   ) : (
                    <div className="grid grid-cols-3 gap-3">
-                      {[
-                        { day: 'Thursday', date: '2026-04-23', label: 'Thursday 23rd' },
-                        { day: 'Friday', date: '2026-04-24', label: 'Friday 24th' },
-                        { day: 'Monday', date: '2026-04-27', label: 'Monday 27th' },
-                      ].map(d => (
-                        <button 
+                      {availableDates.map((d, idx) => (
+                        <button
                           key={d.date}
                           onClick={() => setSelectedDate(d.date)}
                           className={cn(
-                            "p-4 rounded-2xl border text-[10px] font-black uppercase tracking-widest transition-all text-center",
+                            "relative p-4 rounded-2xl border text-[10px] font-black uppercase tracking-widest transition-all text-center",
                             selectedDate === d.date ? "border-torqued-red bg-torqued-red text-white shadow-lg shadow-torqued-red/20" : "border-border bg-card text-muted hover:border-torqued-red/30 hover:text-torqued-red"
                           )}
                         >
+                          {idx === 0 && <span className="absolute -top-2 left-1/2 -translate-x-1/2 bg-emerald-500 text-white text-[7px] px-1.5 py-0.5 rounded-full">Soonest</span>}
                           {d.label}
                         </button>
                       ))}
                    </div>
+                   )}
                 </div>
 
                 <div className="space-y-4">
@@ -3264,7 +4172,10 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                    </div>
                 </Card>
 
-                <Button fullWidth size="lg" className="h-16 text-lg rounded-2xl bg-torqued-red text-white shadow-xl shadow-torqued-red/20" onClick={() => setStep(6)}>Proceed to Payment →</Button>
+                <Button fullWidth size="lg" className="h-16 text-base rounded-2xl bg-torqued-red text-white shadow-xl shadow-torqued-red/20 flex flex-col gap-0.5" onClick={() => setStep(6)}>
+                  <span>Accept &amp; Pay →</span>
+                  {availableDates[0] && <span className="text-[10px] font-bold uppercase tracking-widest opacity-80">Soonest drop-off: {availableDates.find(d => d.date === selectedDate)?.label || availableDates[0].label}</span>}
+                </Button>
               </div>
 
               <div className="space-y-6">
@@ -3292,7 +4203,7 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                        </div>
                        <div className="flex gap-4">
                           <div className="w-6 h-6 bg-background border border-border rounded-lg flex items-center justify-center text-[10px] font-black shrink-0">3</div>
-                          <p className="text-sm text-foreground/80">We'll notify you via SMS when collection is ready.</p>
+                          <p className="text-sm text-foreground/80">We'll notify you via email when collection is ready.</p>
                        </div>
                     </div>
                  </div>
@@ -3350,7 +4261,7 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                 
                 <div className="space-y-4">
                   <span className="text-[10px] font-black uppercase text-muted tracking-widest block">Job Breakdown</span>
-                  {selectedServices.map(id => {
+                  {selectedServices.filter(id => !(id === 'thermostat_housing' && selectedServices.includes('water_pump'))).map(id => {
                     const service = SERVICES.find(s => s.id === id);
                     if (!service) return null;
                     const isTransmission = id === 'transmission';
@@ -3398,15 +4309,39 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                                 ))}
                               </div>
                             )}
-                            {vehicleOilType && matchedPkg.pkg_type === 'standard' && (
-                              <p className="text-[10px] text-torqued-red/70 italic pt-1">Approved oil for your vehicle: {vehicleOilType}</p>
+                            {(vehicleOilType || vehicleOilCapacity) && matchedPkg.pkg_type === 'standard' && (
+                              <div className="flex items-center gap-2 py-1 px-2 rounded-lg bg-torqued-red/5 border border-torqued-red/20 mt-1">
+                                <span className="text-[10px] font-black uppercase tracking-widest text-torqued-red">Oil Spec</span>
+                                <span className="text-xs text-foreground font-medium">{vehicleOilCapacity ? `${vehicleOilCapacity}L · ` : ''}Manufacturer Approved {vehicleOilType || 'Engine Oil'}</span>
+                              </div>
                             )}
                           </div>
                         ) : (() => {
                           const fp = fleetPricesRaw[id];
-                          return fp && (fp.partsLow > 0 || fp.labourLow > 0) ? (
+                          if (!fp || (fp.partsLow === 0 && fp.labourLow === 0)) return null;
+                          const isFluid = id === 'transmission' || id === 'brake_fluid' || id === 'coolant_flush';
+                          const isOilService = id === 'oil' || id === 'full';
+                          return (
                             <div className="border-t border-border/50 pt-3 space-y-1.5">
-                              {fp.partsLow > 0 && (
+                              {isOilService && fp.oilCapacityL && (
+                                <div className="flex items-center gap-2 py-1 px-2 rounded-lg bg-torqued-red/5 border border-torqued-red/20">
+                                  <span className="text-[10px] font-black uppercase tracking-widest text-torqued-red">Oil Spec</span>
+                                  <span className="text-xs text-foreground font-medium">{fp.oilCapacityL}L · Manufacturer Approved {fp.oilType || 'Engine Oil'}</span>
+                                </div>
+                              )}
+                              {isFluid && fp.fluidType && (
+                                <div className="flex justify-between text-xs text-muted">
+                                  <span>Fluid ({fp.fluidType}{fp.fluidCapacityL ? ` · ${fp.fluidCapacityL}L` : ''})</span>
+                                  <span>${fp.fluidCostHigh ?? fp.partsHigh}</span>
+                                </div>
+                              )}
+                              {id === 'transmission' && fp.partsHigh > 0 && (
+                                <div className="flex justify-between text-xs text-muted">
+                                  <span>Filter / gasket kit</span>
+                                  <span>${fp.partsHigh}</span>
+                                </div>
+                              )}
+                              {!isFluid && fp.partsLow > 0 && (
                                 <div className="flex justify-between text-xs text-muted">
                                   <span>Parts</span>
                                   <span>${fp.partsHigh}</span>
@@ -3418,8 +4353,21 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                                   <span>${fp.labourLow}</span>
                                 </div>
                               )}
+                              {id === 'transmission' && (fp.freight || fp.sundries || fp.scanFee) && (
+                                <>
+                                  {fp.freight > 0 && <div className="flex justify-between text-xs text-muted"><span>Freight</span><span>${fp.freight}</span></div>}
+                                  {fp.sundries > 0 && <div className="flex justify-between text-xs text-muted"><span>Sundries</span><span>${fp.sundries}</span></div>}
+                                  {fp.scanFee > 0 && <div className="flex justify-between text-xs text-muted"><span>TCU adaptation scan</span><span>${fp.scanFee}</span></div>}
+                                </>
+                              )}
+                              {(id === 'brake_fluid' || id === 'coolant_flush') && fp.sundries > 0 && (
+                                <div className="flex justify-between text-xs text-muted"><span>Sundries</span><span>${fp.sundries}</span></div>
+                              )}
+                              {fp.indicative && (
+                                <p className="text-[10px] text-muted italic">Indicative range — exact quote confirmed by workshop after inspection.</p>
+                              )}
                             </div>
-                          ) : null;
+                          );
                         })()}
                       </div>
                     );
@@ -3429,16 +4377,22 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                   {addWaterPump && waterPump && selectedServices.includes('timing') && (
                     <div className="space-y-3 bg-orange-500/5 p-4 rounded-2xl border border-orange-500/20">
                       <div className="flex justify-between items-center text-foreground">
-                        <span className="text-sm font-semibold text-orange-400">Water Pump</span>
+                        <span className="text-sm font-semibold text-orange-400">Water Pump & Thermostat Housing</span>
                         <span className="text-sm font-semibold">${waterPump.high}</span>
                       </div>
                       <div className="border-t border-orange-500/20 pt-3 space-y-1.5">
                         <div className="flex justify-between text-xs text-muted">
-                          <span>Parts (indicative)</span>
+                          <span>Parts (pump kit + auxiliary belt)</span>
                           <span>${waterPump.partsHigh}</span>
                         </div>
+                        {(waterPump as any).coolantHigh > 0 && (
+                          <div className="flex justify-between text-xs text-muted">
+                            <span>Coolant refill</span>
+                            <span>${(waterPump as any).coolantHigh}</span>
+                          </div>
+                        )}
                         <div className="flex justify-between text-xs text-muted">
-                          <span>Labour (extra 0.5 hrs)</span>
+                          <span>Labour (1 hr extra)</span>
                           <span>${waterPump.labourExtra}</span>
                         </div>
                       </div>
@@ -3446,6 +4400,12 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                   )}
                 </div>
 
+                {fleetShopFee && fleetShopFee > 0 && (
+                  <div className="flex justify-between text-xs text-muted border-t border-border pt-4">
+                    <span>Workshop shop fee (freight, sundries & consumables)</span>
+                    <span>${fleetShopFee}</span>
+                  </div>
+                )}
                 <div className="flex justify-between items-center py-6 border-t border-b border-border">
                   <span className="text-[10px] font-black uppercase text-muted tracking-widest">Total Estimate (incl. GST)</span>
                   {(selectedMechanic?.estimatedPrice || totalPrice) > 0
@@ -3453,6 +4413,11 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                     : <span className="text-lg font-black text-muted">Confirmed by matched workshop</span>
                   }
                 </div>
+                {!fleetShopFee && (
+                  <p className="text-[10px] text-muted italic leading-relaxed">
+                    Estimates include a standard workshop fee covering freight, sundries, and consumables (e.g. rags, thread seal, drip trays) required to complete the service.
+                  </p>
+                )}
                 {isRepairFromDiagnostic && (
                   <div className="pt-2">
                     <p className="text-[10px] text-emerald-600 font-bold bg-emerald-500/5 p-3 rounded-xl border border-emerald-500/10 italic leading-relaxed text-center">
@@ -3543,26 +4508,30 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
               {/* Pickup scheduling */}
               <div className="p-5 bg-card border border-border rounded-2xl space-y-4">
                 <p className="text-[10px] font-black uppercase tracking-widest text-muted">Collection Schedule</p>
-                {/* Default: same-day pickup */}
-                <div className="flex items-start gap-3 p-4 rounded-xl bg-background border border-border">
-                  <div className="w-2 h-2 rounded-full bg-emerald-500 mt-1.5 shrink-0" />
-                  <div className="space-y-0.5">
-                    <p className="text-sm font-semibold text-foreground">
-                      {isComplexJob
-                        ? `Ready between ${samePickupWindow} on ${selectedDate}`
-                        : `Ready by ${samePickupWindow} on ${selectedDate}`}
-                    </p>
-                    <p className="text-xs text-muted">
-                      {isComplexJob
-                        ? `Drop off by ${dropOffDeadline}. Your workshop closes at ${mechanicClosingTime} — we'll send you an SMS and email when your vehicle is ready.`
-                        : `Drop off by ${dropOffDeadline}. We'll send you an SMS and email when your vehicle is ready to collect.`}
-                    </p>
+                {/* Same-day pickup */}
+                <button
+                  type="button"
+                  onClick={() => setCollectNextDay(false)}
+                  className={`w-full text-left p-4 rounded-xl border transition-all ${!collectNextDay ? 'border-torqued-red bg-torqued-red/5' : 'border-border bg-background/50 hover:border-torqued-red/30'}`}
+                >
+                  <div className="flex items-center gap-2 mb-0.5">
+                    <div className={`w-3.5 h-3.5 rounded-full border-2 flex items-center justify-center shrink-0 ${!collectNextDay ? 'border-torqued-red bg-torqued-red' : 'border-border'}`}>
+                      {!collectNextDay && <div className="w-1.5 h-1.5 rounded-full bg-white" />}
+                    </div>
+                    <span className="text-sm font-semibold text-foreground">
+                      {isComplexJob ? `Ready between ${samePickupWindow} on ${selectedDate}` : `Ready by ${samePickupWindow} on ${selectedDate}`}
+                    </span>
                   </div>
-                </div>
+                  <p className="text-xs text-muted pl-5">
+                    {isComplexJob
+                      ? `Drop off by ${dropOffDeadline}. Your workshop closes at ${mechanicClosingTime} — we'll send you an email when your vehicle is ready.`
+                      : `Drop off by ${dropOffDeadline}. We'll send you an email when your vehicle is ready to collect.`}
+                  </p>
+                </button>
                 {/* Next day option */}
                 <button
                   type="button"
-                  onClick={() => setCollectNextDay(v => !v)}
+                  onClick={() => setCollectNextDay(true)}
                   className={`w-full text-left p-4 rounded-xl border transition-all ${collectNextDay ? 'border-torqued-red bg-torqued-red/5' : 'border-border bg-background/50 hover:border-torqued-red/30'}`}
                 >
                   <div className="flex items-center gap-2 mb-0.5">
@@ -3571,7 +4540,7 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                     </div>
                     <span className="text-sm font-semibold text-foreground">Collect next business day instead</span>
                   </div>
-                  <p className="text-xs text-muted pl-5">{nextBizDay} — between {mechanicOpeningTime} and {mechanicClosingTime}. Workshop will confirm your preferred time by SMS.</p>
+                  <p className="text-xs text-muted pl-5">{nextBizDay} — between {mechanicOpeningTime} and {mechanicClosingTime}. Workshop will confirm your preferred time by email.</p>
                 </button>
               </div>
 
@@ -3710,14 +4679,51 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
               <div className="flex justify-between items-center border-b border-border pb-6">
                 <div className="space-y-1">
                   <p className="text-[10px] font-bold uppercase text-muted tracking-widest">Workshop</p>
-                  <p className="text-lg font-bold">{selectedMechanic?.name}</p>
+                  <p className="text-lg font-bold">{selectedMechanic?.name || latestBooking?.mechanicName || 'Your Workshop'}</p>
+                  {selectedMechanic?.address && <p className="text-xs text-muted">{selectedMechanic.address.split(',').slice(0, 2).join(',')}</p>}
                 </div>
-                <div className="w-12 h-12 bg-background rounded-xl flex items-center justify-center border border-border">
-                  <MapPin size={20} className="text-torqued-red" />
-                </div>
+                {selectedMechanic?.mapsUrl ? (
+                  <a href={selectedMechanic.mapsUrl} target="_blank" rel="noreferrer" className="w-12 h-12 bg-background rounded-xl flex items-center justify-center border border-border hover:border-torqued-red/50 hover:bg-torqued-red/5 transition-all">
+                    <MapPin size={20} className="text-torqued-red" />
+                  </a>
+                ) : (
+                  <div className="w-12 h-12 bg-background rounded-xl flex items-center justify-center border border-border opacity-40">
+                    <MapPin size={20} className="text-muted" />
+                  </div>
+                )}
               </div>
 
-              <div className="grid grid-cols-2 gap-4">
+              {(() => {
+                const svcIds = latestBooking?.serviceIds || [];
+                const diagServices = svcIds.filter((id: string) => id === 'diag_inspection');
+                const repairServices = svcIds.filter((id: string) => id !== 'diag_inspection');
+                const isDual = diagServices.length > 0 && repairServices.length > 0;
+                return (
+                  <div className="space-y-2">
+                    <p className="text-[10px] font-bold uppercase text-muted tracking-widest">
+                      {isDual ? 'Bookings (2 jobs created)' : 'Services'}
+                    </p>
+                    {isDual ? (
+                      <div className="space-y-2">
+                        <div className="flex items-center gap-2 px-3 py-2 bg-background rounded-xl border border-border">
+                          <span className="w-2 h-2 rounded-full bg-torqued-red shrink-0" />
+                          <span className="text-xs font-bold text-foreground">Diagnostic Inspection</span>
+                          <span className="ml-auto text-[10px] text-muted">Job 1</span>
+                        </div>
+                        <div className="flex items-center gap-2 px-3 py-2 bg-background rounded-xl border border-border">
+                          <span className="w-2 h-2 rounded-full bg-emerald-500 shrink-0" />
+                          <span className="text-xs font-bold text-foreground">{repairServices.map((id: string) => SERVICES.find(s => s.id === id)?.name || id).join(', ')}</span>
+                          <span className="ml-auto text-[10px] text-muted">Job 2</span>
+                        </div>
+                      </div>
+                    ) : (
+                      <p className="text-sm font-bold">{svcIds.map((id: string) => SERVICES.find(s => s.id === id)?.name || id).join(', ')}</p>
+                    )}
+                  </div>
+                );
+              })()}
+
+              <div className="grid grid-cols-2 gap-4 border-t border-border pt-4">
                 <div className="space-y-1">
                   <p className="text-[10px] font-bold uppercase text-muted tracking-widest">Drop-off</p>
                   <p className="text-sm font-bold">{selectedDate}</p>
@@ -3741,58 +4747,7 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
               </div>
             </Card>
 
-            <div className="space-y-4 pt-4 max-w-md mx-auto">
-              <div className="flex items-start gap-4 text-left p-6 bg-card rounded-2xl border border-border shadow-sm">
-                <div className="w-8 h-8 rounded-full bg-background border border-border flex items-center justify-center shrink-0 font-bold text-xs text-emerald-500 border-emerald-500/30">1</div>
-                <div>
-                  <p className="text-sm font-bold flex items-center gap-1.5 text-foreground">
-                    Email Delivered Successfully
-                    <span className="text-[10px] uppercase font-black px-1.5 py-0.5 bg-emerald-500/10 text-emerald-500 rounded">Verified</span>
-                  </p>
-                  <p className="text-xs text-muted">A beautiful HTML layout confirmation was sent matching our design language.</p>
-                </div>
-              </div>
-
-              <div className="flex items-start gap-4 text-left p-6 bg-card rounded-2xl border border-border shadow-sm">
-                <div className="w-8 h-8 rounded-full bg-background border border-border flex items-center justify-center shrink-0 font-bold text-xs">2</div>
-                <div>
-                  <p className="text-sm font-bold">SMS Confirmation Sent</p>
-                  <p className="text-xs text-muted">You'll receive a reminder 24h before your booking.</p>
-                </div>
-              </div>
-              
-              <div className="flex items-start gap-4 text-left p-6 bg-card rounded-2xl border border-border shadow-sm">
-                <div className="w-8 h-8 rounded-full bg-background border border-border flex items-center justify-center shrink-0 font-bold text-xs">3</div>
-                <div>
-                  <p className="text-sm font-bold">Drop-off Directions</p>
-                  <p className="text-xs text-muted">Open your garage in the app for drop-off details on arrival.</p>
-                </div>
-              </div>
-            </div>
-
             {/* Email Preview Terminal Button */}
-            {emittedEmailHtml && (
-              <div className="p-5 bg-card border border-border max-w-md mx-auto rounded-2xl text-left space-y-3.5 shadow-xl">
-                <div className="flex items-center gap-2.5">
-                  <div className="p-1.5 rounded-lg bg-emerald-500/10 text-emerald-500">
-                    <CheckCircle2 size={16} />
-                  </div>
-                  <div className="space-y-0.5">
-                    <span className="text-[9px] font-black uppercase tracking-wider text-muted leading-none">High-Fidelity Document</span>
-                    <h4 className="text-xs font-bold text-foreground leading-none">CONFIRMATION RECEIPT READY</h4>
-                  </div>
-                </div>
-                <p className="text-[11.5px] text-muted leading-relaxed font-semibold">
-                  We've rendered the gorgeous confirmation email matching the brand styling. Direct SMTP relays can be configured in settings.
-                </p>
-                <Button
-                  onClick={() => setShowEmailModal(true)}
-                  className="w-full bg-zinc-800 hover:bg-zinc-700 text-white font-black uppercase text-[10.5px] h-10 rounded-xl"
-                >
-                  View Dispatched Email Layout
-                </Button>
-              </div>
-            )}
 
             <div className="pt-8 space-y-6 max-w-md mx-auto">
               <Button 
@@ -3842,7 +4797,7 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
   };
   const [removingRego, setRemovingRego] = useState<string | null>(null);
   const removeVehicle = async (rego: string) => {
-    if (!window.confirm(`Remove ${rego} from your account?\n\nYour service history for this vehicle will be preserved — a new owner can claim the plate and access it.`)) return;
+    if (!window.confirm(`Remove ${rego} from your account?\n\nWe'll remove this vehicle from your account. See our privacy policy to learn more about how we handle service history data.`)) return;
     setRemovingRego(rego);
     try {
       if (customerOwnerId) {
@@ -3864,6 +4819,78 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
     finally { setRemovingRego(null); }
   };
 
+  const loadMechanicAccess = async () => {
+    setAccessLoading(true);
+    try {
+      const qs = new URLSearchParams();
+      if (customerOwnerId) qs.set('ownerId', customerOwnerId);
+      else {
+        const regoList = garageVehicles.map(v => v.rego).filter(Boolean);
+        if (regoList.length) qs.set('regos', regoList.join(','));
+      }
+      const res = await fetch(`/api/customer/mechanic-access?${qs.toString()}`);
+      if (res.ok) {
+        const data = await res.json();
+        setMechanicAccess(data.mechanics || []);
+      }
+    } catch (err) {
+      console.error('Failed to load mechanic access:', err);
+    } finally {
+      setAccessLoading(false);
+    }
+  };
+
+  const revokeMechanicAccess = async (mechanicId: string) => {
+    if (!confirm('Revoke this mechanic\'s access to your vehicle details and service history?\n\nThey will only regain access if you book or request another quote with them.')) return;
+
+    try {
+      const regoList = garageVehicles.map(v => v.rego).filter(Boolean);
+      const res = await fetch('/api/customer/mechanic-access/revoke', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ mechanicId, ownerId: customerOwnerId || undefined, regos: regoList }),
+      });
+
+      if (res.ok) {
+        setMechanicAccess(prev => prev.filter(m => m.mechanicId !== mechanicId));
+        alert('Access revoked. This mechanic can no longer see your data unless you request another quote from them.');
+      } else {
+        const d = await res.json().catch(() => ({}));
+        alert(d.error || 'Failed to revoke access. Have you run roster-schema.sql in Supabase?');
+      }
+    } catch (err) {
+      console.error('Failed to revoke mechanic access:', err);
+      alert('Error revoking access.');
+    }
+  };
+
+  const renderProfile = () => {
+    return (
+      <ProfileView
+        userName={userName}
+        setUserName={setUserName}
+        customerEmail={customerEmail}
+        customerOwnerId={customerOwnerId}
+        location={location}
+        setLocation={setLocation}
+        user={user}
+        updateProfile={updateProfile}
+        rego={rego}
+        vehicle={vehicle}
+        garageVehicles={garageVehicles}
+        passkeyCardState={passkeyCardState}
+        setPasskeyCardState={setPasskeyCardState}
+        mechanicAccess={mechanicAccess}
+        accessLoading={accessLoading}
+        loadMechanicAccess={loadMechanicAccess}
+        revokeMechanicAccess={revokeMechanicAccess}
+        clearCustomerSession={clearCustomerSession}
+        logout={logout}
+        setView={setView}
+      />
+    );
+  };
+
   const renderDashboard = () => {
     // Gate: My Garage requires a verification (passkey or magic link) within the last 48h, on this browser
     if (!garageUnlocked) {
@@ -3873,20 +4900,27 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
             <div className="w-14 h-14 mx-auto rounded-2xl bg-torqued-red/10 border border-torqued-red/20 flex items-center justify-center text-torqued-red"><Lock size={22} /></div>
             <div className="space-y-1.5">
               <h3 className="text-2xl font-black tracking-tight">Verify it's you</h3>
-              <p className="text-sm text-muted">For your security, access to My Garage expires after 48 hours and on new devices. Enter your plate to verify with a passkey or a secure email link.</p>
+              <p className="text-sm text-muted">Access to My Garage expires after 48 hours and on new devices.</p>
             </div>
             <div className="space-y-3">
               <Input value={rego} onChange={e => setRego(e.target.value.toUpperCase())} placeholder="Number plate (e.g. RAH190)" className="text-center text-lg font-black tracking-widest" />
               {plateMatchError && <p className="text-xs text-torqued-red font-bold">{plateMatchError}</p>}
+              {/* Primary: email a 6-digit verification code to the plate's registered owner */}
+              <Button fullWidth className="bg-torqued-red text-white" disabled={!rego || isSearchingRego} onClick={handleRegoLookup}>
+                {isSearchingRego ? 'Sending…' : 'Email me a verification code'}
+              </Button>
+              {/* Secondary: passkey for those who set one up. Gracefully tells you to use the code if none exists. */}
               {passkeysSupported() && (
-                <Button fullWidth className="bg-torqued-red text-white" disabled={!rego || magicVerifying} onClick={() => verifyWithPasskey(rego.toUpperCase().trim())}>
-                  🔑 Verify with Face / Touch ID
-                </Button>
+                <button
+                  type="button"
+                  disabled={!rego || magicVerifying}
+                  onClick={() => verifyWithPasskey(rego.toUpperCase().trim())}
+                  className="w-full text-xs font-bold text-muted hover:text-foreground py-2 disabled:opacity-40"
+                >
+                  {magicVerifying ? 'Checking passkey…' : '🔑 Or sign in with a passkey'}
+                </button>
               )}
               {passkeyError && <p className="text-xs text-torqued-red font-bold">{passkeyError}</p>}
-              <Button fullWidth variant="outline" disabled={!rego || isSearchingRego} onClick={handleRegoLookup}>
-                Email me a secure link instead
-              </Button>
             </div>
           </Card>
         </div>
@@ -3898,40 +4932,14 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
           <div className="space-y-2">
             <h2 className="text-3xl sm:text-4xl md:text-5xl font-black tracking-tighter leading-tight">
               G'day, {userName || 'Sri'} 👋 <br />
-              <span className="text-muted text-xl sm:text-2xl tracking-tight">Your garage.</span>
             </h2>
-            <div className="flex gap-2">
-              <Button 
-                variant="ghost" 
-                size="sm" 
-                className="h-8 text-[10px] uppercase tracking-widest font-black border border-border text-muted hover:text-torqued-red hover:bg-torqued-red/5 px-4"
-                onClick={() => setIsManagingGarage(true)}
-              >
-                Manage My Garage
-              </Button>
-            </div>
+            <div className="flex gap-2" />
           </div>
           <div className="w-12 h-12 bg-torqued-red rounded-full flex items-center justify-center text-white font-bold shadow-lg shadow-torqued-red/20 border border-border">
             {(userName || 'S').charAt(0).toUpperCase()}
           </div>
         </div>
 
-        {/* Passkey setup for existing customers who don't yet have one */}
-        {passkeysSupported() && passkeyCardState !== 'added' && (
-          <Card className="p-4 bg-torqued-red/5 border-torqued-red/20 flex items-center justify-between gap-4">
-            <div>
-              <p className="text-sm font-bold flex items-center gap-1.5">🔑 Faster, safer sign-in</p>
-              <p className="text-xs text-muted mt-0.5">{passkeyCardState === 'error' ? 'Could not add a passkey — try again.' : 'Add a passkey to open My Garage with Face / Touch ID next time.'}</p>
-            </div>
-            <Button size="sm" className="bg-torqued-red text-white shrink-0" disabled={passkeyCardState === 'adding'} onClick={async () => {
-              const plate = (rego || vehicle?.rego || garageVehicles[0]?.rego || '').toUpperCase();
-              if (!plate) return;
-              setPasskeyCardState('adding');
-              try { await registerPasskey('customer', customerEmail || plate); setPasskeyCardState('added'); }
-              catch { setPasskeyCardState('error'); }
-            }}>{passkeyCardState === 'adding' ? 'Adding…' : 'Add passkey'}</Button>
-          </Card>
-        )}
 
         {/* Manage Garage Modal */}
         <AnimatePresence>
@@ -3953,10 +4961,10 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                 <div className="p-8 space-y-8">
                   <div className="flex justify-between items-start">
                     <div className="space-y-1">
-                      <h3 className="text-2xl font-black tracking-tighter">Manage Garage</h3>
-                      <p className="text-sm text-muted">Update your profile and shop preferences.</p>
+                      <h3 className="text-2xl font-black tracking-tighter">My Profile</h3>
+                      <p className="text-sm text-muted">Update your details and account preferences.</p>
                     </div>
-                    <button 
+                    <button
                       onClick={() => setIsManagingGarage(false)}
                       className="p-2 hover:bg-background rounded-full transition-all"
                     >
@@ -3994,9 +5002,9 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                     </div>
                   </div>
 
-                  <Button 
-                    fullWidth 
-                    size="lg" 
+                  <Button
+                    fullWidth
+                    size="lg"
                     className="bg-torqued-red text-white h-14 rounded-2xl shadow-xl shadow-torqued-red/20 uppercase tracking-widest font-black text-[10px]"
                     onClick={async () => {
                       if (user) {
@@ -4007,6 +5015,42 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                   >
                     Save Changes
                   </Button>
+
+                  {/* Passkey */}
+                  {passkeysSupported() && passkeyCardState !== 'added' && (
+                    <div className="border-t border-border pt-5 space-y-3">
+                      <p className="text-[10px] font-black uppercase text-muted tracking-widest">Security</p>
+                      <div className="flex items-center justify-between gap-4">
+                        <div>
+                          <p className="text-sm font-bold">🔑 Passkey (passkey)</p>
+                          <p className="text-xs text-muted mt-0.5">{passkeyCardState === 'error' ? 'Could not add — try again.' : 'Skip the email link next time.'}</p>
+                        </div>
+                        <Button size="sm" className="bg-torqued-red text-white shrink-0" disabled={passkeyCardState === 'adding'} onClick={async () => {
+                          const plate = (rego || vehicle?.rego || garageVehicles[0]?.rego || '').toUpperCase();
+                          if (!plate) return;
+                          setPasskeyCardState('adding');
+                          try { await registerPasskey('customer', customerEmail || plate); setPasskeyCardState('added'); }
+                          catch { setPasskeyCardState('error'); }
+                        }}>{passkeyCardState === 'adding' ? 'Adding…' : 'Add passkey'}</Button>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Sign out */}
+                  <div className="border-t border-border pt-4">
+                    <Button
+                      fullWidth
+                      variant="ghost"
+                      className="text-muted hover:text-torqued-red hover:bg-torqued-red/5 border border-border text-sm font-bold"
+                      onClick={() => {
+                        clearCustomerSession();
+                        logout();
+                        setIsManagingGarage(false);
+                      }}
+                    >
+                      Sign Out
+                    </Button>
+                  </div>
                 </div>
               </motion.div>
             </div>
@@ -4048,9 +5092,12 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                       onClick={() => !isArchived && selectGarageVehicle(gv.rego)}
                       className={cn("p-4 flex items-center gap-4", !isArchived && "cursor-pointer active:scale-[0.99]")}
                     >
-                      {gv.thumbnail
-                        ? <img src={gv.thumbnail} alt="Car" className="w-16 h-16 rounded-xl object-cover ring-1 ring-white/10 shrink-0" />
-                        : <div className="w-16 h-16 rounded-xl bg-card flex items-center justify-center ring-1 ring-white/10 shrink-0"><Car size={24} className="text-muted" /></div>}
+                      {(() => {
+                        const brandLogo = getCarBrandLogo(gv.make);
+                        if (gv.thumbnail) return <img src={gv.thumbnail} alt="Car" className="w-16 h-16 rounded-xl object-cover ring-1 ring-white/10 shrink-0" onError={e => { (e.currentTarget as HTMLImageElement).style.display = 'none'; }} />;
+                        if (brandLogo) return <div className="w-16 h-16 rounded-xl bg-card border border-border flex items-center justify-center p-2.5 shrink-0"><img src={brandLogo} alt={gv.make} className="w-full h-full object-contain" /></div>;
+                        return <div className="w-16 h-16 rounded-xl bg-card flex items-center justify-center ring-1 ring-white/10 shrink-0"><Car size={24} className="text-muted" /></div>;
+                      })()}
                       <div className="flex-1 min-w-0">
                         <div className="flex items-center gap-2 mb-1">
                           <div className="torqued-badge text-[10px]">{gv.rego}</div>
@@ -4075,7 +5122,13 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                     {!isArchived && (
                       <div className="px-4 pb-4">
                         <button
-                          onClick={async () => { await loadVehicleByRego(gv.rego); setView('quote'); }}
+                          onClick={async () => {
+                            setRego(gv.rego);
+                            setSelectedServices([]);
+                            setStep(1);
+                            await loadVehicleByRego(gv.rego);
+                            setView('quote');
+                          }}
                           className="w-full py-2.5 rounded-xl bg-torqued-red text-white text-sm font-black tracking-tight hover:bg-red-600 active:scale-[0.98] transition-all flex items-center justify-center gap-2"
                         >
                           <Wrench size={14} /> Get a Quote
@@ -4122,16 +5175,11 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                   <div className="flex gap-2">
                     <input id="history-upload-input" type="file" accept="image/*,application/pdf" multiple className="hidden"
                       onChange={(e) => { handleMultiUpload(Array.from(e.target.files || [])); e.target.value = ''; }} />
-                    <Button variant="outline" size="sm"
-                      className="text-torqued-red border-torqued-red/20 hover:bg-torqued-red/5"
-                      onClick={() => document.getElementById('history-upload-input')?.click()}>
-                      <Upload size={16} className="mr-1" /> Upload receipt
-                    </Button>
-                    <Button variant="outline" size="sm"
-                      className="text-foreground border-border hover:bg-background"
-                      onClick={() => setShowHistoryEntry(true)}>
-                      <Plus size={16} className="mr-1" /> Add
-                    </Button>
+                    <button
+                      className="flex items-center gap-1 px-3 py-1 rounded-lg border border-torqued-red/30 text-torqued-red text-[11px] font-bold hover:bg-torqued-red/5 transition-colors"
+                      onClick={() => setShowHistorySheet(true)}>
+                      <Plus size={12} /> Upload / Add Service History
+                    </button>
                   </div>
                 </div>
 
@@ -4153,7 +5201,7 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                   <div className="space-y-3">
                   {!healthHasHistory && (
                     <Card className="p-4 border-amber-500/20 bg-amber-500/5">
-                      <p className="text-sm text-amber-400 font-medium">No service history on file for this vehicle — insights are estimated from vehicle age and mileage. <button onClick={() => document.getElementById('history-upload-input')?.click()} className="underline font-bold">Scan a receipt</button> to improve accuracy.</p>
+                      <p className="text-sm text-amber-400 font-medium">No service history on file for this vehicle — insights are estimated from vehicle age and mileage. <button onClick={() => setShowHistorySheet(true)} className="underline font-bold">Add a record</button> to improve accuracy.</p>
                     </Card>
                   )}
                   <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
@@ -4192,7 +5240,14 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                           </div>
                           {(isDue || isOverdue) && (
                             <button
-                              onClick={async () => { await loadVehicleByRego(vehicle.rego); setView('quote'); }}
+                              onClick={async () => {
+                                const sid = insightToServiceId(insight.title);
+                                setRego(vehicle.rego);
+                                setSelectedServices(sid ? [sid] : []);
+                                setStep(sid ? 2 : 1);
+                                await loadVehicleByRego(vehicle.rego);
+                                setView('quote');
+                              }}
                               className="shrink-0 text-[10px] font-black uppercase tracking-widest text-torqued-red hover:underline"
                             >Book →</button>
                           )}
@@ -4212,21 +5267,92 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                       View full service log ({manualHistory.length} record{manualHistory.length !== 1 ? 's' : ''})
                     </summary>
                     <div className="space-y-2 mt-3">
-                      {manualHistory.map((history, idx) => {
+                      {[...manualHistory].sort((a, b) => parseServiceDate(b.date) - parseServiceDate(a.date)).map((history, idx) => {
+                        const originalIdx = manualHistory.indexOf(history);
                         const headline = histSummaries[history.service] || history.service;
+                        const isTorqued = history.source_type === 'torqued_job';
+                        const isAI = history.source_type === 'ai_autoscan';
+                        const isEditing = editingLogIdx === idx;
                         return (
-                          <Card key={idx} className="p-3 bg-card border-border flex items-start justify-between gap-4">
-                            <div className="flex items-start gap-3 min-w-0">
-                              <Clock size={14} className="text-muted shrink-0 mt-0.5" />
-                              <div className="min-w-0">
-                                <p className="text-xs font-bold truncate">{headline}</p>
-                                <p className="text-[10px] text-muted">{history.date}{history.provider ? ` · ${history.provider}` : ''}</p>
+                          <Card key={idx} className="p-3 bg-card border-border space-y-3">
+                            {isEditing ? (
+                              <div className="space-y-2">
+                                <div className="grid grid-cols-2 gap-2">
+                                  <Input label="Date" placeholder="E.g. Oct 14th 2025" className="bg-background text-xs" value={editLogDate} onChange={e => setEditLogDate(e.target.value)} />
+                                  <Input label="Mileage (km)" placeholder="E.g. 103,000" className="bg-background text-xs" value={editLogMileage} onChange={e => setEditLogMileage(e.target.value)} />
+                                </div>
+                                <Input label="Service Performed" placeholder="Oil change..." className="bg-background text-xs" value={editLogService} onChange={e => setEditLogService(e.target.value)} />
+                                <div className="grid grid-cols-2 gap-2">
+                                  <Input label="Provider" placeholder="Workshop name" className="bg-background text-xs" value={editLogProvider} onChange={e => setEditLogProvider(e.target.value)} />
+                                  <Input label="Price" placeholder="E.g. $150" className="bg-background text-xs" value={editLogPrice} onChange={e => setEditLogPrice(e.target.value)} />
+                                </div>
+                                <Input label="Notes (Optional)" placeholder="Any extra details" className="bg-background text-xs" value={editLogNotes} onChange={e => setEditLogNotes(e.target.value)} />
+                                <div className="flex gap-2 pt-1">
+                                  <button
+                                    onClick={async () => {
+                                      const updated = { ...history, date: editLogDate, service: editLogService, provider: editLogProvider, mileage: editLogMileage, price: editLogPrice, notes: editLogNotes };
+                                      setManualHistory(prev => prev.map((h, i) => i === originalIdx ? updated : h));
+                                      setEditingLogIdx(null);
+                                      if (history.id) {
+                                        await fetch('/api/customer/update-history', {
+                                          method: 'POST', headers: { 'Content-Type': 'application/json' },
+                                          body: JSON.stringify({ id: history.id, fields: { date: editLogDate, service: editLogService, provider: editLogProvider, mileage: editLogMileage, price: editLogPrice, notes: editLogNotes } }),
+                                        }).catch(() => {});
+                                      }
+                                    }}
+                                    className="flex-1 py-1.5 bg-torqued-red text-white text-xs font-bold rounded-lg hover:bg-red-600 transition-all"
+                                  >Save Changes</button>
+                                  <button onClick={() => setEditingLogIdx(null)} className="px-3 py-1.5 border border-border text-xs font-bold rounded-lg hover:bg-card transition-all">Cancel</button>
+                                </div>
                               </div>
-                            </div>
-                            <div className="text-right shrink-0">
-                              {history.mileage && <p className="text-[10px] font-mono text-muted">{Number(history.mileage).toLocaleString()} km</p>}
-                              {history.price && <p className="text-xs font-bold text-torqued-red">{String(history.price).startsWith('$') ? history.price : `$${history.price}`}</p>}
-                            </div>
+                            ) : (
+                              <div className="flex items-start justify-between gap-4">
+                                <div className="flex items-start gap-3 min-w-0">
+                                  <Clock size={14} className="text-muted shrink-0 mt-0.5" />
+                                  <div className="min-w-0">
+                                    <div className="flex items-center gap-2 flex-wrap">
+                                      <p className="text-xs font-bold truncate">{headline}</p>
+                                      {isTorqued && <span className="text-[9px] font-bold uppercase tracking-widest bg-emerald-500/10 text-emerald-600 px-1.5 py-0.5 rounded">Torqued Completed Job</span>}
+                                      {isAI && <span className="text-[9px] font-bold uppercase tracking-widest bg-blue-500/10 text-blue-500 px-1.5 py-0.5 rounded">AI Autoscan</span>}
+                                      {!isTorqued && !isAI && <span className="text-[9px] font-bold uppercase tracking-widest bg-muted/10 text-muted px-1.5 py-0.5 rounded">Manual Entry</span>}
+                                    </div>
+                                    <p className="text-[10px] text-muted">{history.date}{history.provider ? ` · ${history.provider}` : ''}</p>
+                                  </div>
+                                </div>
+                                <div className="flex items-start gap-2 shrink-0">
+                                  <div className="text-right">
+                                    {history.mileage && <p className="text-[10px] font-mono text-muted">{Number(history.mileage).toLocaleString()} km</p>}
+                                    {history.price && <p className="text-xs font-bold text-torqued-red">{String(history.price).startsWith('$') ? history.price : `$${history.price}`}</p>}
+                                  </div>
+                                  {!isTorqued && (
+                                    <>
+                                      <button
+                                        onClick={() => {
+                                          setEditingLogIdx(idx);
+                                          setEditLogDate(history.date || '');
+                                          setEditLogService(history.service || '');
+                                          setEditLogProvider(history.provider || '');
+                                          setEditLogMileage(history.mileage || '');
+                                          setEditLogPrice(history.price || '');
+                                          setEditLogNotes(history.notes || '');
+                                        }}
+                                        className="p-1 hover:bg-card rounded text-muted hover:text-foreground transition-colors"
+                                        title="Edit record"
+                                      >
+                                        <Edit2 size={11} />
+                                      </button>
+                                      <button
+                                        onClick={() => setManualHistory(prev => prev.filter((_, i) => i !== originalIdx))}
+                                        className="p-1 hover:bg-torqued-red/10 rounded text-muted hover:text-torqued-red transition-colors"
+                                        title="Delete record"
+                                      >
+                                        <Plus size={11} className="rotate-45" />
+                                      </button>
+                                    </>
+                                  )}
+                                </div>
+                              </div>
+                            )}
                           </Card>
                         );
                       })}
@@ -4237,17 +5363,81 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
 
 
           <section className="space-y-6">
-            <h3 className="text-2xl font-bold tracking-tight">Active Jobs</h3>
-            {activeJobs.length === 0 ? (
-              <Card className="p-12 text-center text-muted italic bg-card border-border">No active jobs. Book a service to see it here.</Card>
+            {(() => {
+              const sortByDate = (a: Job, b: Job) => (new Date(b.date || '').getTime() || 0) - (new Date(a.date || '').getTime() || 0);
+              // Only show jobs for the currently selected vehicle
+              const currentVehicleRego = vehicle?.rego?.toUpperCase();
+              const vehicleJobs = currentVehicleRego
+                ? activeJobs.filter(j => {
+                    const jobRego = ((j as any).vehicle_rego || j.vehicleId || '').toUpperCase();
+                    return !jobRego || jobRego === currentVehicleRego;
+                  })
+                : activeJobs;
+              const upcomingJobs = vehicleJobs.filter(j => j.status !== 'completed').sort(sortByDate);
+              const pastJobs = vehicleJobs.filter(j => j.status === 'completed').sort(sortByDate);
+              const visibleJobs = jobsView === 'past' ? pastJobs : upcomingJobs;
+              return (
+            <>
+            <div className="flex items-center justify-between gap-3 flex-wrap">
+              <h3 className="text-2xl font-bold tracking-tight">My Jobs</h3>
+              <div className="flex rounded-xl border border-border overflow-hidden text-xs font-black">
+                <button type="button" onClick={() => setJobsView('active')} className={`px-4 py-2 transition-all ${jobsView === 'active' ? 'bg-torqued-red text-white' : 'bg-card text-muted hover:text-foreground'}`}>Upcoming{upcomingJobs.length ? ` (${upcomingJobs.length})` : ''}</button>
+                <button type="button" onClick={() => setJobsView('past')} className={`px-4 py-2 transition-all ${jobsView === 'past' ? 'bg-torqued-red text-white' : 'bg-card text-muted hover:text-foreground'}`}>Completed{pastJobs.length ? ` (${pastJobs.length})` : ''}</button>
+              </div>
+            </div>
+            {visibleJobs.length === 0 ? (
+              <Card className="p-12 text-center text-muted italic bg-card border-border">{jobsView === 'past' ? 'No completed jobs yet.' : 'No upcoming jobs. Book a service to see it here.'}</Card>
             ) : (
-              activeJobs.map(job => (
+              visibleJobs.map(job => (
                 <Card key={job.id} className="p-6 space-y-6 bg-card border-border">
                   <div className="flex justify-between items-start">
                     <div>
-                      <h4 className="text-xl font-bold tracking-tight">{job.serviceIds.map(id => SERVICES.find(s => s.id === id)?.name).join(' & ')}</h4>
+                      {(() => {
+                        const isDiag = job.serviceIds.length === 1 && job.serviceIds[0] === 'diag_inspection';
+                        const qi = (job as any).quoteItems || jobDetail[job.id]?.quoteItems;
+                        if (qi) {
+                          const isEVQuote = (job.description || '').startsWith('[EV Quote Request]');
+                          const rawDesc = isEVQuote ? (job.description || '').replace('[EV Quote Request] ', '') : null;
+                          const quoteTitle = isEVQuote ? (rawDesc || summariseQuote(qi, false)) : summariseQuote(qi, isDiag);
+                          const isPaid = job.paymentStatus === 'confirmed';
+                          const isCompleted = job.status === 'completed';
+                          const subLine = isCompleted ? null : isPaid ? '✓ Booked, scheduled & paid'
+                            : isEVQuote ? '✓ Quote ready — no inspection fee'
+                            : isDiag ? '✓ Diagnostic inspection complete'
+                            : '✓ Your quote is ready';
+                          const jobRego = ((job as any).vehicle_rego || job.vehicleId || vehicle?.rego || '').toUpperCase();
+                          const jobVehicle = garageVehicles.find(gv => gv.rego?.toUpperCase() === jobRego) || (vehicle?.rego?.toUpperCase() === jobRego ? vehicle : null);
+                          const vehicleLabel = jobVehicle ? [jobVehicle.year, jobVehicle.make, jobVehicle.model, (jobVehicle as any).variant || null].filter(Boolean).join(' ') : '';
+                          const vehicleMileage = jobVehicle?.mileage ? `${Number(jobVehicle.mileage).toLocaleString()} km` : '';
+                          return (
+                            <div className="space-y-0.5">
+                              <h4 className="text-xl font-bold tracking-tight">{quoteTitle}</h4>
+                              {jobRego && <p className="text-[10px] font-bold uppercase tracking-wider text-muted">{jobRego}{vehicleLabel ? ` · ${vehicleLabel}` : ''}{vehicleMileage ? ` · ${vehicleMileage}` : ''}</p>}
+                              {subLine && <p className="text-xs text-emerald-500 font-bold">{subLine}</p>}
+                            </div>
+                          );
+                        }
+                        return (() => {
+                          const isCompleted = job.status === 'completed';
+                          const jobTotal = jobDetail[job.id]?.total || (job as any).totalPrice || (job as any).quotedPrice;
+                          const isEVQuote = (job.description || '').startsWith('[EV Quote Request]');
+                          const names = isEVQuote ? 'Quote Pending' : job.serviceIds.map(id => SERVICES.find(s => s.id === id)?.name || id).join(' & ') || 'Torqued Service';
+                          const jobRego2 = ((job as any).vehicle_rego || job.vehicleId || vehicle?.rego || '').toUpperCase();
+                          const jobVehicle2 = garageVehicles.find(gv => gv.rego?.toUpperCase() === jobRego2) || (vehicle?.rego?.toUpperCase() === jobRego2 ? vehicle : null);
+                          const vehicleLabel2 = jobVehicle2 ? [jobVehicle2.year, jobVehicle2.make, jobVehicle2.model, (jobVehicle2 as any).variant || null].filter(Boolean).join(' ') : '';
+                          const vehicleMileage2 = jobVehicle2?.mileage ? `${Number(jobVehicle2.mileage).toLocaleString()} km` : '';
+                          return (
+                            <div className="space-y-0.5">
+                              <h4 className="text-xl font-bold tracking-tight">{names}</h4>
+                              {jobRego2 && <p className="text-[10px] font-bold uppercase tracking-wider text-muted">{jobRego2}{vehicleLabel2 ? ` · ${vehicleLabel2}` : ''}{vehicleMileage2 ? ` · ${vehicleMileage2}` : ''}</p>}
+                              {isEVQuote && <p className="text-xs text-amber-400 font-bold">Your mechanic will review and send you a price.</p>}
+                              {!isEVQuote && jobTotal > 0 && <p className="text-xs text-muted font-bold">${Number(jobTotal).toFixed(2)} {isCompleted ? '· Completed' : ''}</p>}
+                            </div>
+                          );
+                        })();
+                      })()}
                       <div className="flex items-center gap-2 text-xs text-muted">
-                        <span>at {[...realMechanics, ...MOCK_MECHANICS].find(m => m.id === job.mechanicId)?.name || 'your workshop'}</span>
+                        <span>at {(job as any).mechanicName || realMechanics.find(m => m.id === job.mechanicId)?.name || 'your workshop'}</span>
                         <span>•</span>
                         {isEditingDate === job.id ? (
                           <div className="flex items-center gap-2">
@@ -4264,7 +5454,7 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                           </div>
                         ) : (
                           <div className="flex items-center gap-1">
-                            <span>{job.date}</span>
+                            <span>{job.date ? (() => { const d = new Date(job.date); return isNaN(d.getTime()) ? job.date : d.toLocaleDateString('en-NZ', { day: 'numeric', month: 'short', year: 'numeric' }); })() : 'TBC'}</span>
                             <button onClick={() => {
                               setIsEditingDate(job.id);
                               setNewDate(job.date);
@@ -4275,72 +5465,176 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                         )}
                       </div>
                     </div>
-                    <div className="text-right">
-                      <span className={cn(
-                        "text-[10px] font-bold uppercase px-2 py-1 rounded",
-                        job.paymentStatus === 'confirmed' ? "bg-emerald-500/10 text-emerald-400" : 
-                        job.paymentStatus === 'awaiting_approval' ? "bg-indigo-500/10 text-indigo-400" :
-                        "bg-torqued-red/10 text-torqued-red"
-                      )}>
-                        {job.paymentStatus === 'confirmed' ? 'Confirmed' : 
-                         job.paymentStatus === 'awaiting_approval' ? 'Pending Approval' : 
-                         'Partially Paid'}
-                      </span>
-                      <p className="text-[10px] text-muted mt-1 uppercase font-bold tracking-widest">{job.paymentMethod}</p>
-                    </div>
+                    {job.status !== 'completed' && (
+                      <div className="text-right">
+                        <span className={cn(
+                          "text-[10px] font-bold uppercase px-2 py-1 rounded",
+                          job.paymentStatus === 'confirmed' ? "bg-emerald-500/10 text-emerald-400" :
+                          job.paymentStatus === 'awaiting_approval' ? "bg-indigo-500/10 text-indigo-400" :
+                          (job.description || '').startsWith('[EV Quote Request]') ? "bg-amber-500/10 text-amber-400" :
+                          "bg-torqued-red/10 text-torqued-red"
+                        )}>
+                          {job.paymentStatus === 'confirmed' ? 'Confirmed' :
+                           job.paymentStatus === 'awaiting_approval' ? 'Pending Approval' :
+                           job.paymentStatus === 'partially_paid' ? 'Partially Paid' :
+                           (job.description || '').startsWith('[EV Quote Request]') ? 'Quote Requested' :
+                           'Pending Payment'}
+                        </span>
+                        <p className="text-[10px] text-muted mt-1 uppercase font-bold tracking-widest">{job.paymentMethod}</p>
+                      </div>
+                    )}
                   </div>
 
-                  {job.serviceIds.includes('diag_inspection') && (
-                    <div className="p-4 bg-torqued-red/5 border border-torqued-red/15 rounded-2xl flex items-start gap-3">
-                      <Info size={16} className="text-torqued-red mt-0.5 shrink-0" />
-                      <p className="text-xs text-foreground/80 leading-relaxed">
-                        <span className="font-bold">Diagnostic Inspection booked.</span> We'll let you know once the mechanic has diagnosed your vehicle, and you'll be able to review and accept your quote right here.
-                      </p>
-                    </div>
-                  )}
+                  {(() => {
+                    const isDiag = job.serviceIds.includes('diag_inspection');
+                    const qi = (job as any).quoteItems || jobDetail[job.id]?.quoteItems;
+                    const hasQuote = !!qi;
+                    const isPaid = job.paymentStatus === 'confirmed';
+                    const isCompleted = job.status === 'completed';
+                    // Paid & upcoming → confirmation banner
+                    if (hasQuote && isPaid && !isCompleted) {
+                      const dateStr = job.date ? (() => { const dt = new Date(job.date); return isNaN(dt.getTime()) ? job.date : dt.toLocaleDateString('en-NZ', { weekday: 'long', day: 'numeric', month: 'long' }); })() : null;
+                      return (
+                        <div className="p-4 bg-emerald-500/8 border border-emerald-500/20 rounded-2xl flex items-start gap-3">
+                          <CheckCircle2 size={16} className="text-emerald-500 mt-0.5 shrink-0" />
+                          <div className="space-y-0.5">
+                            <p className="text-xs font-bold text-foreground">Booked, scheduled & paid.</p>
+                            {dateStr && <p className="text-xs text-muted">Drop off {dateStr}. We'll let you know when your vehicle is ready.</p>}
+                          </div>
+                        </div>
+                      );
+                    }
+                    // Quote ready — only show for non-completed jobs
+                    if (hasQuote && !isCompleted) {
+                      const isEVQuote = (job.description || '').startsWith('[EV Quote Request]');
+                      return (
+                        <div className="p-4 bg-emerald-500/8 border border-emerald-500/20 rounded-2xl flex items-start gap-3">
+                          <CheckCircle2 size={16} className="text-emerald-500 mt-0.5 shrink-0" />
+                          <div className="space-y-0.5">
+                            <p className="text-xs font-bold text-foreground">
+                              {isEVQuote ? 'Your quote is ready — review and accept below.'
+                               : isDiag ? 'Inspection complete — your repair quote is ready below.'
+                               : 'Your quote is ready — review the details below.'}
+                            </p>
+                            {isDiag && !isEVQuote && <p className="text-xs text-muted">The $99 diagnostic fee has already been paid and is not included in the quote total.</p>}
+                          </div>
+                        </div>
+                      );
+                    }
+                    // EV quote request — pending quote (no diag fee)
+                    if (isDiag && (job.description || '').startsWith('[EV Quote Request]')) {
+                      return (
+                        <div className="p-4 bg-amber-500/5 border border-amber-500/20 rounded-2xl flex items-start gap-3">
+                          <Info size={16} className="text-amber-400 mt-0.5 shrink-0" />
+                          <p className="text-xs text-foreground/80 leading-relaxed">
+                            <span className="font-bold">Quote request sent.</span> Your mechanic will review the work requested and send you a price. You'll receive an email when your quote is ready.
+                          </p>
+                        </div>
+                      );
+                    }
+                    // Diagnostic booked but not yet quoted
+                    if (isDiag) {
+                      return (
+                        <div className="p-4 bg-torqued-red/5 border border-torqued-red/15 rounded-2xl flex items-start gap-3">
+                          <Info size={16} className="text-torqued-red mt-0.5 shrink-0" />
+                          <p className="text-xs text-foreground/80 leading-relaxed">
+                            <span className="font-bold">Diagnostic Inspection booked.</span> We'll let you know once the mechanic has diagnosed your vehicle, and you'll be able to review and accept your repair quote right here.
+                          </p>
+                        </div>
+                      );
+                    }
+                    return null;
+                  })()}
 
-                  <div className="space-y-3">
-                    <div className="flex justify-between text-[10px] font-bold uppercase text-muted">
-                      <span>Booked</span>
-                      <span>In Progress</span>
-                      <span>Ready</span>
-                    </div>
-                    <div className="h-2 bg-border rounded-full overflow-hidden">
-                      <motion.div 
-                        initial={{ width: 0 }}
-                        animate={{ width: '20%' }}
-                        className="h-full bg-torqued-red"
-                      />
-                    </div>
-                  </div>
+                  {(() => {
+                    const isDiag = job.serviceIds.includes('diag_inspection');
+                    const hasQuote = !!jobDetail[job.id]?.quoteItems;
+                    // Progress: booked/confirmed = start, in_progress/quote sent = mid, completed = end
+                    const progress = job.status === 'completed' ? '100%'
+                      : job.status === 'in_progress' ? '50%'
+                      : isDiag && hasQuote ? '66%'
+                      : isDiag ? '20%'
+                      : ['booked', 'accepted', 'confirmed'].includes(job.status) ? '10%'
+                      : '5%';
+                    return (
+                      <div className="space-y-3">
+                        <div className="flex justify-between text-[10px] font-bold uppercase text-muted">
+                          <span>Booked</span>
+                          <span>In Progress</span>
+                          <span>Ready</span>
+                        </div>
+                        <div className="h-2 bg-border rounded-full overflow-hidden">
+                          <motion.div initial={{ width: 0 }} animate={{ width: progress }} className="h-full bg-torqued-red" />
+                        </div>
+                      </div>
+                    );
+                  })()}
 
                   {/* Itemised quote (parts + labour) — loaded on demand from the booking detail */}
                   {(() => {
                     const d = jobDetail[job.id];
-                    const qi = d?.quoteItems;
+                    const qi = d?.quoteItems || (job as any).quoteItems;
                     if (!qi) return null;
+                    const isDiag = job.serviceIds.includes('diag_inspection');
                     const parts = Array.isArray(qi.parts) ? qi.parts.filter((p: any) => p.name) : [];
                     const labourTotal = (qi.labourHours || 0) * (qi.labourRate || 0);
+                    // Compute a fallback total if the booking detail hasn't loaded yet.
+                    const computedTotal = parts.reduce((s: number, p: any) => s + (p.unitPrice || 0) * (p.qty || 1), 0)
+                      + labourTotal + (Number(qi.shopFee) || 0)
+                      + (Array.isArray(qi.other) ? qi.other.reduce((s: number, o: any) => s + (o.amount || 0), 0) : 0)
+                      - (qi.discount || 0);
+                    const displayTotal = d?.total > 0 ? d.total : computedTotal;
                     return (
                       <div className="pt-4 border-t border-border space-y-2">
                         <p className="text-[10px] font-black uppercase tracking-widest text-muted">Itemised Quote</p>
-                        {parts.map((p: any, i: number) => (
-                          <div key={i} className="flex justify-between text-xs">
-                            <span className="text-foreground/80">{p.name}{p.qty > 1 ? ` ×${p.qty}` : ''}</span>
-                            <span className="font-mono">${((p.unitPrice || 0) * (p.qty || 1)).toFixed(2)}</span>
-                          </div>
-                        ))}
-                        {labourTotal > 0 && (
+                        {parts.length === 0 && labourTotal === 0 ? (
+                          // Flat quote — mechanic set a total without a parts breakdown
                           <div className="flex justify-between text-xs">
-                            <span className="text-foreground/80">Labour ({qi.labourHours}h @ ${qi.labourRate}/hr)</span>
-                            <span className="font-mono">${labourTotal.toFixed(2)}</span>
+                            <span className="text-foreground/80">{job.serviceIds.map((id: string) => SERVICES.find(s => s.id === id)?.name || id).join(' & ') || 'Workshop Service'}</span>
+                            <span className="font-mono">{displayTotal > 0 ? `$${Number(displayTotal).toFixed(2)}` : '—'}</span>
                           </div>
+                        ) : (
+                          <>
+                            {parts.map((p: any, i: number) => (
+                              <div key={i} className="flex justify-between text-xs">
+                                <span className="text-foreground/80">{p.name}{p.qty > 1 ? ` ×${p.qty}` : ''}</span>
+                                <span className="font-mono">${((p.unitPrice || 0) * (p.qty || 1)).toFixed(2)}</span>
+                              </div>
+                            ))}
+                            {labourTotal > 0 && (
+                              <div className="flex justify-between text-xs">
+                                <span className="text-foreground/80">Labour ({qi.labourHours}h @ ${qi.labourRate}/hr)</span>
+                                <span className="font-mono">${labourTotal.toFixed(2)}</span>
+                              </div>
+                            )}
+                            {qi.shopFee > 0 && (
+                              <div className="flex justify-between text-xs">
+                                <span className="text-foreground/80">Workshop fee</span>
+                                <span className="font-mono">${Number(qi.shopFee).toFixed(2)}</span>
+                              </div>
+                            )}
+                          </>
                         )}
-                        {d?.total > 0 && (
+                        {displayTotal > 0 && (
                           <div className="flex justify-between text-sm font-bold pt-2 border-t border-border">
                             <span>Total (GST incl.)</span>
-                            <span className="text-torqued-red font-mono">${Number(d.total).toFixed(2)}</span>
+                            <span className="text-torqued-red font-mono">${Number(displayTotal).toFixed(2)}</span>
                           </div>
+                        )}
+                        {!displayTotal && (
+                          <p className="text-xs text-muted italic">Total awaiting confirmation from workshop.</p>
+                        )}
+                        {isDiag && (
+                          <p className="text-[10px] text-muted italic pt-1">$99 diagnostic inspection fee already paid — not included above.</p>
+                        )}
+                        {!['confirmed'].includes(job.paymentStatus) && !['completed', 'cancelled'].includes(job.status) && (
+                          <Button fullWidth className="bg-torqued-red text-white mt-2" onClick={() => {
+                            const amount = d?.total || (job as any).quotedPrice || job.totalPrice;
+                            if (!amount) return;
+                            openRepairAccept(job, amount);
+                          }}>
+                            {isDiag ? 'Accept & pay for this repair' : 'Accept & pay for this quote'}
+                          </Button>
                         )}
                       </div>
                     );
@@ -4368,28 +5662,85 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                   )}
 
                   <div className="pt-4 border-t border-border flex flex-wrap gap-2 justify-end">
-                    {job.paymentStatus !== 'awaiting_approval' && (
+                    {job.status !== 'completed' && job.status !== 'cancelled' && job.paymentStatus !== 'awaiting_approval' && (
                       <Button size="sm" variant="outline"
                         className="border-border text-foreground hover:bg-background flex items-center gap-1.5 h-9 rounded-xl font-bold text-xs"
                         onClick={() => { setReschedJob(reschedJob === job.id ? null : job.id); setReschedDate((job.date || '').slice(0, 10)); loadJobDetail(job); }}>
                         <Edit2 size={14} className="text-torqued-red" /> Reschedule
                       </Button>
                     )}
-                    <Button size="sm" variant="outline"
-                      className="border-border text-foreground hover:bg-background flex items-center gap-1.5 h-9 rounded-xl font-bold text-xs"
-                      disabled={jobBusy === job.id}
-                      onClick={() => cancelJob(job)}>
-                      <X size={14} className="text-torqued-red" /> Cancel booking
-                    </Button>
+                    {job.status !== 'completed' && job.status !== 'cancelled' && (
+                      <Button size="sm" variant="outline"
+                        className="border-border text-foreground hover:bg-background flex items-center gap-1.5 h-9 rounded-xl font-bold text-xs"
+                        disabled={jobBusy === job.id}
+                        onClick={() => cancelJob(job)}>
+                        <X size={14} className="text-torqued-red" /> Cancel booking
+                      </Button>
+                    )}
                     <Button size="sm" variant="outline"
                       className="border-border text-foreground hover:bg-background flex items-center gap-1.5 h-9 rounded-xl font-bold text-xs"
                       onClick={() => generateBookingPDF(job)}>
-                      <Download size={14} className="text-torqued-red" /> Download Quote PDF
+                      <Download size={14} className="text-torqued-red" /> {(job.paymentStatus === 'confirmed' || job.status === 'completed') ? 'Download Invoice' : 'Download Quote PDF'}
                     </Button>
+                    {job.serviceIds?.includes('ppi') && job.status === 'completed' && (
+                      <Button size="sm" variant="outline"
+                        className="border-border text-foreground hover:bg-background flex items-center gap-1.5 h-9 rounded-xl font-bold text-xs"
+                        onClick={async () => {
+                          const rego = (job as any).vehicleId || '';
+                          const res = await fetch(`/api/customer/ppi-report?rego=${encodeURIComponent(rego)}`);
+                          const d = await res.json();
+                          if (!d.ppi) { alert('PPI report not found. The mechanic may not have completed the digital report yet.'); return; }
+                          const ppi = d.ppi;
+                          const jsPDF = (await import('jspdf')).default;
+                          const doc = new jsPDF({ unit: 'mm', format: 'a4' });
+                          doc.setFillColor(255, 24, 0); doc.rect(0, 30, 210, 2, 'F');
+                          doc.setTextColor(21, 4, 2); doc.setFont('Helvetica', 'bold'); doc.setFontSize(11);
+                          doc.text('PRE-PURCHASE INSPECTION REPORT', 195, 16, { align: 'right' });
+                          doc.setFont('Helvetica', 'normal'); doc.setFontSize(8.5); doc.setTextColor(80, 80, 80);
+                          doc.text(new Date(ppi.completed_at || ppi.created_at).toLocaleDateString('en-NZ', { day: 'numeric', month: 'short', year: 'numeric' }), 195, 24);
+                          doc.setTextColor(21, 4, 2); doc.setFontSize(9.5); doc.setFont('Helvetica', 'bold'); doc.text('VEHICLE', 15, 44);
+                          doc.setFont('Helvetica', 'normal');
+                          const vDesc = [ppi.make, ppi.model, ppi.submodel].filter(Boolean).join(' ');
+                          if (vDesc) doc.text(vDesc, 15, 50); doc.text(String(ppi.rego || rego), 15, vDesc ? 55 : 50);
+                          if (ppi.mileage) doc.text(`${Number(ppi.mileage).toLocaleString()} km`, 15, 60);
+                          doc.setFont('Helvetica', 'bold'); doc.text('CUSTOMER', 115, 44);
+                          doc.setFont('Helvetica', 'normal');
+                          if (ppi.customer_name) doc.text(ppi.customer_name, 115, 50);
+                          if (ppi.customer_email) doc.text(ppi.customer_email, 115, ppi.customer_name ? 55 : 50);
+                          let y = 70;
+                          const checklist = Array.isArray(ppi.checklist) ? ppi.checklist : [];
+                          let lastCat = '';
+                          checklist.forEach((c: any) => {
+                            if (c.category !== lastCat) {
+                              if (y + 14 > 280) { doc.addPage(); y = 20; }
+                              doc.setFont('Helvetica', 'bold'); doc.setFontSize(10); doc.setTextColor(255, 24, 0);
+                              doc.text(c.category.toUpperCase(), 15, y); doc.setDrawColor(226, 232, 240); doc.line(15, y + 2, 195, y + 2);
+                              y += 8; lastCat = c.category;
+                            }
+                            if (y + 6 > 280) { doc.addPage(); y = 20; }
+                            doc.setFontSize(8.5); doc.setFont('Helvetica', 'normal'); doc.setTextColor(21, 4, 2);
+                            doc.text(doc.splitTextToSize(c.item, 150), 15, y);
+                            const stColor: [number,number,number] = c.status === 'Pass' ? [16,185,129] : c.status === 'Fail' ? [255,24,0] : c.status === 'Attention Needed' ? [217,119,6] : [120,120,120];
+                            doc.setFont('Helvetica', 'bold'); doc.setTextColor(...stColor); doc.text(c.status, 195, y, { align: 'right' });
+                            doc.setTextColor(21, 4, 2); y += 5;
+                            if (c.note) { doc.setFont('Helvetica', 'italic'); doc.setFontSize(7.5); doc.setTextColor(100,100,100); doc.splitTextToSize(`— ${c.note}`, 170).forEach((l: string) => { doc.text(l, 18, y); y += 4; }); }
+                          });
+                          const block = (t: string, txt: string) => { if (!txt?.trim()) return; if (y + 14 > 280) { doc.addPage(); y = 20; } doc.setFont('Helvetica','bold'); doc.setFontSize(10); doc.setTextColor(255,24,0); doc.text(t, 15, y); y += 6; doc.setFont('Helvetica','normal'); doc.setFontSize(8.5); doc.setTextColor(21,4,2); doc.splitTextToSize(txt.trim(), 180).forEach((l: string) => { if (y + 5 > 280) { doc.addPage(); y = 20; } doc.text(l, 15, y); y += 4.5; }); y += 3; };
+                          block("INSPECTOR'S COMMENTS", ppi.inspector_comments); block('RECOMMENDATIONS', ppi.recommendations);
+                          doc.setFontSize(7.5); doc.setTextColor(150,150,150);
+                          doc.text('Pre-Purchase Inspection via Torqued. A visual & functional assessment only — not a guarantee of future reliability.', 15, 285, { maxWidth: 180 });
+                          doc.save(`Torqued-PPI-${String(ppi.rego || rego).toUpperCase()}.pdf`);
+                        }}>
+                        <Download size={14} className="text-torqued-red" /> Download PPI Report
+                      </Button>
+                    )}
                   </div>
                 </Card>
               ))
             )}
+            </>
+              );
+            })()}
           </section>
 
           {/* Ask Torqued AI — customer diagnostic assistant */}
@@ -4407,10 +5758,144 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
             </Card>
           </section>
 
+          {/* Pre-Purchase Inspection — routes into the standard quote flow */}
+          {ppiWorkshops.length > 0 && (
+            <section className="space-y-4">
+              <Card className="p-6 bg-card border-border flex items-center gap-4 cursor-pointer hover:border-torqued-red/40 transition-all"
+                onClick={() => { setSelectedServices(['ppi']); setStep(1); setView('quote'); }}>
+                <div className="w-12 h-12 rounded-2xl bg-torqued-red/15 flex items-center justify-center shrink-0 text-xl">🔎</div>
+                <div className="flex-1 min-w-0">
+                  <h4 className="text-lg font-bold">Pre-Purchase Inspection</h4>
+                  <p className="text-sm text-muted">Buying a used car? Get an independent $199 inspection by a Torqued workshop.</p>
+                </div>
+                <ChevronRight size={20} className="text-muted shrink-0" />
+              </Card>
+            </section>
+          )}
+
+          {/* Sign out — always visible at the bottom of the garage */}
+          {(user || customerVerifiedAt) && (
+            <div className="pt-4 border-t border-border">
+              <button
+                onClick={async () => { clearCustomerSession(); try { await logout(); } catch {} }}
+                className="w-full flex items-center justify-center gap-2 py-3 rounded-2xl border border-border text-sm font-bold text-muted hover:text-torqued-red hover:border-torqued-red/40 hover:bg-torqued-red/5 transition-all"
+              >
+                Sign Out
+              </button>
+            </div>
+          )}
+
         </div>
       </div>
     );
   };
+
+  // Full-screen standalone service-history grant page
+  if (grantHistoryMode) {
+    return (
+      <div className="min-h-screen bg-background text-foreground flex flex-col items-center justify-center p-6">
+        <div className="w-full max-w-md space-y-6 text-center">
+          <div className="flex justify-center"><Logo /></div>
+          {grantState === 'loading' || grantState === 'idle' ? (
+            <div className="space-y-3"><div className="w-10 h-10 border-4 border-torqued-red border-t-transparent rounded-full animate-spin mx-auto" /><p className="text-sm text-muted font-bold">Granting access…</p></div>
+          ) : grantState === 'done' ? (
+            <div className="bg-card border border-border rounded-3xl p-8 space-y-4 shadow-xl">
+              <div className="w-14 h-14 mx-auto rounded-2xl bg-emerald-500/10 border border-emerald-500/20 flex items-center justify-center text-emerald-500"><CheckCircle2 size={26} /></div>
+              <h2 className="text-2xl font-black tracking-tight">Access granted</h2>
+              <p className="text-sm text-muted">The workshop can now view your vehicle's Torqued service history for the next 12 hours. You can close this page.</p>
+            </div>
+          ) : (
+            <div className="bg-card border border-border rounded-3xl p-8 space-y-4 shadow-xl">
+              <div className="w-14 h-14 mx-auto rounded-2xl bg-torqued-red/10 border border-torqued-red/20 flex items-center justify-center text-torqued-red"><X size={26} /></div>
+              <h2 className="text-2xl font-black tracking-tight">Link expired</h2>
+              <p className="text-sm text-muted">This access link is invalid or has expired (links last 12 hours). Ask the workshop to send a new one.</p>
+            </div>
+          )}
+        </div>
+      </div>
+    );
+  }
+
+  // Full-screen standalone reschedule-confirmation page — no portal chrome / rego gate
+  if (rescheduleMode) {
+    return (
+      <div className="min-h-screen bg-background text-foreground flex flex-col items-center justify-center p-6">
+        <div className="w-full max-w-md space-y-6 text-center">
+          <div className="flex justify-center"><Logo /></div>
+          {rescheduleAcceptState === 'loading' || rescheduleAcceptState === 'idle' ? (
+            <div className="space-y-3">
+              <div className="w-10 h-10 border-4 border-torqued-red border-t-transparent rounded-full animate-spin mx-auto" />
+              <p className="text-sm text-muted font-bold">Confirming your new appointment…</p>
+            </div>
+          ) : rescheduleAcceptState === 'done' ? (
+            <div className="bg-card border border-border rounded-3xl p-8 space-y-4 shadow-xl">
+              <div className="w-14 h-14 mx-auto rounded-2xl bg-emerald-500/10 border border-emerald-500/20 flex items-center justify-center text-emerald-500"><CheckCircle2 size={26} /></div>
+              <h2 className="text-2xl font-black tracking-tight">Reschedule confirmed</h2>
+              <p className="text-sm text-muted">Your new appointment is</p>
+              <p className="text-lg font-black text-torqued-red">{rescheduleAcceptDate}</p>
+              <p className="text-xs text-muted">Your mechanic has been notified. You can close this page.</p>
+              <Button fullWidth className="bg-torqued-red text-white mt-2" onClick={() => { window.location.href = '/customer'; }}>Go to My Garage</Button>
+            </div>
+          ) : (
+            <div className="bg-card border border-border rounded-3xl p-8 space-y-4 shadow-xl">
+              <div className="w-14 h-14 mx-auto rounded-2xl bg-torqued-red/10 border border-torqued-red/20 flex items-center justify-center text-torqued-red"><X size={26} /></div>
+              <h2 className="text-2xl font-black tracking-tight">Couldn't confirm</h2>
+              <p className="text-sm text-muted">This reschedule link may have expired or already been used. Please contact your workshop directly.</p>
+              <Button fullWidth variant="outline" className="border-border text-foreground mt-2" onClick={() => { window.location.href = '/customer'; }}>Go to My Garage</Button>
+            </div>
+          )}
+        </div>
+      </div>
+    );
+  }
+
+  // Full-screen standalone quote page — no portal chrome
+  if (quoteOnlyMode) {
+    return (
+      <div className="min-h-screen bg-background text-foreground flex flex-col items-center justify-center p-6">
+        <div className="w-full max-w-md space-y-6">
+          <Logo />
+          {!quoteReview ? (
+            <div className="text-center space-y-3">
+              <div className="w-10 h-10 border-4 border-torqued-red border-t-transparent rounded-full animate-spin mx-auto" />
+              <p className="text-sm text-muted font-bold">Loading your quote…</p>
+            </div>
+          ) : (
+            <div className="bg-card border border-border rounded-3xl p-7 space-y-5 shadow-xl">
+              <div className="space-y-1">
+                <span className="torqued-badge text-[10px]">YOUR QUOTE IS READY</span>
+                <h2 className="text-2xl font-black tracking-tight mt-2">{quoteReview.vehicleLabel || quoteReview.rego}</h2>
+                {quoteReview.mechanicName && <p className="text-sm text-muted">Prepared by {quoteReview.mechanicName}</p>}
+              </div>
+
+              <div className="rounded-2xl border border-border bg-background p-4 space-y-2">
+                {(quoteReview.serviceIds || []).map((id: string) => (
+                  <div key={id} className="flex justify-between text-sm">
+                    <span className="font-medium">{SERVICES.find(s => s.id === id)?.name || id}</span>
+                    <span className="text-muted text-xs uppercase font-bold tracking-widest">Included</span>
+                  </div>
+                ))}
+                {quoteReview.note && <p className="text-xs text-muted border-t border-border pt-2 mt-1">{quoteReview.note}</p>}
+                <div className="flex justify-between items-end border-t border-border pt-3 mt-1">
+                  <span className="text-xs font-black uppercase tracking-widest text-muted">Total (GST incl.)</span>
+                  <span className="text-2xl font-black text-torqued-red">${Number(quoteReview.total).toFixed(2)}</span>
+                </div>
+              </div>
+
+              {quoteReview.paymentStatus === 'confirmed' ? (
+                <div className="text-center text-emerald-500 font-bold text-sm py-2">✓ This quote has already been paid.</div>
+              ) : (
+                <Button fullWidth size="lg" className="bg-torqued-red text-white" disabled={quotePaying} onClick={payQuote}>
+                  {quotePaying ? 'Opening secure checkout…' : 'Review & pay securely'}
+                </Button>
+              )}
+              <p className="text-[11px] text-muted text-center">Flexible payment options (incl. Afterpay, Klarna) at checkout.</p>
+            </div>
+          )}
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className={cn(
@@ -4450,30 +5935,47 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
             })}
           </div>
 
-          <div className="opacity-0 group-hover:opacity-100 transition-all duration-500 translate-x-4 group-hover:translate-x-0 hidden md:block">
-             <button className="text-[10px] font-black uppercase tracking-[0.2em] text-muted hover:text-torqued-red px-4 py-2 transition-colors">
-               Mechanic Login / Sign Up
-             </button>
+          <div className="flex gap-2 items-center">
+            <Button
+              variant="outline"
+              size="sm"
+              className={cn("text-[10px] font-bold uppercase tracking-widest border-border transition-all", view === 'profile' ? 'bg-torqued-red text-white border-torqued-red' : 'text-foreground hover:text-torqued-red hover:bg-card')}
+              onClick={() => setView('profile')}
+              title="Manage profile and permissions"
+            >
+              <Settings size={14} className="mr-1.5" /> Profile
+            </Button>
+            <Button
+              variant="outline"
+              size="sm"
+              className="text-foreground hover:text-torqued-red hover:bg-card rounded-full px-6 font-bold uppercase tracking-widest text-[10px] border-border transition-all"
+              onClick={() => {
+                setStep(1);
+                setView(view === 'quote' ? 'dashboard' : 'quote');
+              }}
+            >
+              {view === 'quote' ? <><Car size={16} className="mr-2" /> My Garage</> : <><Wrench size={16} className="mr-2" /> Get Quote</>}
+            </Button>
           </div>
-          <Button 
-            variant="outline" 
-            size="sm" 
-            className="text-foreground hover:text-torqued-red hover:bg-card rounded-full px-6 font-bold uppercase tracking-widest text-[10px] border-border transition-all" 
-            onClick={() => {
-              setStep(1);
-              setView(view === 'quote' ? 'dashboard' : 'quote');
-            }}
-          >
-            {view === 'quote' ? <><Car size={16} className="mr-2" /> My Garage</> : <><Wrench size={16} className="mr-2" /> Get Quote</>}
-          </Button>
         </div>
       </nav>
 
+      {rescheduleAcceptState !== 'idle' && (
+        <div className={`w-full px-4 py-3 text-sm font-bold text-center ${rescheduleAcceptState === 'done' ? 'bg-emerald-500/10 text-emerald-600 border-b border-emerald-500/20' : rescheduleAcceptState === 'error' ? 'bg-torqued-red/10 text-torqued-red border-b border-torqued-red/20' : 'bg-muted/10 text-muted border-b border-border'}`}>
+          {rescheduleAcceptState === 'loading' && 'Confirming your reschedule…'}
+          {rescheduleAcceptState === 'done' && `Reschedule confirmed. New appointment: ${rescheduleAcceptDate}. Your mechanic has been notified.`}
+          {rescheduleAcceptState === 'error' && 'Could not confirm reschedule — the link may have expired. Please contact us directly.'}
+        </div>
+      )}
+
       <main className="flex-1 max-w-4xl mx-auto w-full p-6 py-8 md:py-16">
         <AnimatePresence mode="wait">
-          {view === 'quote' ? renderStep() : renderDashboard()}
+          {view === 'quote' ? renderStep() : view === 'profile' ? renderProfile() : renderDashboard()}
         </AnimatePresence>
       </main>
+
+      {/* Load mechanic access on profile view mount */}
+      <> {view === 'profile' && !accessLoading && mechanicAccess.length === 0 && (customerOwnerId || garageVehicles.length > 0) && (() => { setTimeout(loadMechanicAccess, 0); return null; })()}</>
 
       {/* Verification overlay for registered plates */}
       <AnimatePresence>
@@ -4841,6 +6343,113 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
         )}
       </AnimatePresence>
 
+      {/* Upload or Add Service History sheet */}
+      <AnimatePresence>
+        {showHistorySheet && (
+          <div className="fixed inset-0 z-[125] flex items-end sm:items-center justify-center bg-black/60 backdrop-blur-sm" onClick={() => { setShowHistorySheet(false); setShowHistoryEntry(false); }}>
+            <motion.div
+              initial={{ opacity: 0, y: 40 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: 40 }}
+              className="w-full max-w-md bg-card border border-border rounded-t-3xl sm:rounded-3xl p-6 space-y-4 shadow-2xl"
+              onClick={e => e.stopPropagation()}
+            >
+              {!showHistoryEntry ? (
+                <>
+                  <div className="flex items-center justify-between">
+                    <h3 className="text-lg font-black tracking-tight">Add to Service History</h3>
+                    <button onClick={() => setShowHistorySheet(false)} className="text-muted hover:text-foreground text-2xl leading-none">×</button>
+                  </div>
+                  <p className="text-xs text-muted">Upload a receipt and we'll scan it automatically, or enter the details yourself.</p>
+                  <div className="grid grid-cols-1 gap-3">
+                    <button
+                      onClick={() => { setShowHistorySheet(false); document.getElementById('history-upload-input')?.click(); }}
+                      className="flex items-center gap-4 p-4 rounded-2xl border border-border hover:border-torqued-red/40 hover:bg-torqued-red/5 transition-all text-left"
+                    >
+                      <div className="w-10 h-10 rounded-xl bg-torqued-red/10 flex items-center justify-center shrink-0">
+                        <Upload size={18} className="text-torqued-red" />
+                      </div>
+                      <div>
+                        <p className="text-sm font-bold">Upload Receipt</p>
+                        <p className="text-xs text-muted">Choose a photo or PDF — we'll extract the details automatically.</p>
+                      </div>
+                    </button>
+                    <button
+                      onClick={() => { setEntryDate(''); setEntryService(''); setEntryProvider(''); setEntryMileage(''); setEntryPrice(''); setEntryNotes(''); setShowHistoryEntry(true); }}
+                      className="flex items-center gap-4 p-4 rounded-2xl border border-border hover:border-torqued-red/40 hover:bg-background transition-all text-left"
+                    >
+                      <div className="w-10 h-10 rounded-xl bg-border flex items-center justify-center shrink-0">
+                        <Edit2 size={18} className="text-foreground" />
+                      </div>
+                      <div>
+                        <p className="text-sm font-bold">Enter Manually</p>
+                        <p className="text-xs text-muted">Type in the date, work done, provider, mileage and cost.</p>
+                      </div>
+                    </button>
+                  </div>
+                </>
+              ) : (
+                <>
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-2">
+                      <button onClick={() => setShowHistoryEntry(false)} className="text-muted hover:text-foreground">
+                        <ArrowLeft size={16} />
+                      </button>
+                      <h3 className="text-lg font-black tracking-tight">Service Record</h3>
+                    </div>
+                    <button onClick={() => { setShowHistorySheet(false); setShowHistoryEntry(false); }} className="text-muted hover:text-foreground text-2xl leading-none">×</button>
+                  </div>
+                  <div className="space-y-3">
+                    <div className="grid grid-cols-2 gap-3">
+                      <div className="space-y-1">
+                        <label className="text-[10px] font-black uppercase tracking-widest text-muted">Date *</label>
+                        <input type="date" value={entryDate} onChange={e => setEntryDate(e.target.value)}
+                          className="w-full bg-background border border-border rounded-xl px-3 py-2 text-sm text-foreground outline-none focus:border-torqued-red transition-all" />
+                      </div>
+                      <div className="space-y-1">
+                        <label className="text-[10px] font-black uppercase tracking-widest text-muted">Mileage (km)</label>
+                        <input type="text" value={entryMileage} onChange={e => setEntryMileage(e.target.value)} placeholder="e.g. 103000"
+                          className="w-full bg-background border border-border rounded-xl px-3 py-2 text-sm text-foreground outline-none focus:border-torqued-red transition-all" />
+                      </div>
+                    </div>
+                    <div className="space-y-1">
+                      <label className="text-[10px] font-black uppercase tracking-widest text-muted">Service Performed *</label>
+                      <input type="text" value={entryService} onChange={e => setEntryService(e.target.value)} placeholder="e.g. Oil & filter change"
+                        className="w-full bg-background border border-border rounded-xl px-3 py-2 text-sm text-foreground outline-none focus:border-torqued-red transition-all" />
+                    </div>
+                    <div className="grid grid-cols-2 gap-3">
+                      <div className="space-y-1">
+                        <label className="text-[10px] font-black uppercase tracking-widest text-muted">Provider</label>
+                        <input type="text" value={entryProvider} onChange={e => setEntryProvider(e.target.value)} placeholder="e.g. Precision Mech"
+                          className="w-full bg-background border border-border rounded-xl px-3 py-2 text-sm text-foreground outline-none focus:border-torqued-red transition-all" />
+                      </div>
+                      <div className="space-y-1">
+                        <label className="text-[10px] font-black uppercase tracking-widest text-muted">Price</label>
+                        <input type="text" value={entryPrice} onChange={e => setEntryPrice(e.target.value)} placeholder="e.g. $250"
+                          className="w-full bg-background border border-border rounded-xl px-3 py-2 text-sm text-foreground outline-none focus:border-torqued-red transition-all" />
+                      </div>
+                    </div>
+                    <div className="space-y-1">
+                      <label className="text-[10px] font-black uppercase tracking-widest text-muted">Notes</label>
+                      <input type="text" value={entryNotes} onChange={e => setEntryNotes(e.target.value)} placeholder="e.g. Full synthetic oil used"
+                        className="w-full bg-background border border-border rounded-xl px-3 py-2 text-sm text-foreground outline-none focus:border-torqued-red transition-all" />
+                    </div>
+                  </div>
+                  <div className="flex gap-2 pt-1">
+                    <Button variant="ghost" size="sm" onClick={() => setShowHistoryEntry(false)}>Back</Button>
+                    <Button size="sm" className="flex-1 bg-torqued-red text-white" disabled={!entryDate || !entryService} onClick={() => {
+                      const newItem = { date: entryDate, service: entryService, provider: entryProvider || 'Unknown', mileage: entryMileage, price: entryPrice, notes: entryNotes };
+                      setManualHistory(prev => [...prev, newItem].sort((a, b) => (new Date(b.date).getTime() || 0) - (new Date(a.date).getTime() || 0)));
+                      setShowHistorySheet(false);
+                      setShowHistoryEntry(false);
+                      setEntryDate(''); setEntryService(''); setEntryProvider(''); setEntryMileage(''); setEntryPrice(''); setEntryNotes('');
+                    }}>Save Record</Button>
+                  </div>
+                </>
+              )}
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
       {/* Review-and-pay modal (opened from a quote QR / link) */}
       <AnimatePresence>
         {quoteReview && (
@@ -4910,7 +6519,7 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                 <>
                   <div className="flex items-center gap-3 text-[10px] font-black uppercase tracking-widest text-muted/50"><span className="flex-1 h-px bg-border" />faster<span className="flex-1 h-px bg-border" /></div>
                   <Button fullWidth className="bg-torqued-red text-white" onClick={() => verifyWithPasskey(rego)}>
-                    🔑 Verify instantly with Face / Touch ID
+                    🔑 Verify instantly with passkey
                   </Button>
                   {passkeyError && <p className="text-xs text-torqued-red font-bold">{passkeyError}</p>}
                 </>
@@ -4921,11 +6530,102 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
         )}
       </AnimatePresence>
 
-      {/* Verification Code OTP Modal (legacy — no longer triggered) */}
+      {/* Verification Code OTP Modal */}
       <AnimatePresence>
+        {ppiOpen && (
+          <div className="fixed inset-0 z-[120] flex items-center justify-center p-4 bg-background/80 backdrop-blur-sm" onClick={() => !ppiBusy && setPpiOpen(false)}>
+            <div onClick={e => e.stopPropagation()} className="bg-card border border-border rounded-3xl p-7 w-full max-w-md space-y-5 shadow-2xl">
+              <div className="flex justify-between items-start">
+                <div>
+                  <h3 className="text-xl font-black tracking-tight text-foreground">Pre-Purchase Inspection</h3>
+                  <p className="text-sm text-muted">$199 flat fee · independent inspection before you buy. Excludes high-voltage (hybrid/EV) battery testing.</p>
+                </div>
+                <button onClick={() => setPpiOpen(false)} className="text-muted hover:text-foreground text-xl leading-none">✕</button>
+              </div>
+              <div className="space-y-3">
+                <div>
+                  <label className="text-[10px] font-black uppercase tracking-widest text-muted block mb-1">Number plate to inspect</label>
+                  <input value={ppiRego} onChange={e => setPpiRego(e.target.value.toUpperCase())} placeholder="e.g. ABC123" className="w-full bg-background border border-border rounded-xl px-3 py-2.5 text-sm font-mono tracking-widest text-foreground outline-none focus:border-torqued-red" />
+                </div>
+                <div>
+                  <label className="text-[10px] font-black uppercase tracking-widest text-muted block mb-1">Choose a workshop</label>
+                  <select value={ppiMechId} onChange={e => setPpiMechId(e.target.value)} className="w-full bg-background border border-border rounded-xl px-3 h-11 text-sm text-foreground outline-none focus:border-torqued-red">
+                    {ppiWorkshops.map(m => <option key={m.id} value={m.id}>{m.name}{m.suburb ? ` · ${m.suburb}` : ''}</option>)}
+                  </select>
+                </div>
+              </div>
+              <div className="flex justify-between items-center pt-1 border-t border-border">
+                <span className="text-sm font-bold text-foreground">Total</span>
+                <span className="text-xl font-black text-torqued-red font-mono">$199.00</span>
+              </div>
+              <Button fullWidth className="bg-torqued-red text-white" disabled={ppiBusy || !ppiRego.trim() || !ppiMechId} onClick={bookPPI}>
+                {ppiBusy ? 'Opening checkout…' : 'Book & pay $199 →'}
+              </Button>
+            </div>
+          </div>
+        )}
+
+        {repairAccept && (
+          <div className="fixed inset-0 z-[120] flex items-center justify-center p-4 bg-background/80 backdrop-blur-sm" onClick={() => !repairBusy && setRepairAccept(null)}>
+            <div onClick={e => e.stopPropagation()} className="bg-card border border-border rounded-3xl p-7 w-full max-w-md space-y-5 shadow-2xl">
+              <div className="flex justify-between items-start">
+                <div className="space-y-1">
+                  <h3 className="text-xl font-black tracking-tight text-foreground">Choose your drop-off</h3>
+                  <p className="text-sm text-muted">Earliest dates from {(repairAccept.job as any).mechanicName || 'your workshop'}'s schedule.</p>
+                  {(() => { const lead = (repairAccept.job as any).quoteItems?.leadTimeDays; return lead > 0 ? (
+                    <p className="text-[11px] text-amber-400 font-bold">Parts lead time: {lead} business day{lead !== 1 ? 's' : ''} — earliest date already adjusted</p>
+                  ) : null; })()}
+                </div>
+                <button onClick={() => setRepairAccept(null)} className="text-muted hover:text-foreground text-xl leading-none">✕</button>
+              </div>
+              {repairDatesLoading ? (
+                <p className="text-sm text-muted italic py-2">Checking availability…</p>
+              ) : repairDates.length === 0 ? (
+                <p className="text-sm text-muted italic py-2">No published availability — your workshop will confirm a drop-off date after payment.</p>
+              ) : (
+                <div className="grid grid-cols-3 gap-2">
+                  {repairDates.map((d, idx) => (
+                    <button key={d.date} onClick={() => setRepairSelectedDate(d.date)}
+                      className={cn('relative p-3 rounded-xl border text-[10px] font-black uppercase tracking-widest transition-all text-center',
+                        repairSelectedDate === d.date ? 'border-torqued-red bg-torqued-red text-white' : 'border-border bg-background text-muted hover:border-torqued-red/40 hover:text-torqued-red')}>
+                      {idx === 0 && <span className="absolute -top-2 left-1/2 -translate-x-1/2 bg-emerald-500 text-white text-[7px] px-1.5 py-0.5 rounded-full">Soonest</span>}
+                      {d.label}
+                    </button>
+                  ))}
+                </div>
+              )}
+              {repairDates.length > 0 && (
+                <div className="space-y-2">
+                  <p className="text-[10px] font-black uppercase tracking-widest text-muted">Preferred drop-off time</p>
+                  <div className="grid grid-cols-3 gap-2">
+                    {['08:00', '09:00', '10:00', '11:00', '13:00', '14:00'].map(t => (
+                      <button key={t} onClick={() => setRepairDropTime(t)}
+                        className={cn('p-2 rounded-lg border text-[11px] font-black transition-all text-center',
+                          repairDropTime === t ? 'border-torqued-red bg-torqued-red text-white' : 'border-border bg-background text-muted hover:border-torqued-red/40 hover:text-torqued-red')}>
+                        {t}
+                      </button>
+                    ))}
+                  </div>
+                  <div className="rounded-xl bg-emerald-500/8 border border-emerald-500/20 px-3 py-2 flex items-start gap-2">
+                    <Clock size={13} className="text-emerald-500 mt-0.5 shrink-0" />
+                    <p className="text-[11px] text-foreground/80">{repairReadyEstimate(repairAccept.job, repairDropTime)}.</p>
+                  </div>
+                </div>
+              )}
+              <div className="flex justify-between items-center pt-1 border-t border-border">
+                <span className="text-sm font-bold text-foreground">Total</span>
+                <span className="text-xl font-black text-torqued-red font-mono">${Number(repairAccept.amount).toFixed(2)}</span>
+              </div>
+              <Button fullWidth className="bg-torqued-red text-white" disabled={repairBusy || repairDatesLoading} onClick={confirmRepairAccept}>
+                {repairBusy ? 'Opening checkout…' : repairSelectedDate ? `Confirm ${repairDates.find(d => d.date === repairSelectedDate)?.label || ''} & pay →` : 'Confirm & pay →'}
+              </Button>
+            </div>
+          </div>
+        )}
+
         {showOTPModal && (
           <div className="fixed inset-0 z-[110] flex items-center justify-center p-4">
-            <motion.div 
+            <motion.div
               initial={{ opacity: 0 }}
               animate={{ opacity: 1 }}
               exit={{ opacity: 0 }}
@@ -4993,12 +6693,13 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                       setOtpResendMsg(null);
                       setOtpVerificationError('');
                       try {
-                        const r = await fetch('/api/customer/check-plate', {
+                        const r = await fetch('/api/customer/send-code', {
                           method: 'POST',
                           headers: { 'Content-Type': 'application/json' },
                           body: JSON.stringify({ rego: rego.toUpperCase().trim() }),
                         });
-                        if (r.ok) { setOtpResendMsg('New code sent — check your email.'); setOtpResendCooldown(30); }
+                        const rd = await r.json();
+                        if (r.ok && rd.sent) { setOtpResendMsg('New code sent — check your email.'); setOtpResendCooldown(30); }
                         else { setOtpVerificationError('Could not resend. Please try again.'); }
                       } catch {
                         setOtpVerificationError('Could not resend. Please try again.');
@@ -5023,253 +6724,6 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                   Cancel
                 </Button>
               </div>
-            </motion.div>
-          </div>
-        )}
-      </AnimatePresence>
-
-      {/* Premium Integrated Stripe Elements Sheet */}
-      <AnimatePresence>
-        {showStripeModal && (
-          <div className="fixed inset-0 z-[110] flex items-center justify-center p-4 overflow-y-auto">
-            <motion.div 
-              initial={{ opacity: 0 }}
-              animate={{ opacity: 1 }}
-              exit={{ opacity: 0 }}
-              onClick={() => {
-                if (stripeFormStep !== 'processing') {
-                  setShowStripeModal(false);
-                }
-              }}
-              className="absolute inset-0 bg-background/90 backdrop-blur-sm"
-            />
-            <motion.div 
-              initial={{ opacity: 0, scale: 0.95, y: 30 }}
-              animate={{ opacity: 1, scale: 1, y: 0 }}
-              exit={{ opacity: 0, scale: 0.95, y: 30 }}
-              className="relative w-full max-w-lg bg-card border border-border shadow-2xl rounded-3xl overflow-hidden p-6 md:p-8 space-y-6"
-            >
-              {/* Stripe Header Brand */}
-              <div className="flex justify-between items-center pb-4 border-b border-border">
-                <div className="flex items-center gap-2">
-                  <span className="text-sm font-black uppercase text-foreground bg-foreground/5 py-1 px-2.5 rounded-lg border border-border tracking-wider flex items-center gap-1.5 font-mono">
-                    <span className="w-2.5 h-2.5 bg-emerald-500 rounded-full animate-pulse" />
-                    Secure Stripe Sheet
-                  </span>
-                </div>
-                <div className="text-[10px] text-muted font-bold uppercase tracking-wider flex items-center gap-1">
-                  <Lock size={12} className="text-emerald-500" />
-                  SSL Certified
-                </div>
-              </div>
-
-              {stripeFormStep === 'input' && (
-                <div className="space-y-5">
-                  <div className="space-y-1.5">
-                    <h3 className="text-xl font-black tracking-tight text-foreground">Secure Stripe Checkout 💳</h3>
-                    <p className="text-xs text-muted">
-                      Complete your high-value Torqued booking using SSL-secured Stripe checkout.
-                    </p>
-                  </div>
-
-                  {/* Summary of Booking */}
-                  <div className="p-4 bg-muted/40 border border-border rounded-2xl space-y-2">
-                    <div className="flex justify-between items-center text-xs">
-                      <span className="text-muted">Target Vehicle:</span>
-                      <span className="font-extrabold text-foreground">{vehicle?.year} {vehicle?.make} {vehicle?.model}</span>
-                    </div>
-                    <div className="flex justify-between items-center text-xs">
-                      <span className="text-muted">Mechanic Workshop:</span>
-                      <span className="font-extrabold text-foreground">{selectedMechanic?.name}</span>
-                    </div>
-                    <div className="flex justify-between items-center text-xs">
-                      <span className="text-muted">Payment Method:</span>
-                      <span className="font-extrabold text-torqued-red uppercase tracking-wider">{paymentMethod}</span>
-                    </div>
-                    <div className="flex justify-between items-center text-xs pt-1.5 border-t border-border">
-                      <span className="text-muted font-bold text-foreground">Amount Charged:</span>
-                      <span className="font-black text-sm text-emerald-500 font-mono">
-                        ${selectedMechanic?.estimatedPrice || totalPrice}
-                        <span className="text-[9px] text-muted ml-1 font-normal font-sans">NZD</span>
-                      </span>
-                    </div>
-                  </div>
-
-                  {isStripeSessionLoading ? (
-                    <div className="py-8 text-center space-y-4">
-                      <div className="w-12 h-12 border-4 border-emerald-500/20 border-t-emerald-500 rounded-full animate-spin mx-auto" />
-                      <p className="text-xs text-muted font-bold font-mono tracking-tight animate-pulse text-emerald-500 bg-emerald-500/10 max-w-xs mx-auto py-2 px-3 rounded-xl border border-emerald-500/15">
-                        Establishing secure PCI-compliant Stripe tunnel...
-                      </p>
-                    </div>
-                  ) : (!stripeCheckoutUrl || stripeIsMock) ? (
-                    <div className="space-y-4">
-                      <div className="p-4 bg-amber-500/5 border border-amber-500/10 rounded-2xl space-y-1.5 text-left">
-                        <div className="flex items-center gap-2 text-amber-500">
-                          <AlertTriangle size={16} />
-                          <span className="text-xs font-black uppercase tracking-tight font-mono">Simulated Stripe Gateway</span>
-                        </div>
-                        <p className="text-[11px] text-muted leading-relaxed font-semibold">
-                          No Stripe API keys are configured. Torqued has simulated the secure Stripe hosted environment inside this portal. Credit cards, Afterpay, and Klarna are fully functional in test mode.
-                        </p>
-                      </div>
-
-                      {/* Required Email & Phone Input */}
-                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3.5 text-left">
-                        <div className="space-y-1">
-                          <label className="text-[10px] font-black uppercase text-muted tracking-widest block font-mono">
-                            Email Address (For Invoicing)
-                          </label>
-                          <input 
-                            type="email" 
-                            placeholder="driver@example.co.nz"
-                            value={stripeInputEmail}
-                            onChange={(e) => setStripeInputEmail(e.target.value)}
-                            className="w-full bg-background border border-border h-11 px-3.5 text-sm font-bold rounded-xl focus:outline-none focus:border-torqued-red text-foreground shadow-sm placeholder:text-muted/65"
-                            required
-                          />
-                        </div>
-                        <div className="space-y-1">
-                          <label className="text-[10px] font-black uppercase text-muted tracking-widest block font-mono">
-                            Phone / Contact Number (SMS Alerts)
-                          </label>
-                          <input 
-                            type="tel" 
-                            placeholder="e.g. +64 21 029 3848"
-                            value={stripeInputPhone}
-                            onChange={(e) => setStripeInputPhone(e.target.value)}
-                            className="w-full bg-background border border-border h-11 px-3.5 text-sm font-bold rounded-xl focus:outline-none focus:border-torqued-red text-foreground shadow-sm placeholder:text-muted/65"
-                            required
-                          />
-                        </div>
-                      </div>
-                      <p className="text-[9.5px] text-muted text-left">
-                        Your invoice, GST receipt, mechanic booking confirmation, and SMS drop alerts will be dispatched to these channels.
-                      </p>
-
-                      <div className="p-4 bg-amber-500/5 border border-amber-500/20 rounded-2xl text-left space-y-1">
-                        <p className="text-xs font-black text-amber-500 uppercase tracking-widest">Stripe not yet configured</p>
-                        <p className="text-xs text-muted leading-relaxed">Live payment processing will activate once Stripe keys are added. For now, confirm the booking and payment will be arranged directly with the workshop.</p>
-                      </div>
-
-                      <Button
-                        onClick={handleMockPaymentSuccess}
-                        className="w-full bg-torqued-red hover:bg-torqued-red/90 text-white font-black uppercase text-xs tracking-widest h-14 rounded-2xl transition-all shadow-xl shadow-torqued-red/20 cursor-pointer"
-                      >
-                        Confirm Booking
-                      </Button>
-                    </div>
-                  ) : (
-                    <div className="space-y-4">
-                      <div className="p-4 bg-emerald-500/5 border border-emerald-500/20 rounded-2xl space-y-1.5 text-left">
-                        <div className="flex items-center gap-2 text-emerald-500 animate-pulse">
-                          <CheckCircle2 size={16} />
-                          <span className="text-xs font-black uppercase tracking-tight">SECURE LIVE MODE ACTIVE</span>
-                        </div>
-                        <p className="text-[11px] text-muted leading-relaxed font-semibold font-mono">
-                          Your Stripe merchant gateway is fully integrated. Live payment methods (Credit cards, Afterpay, Klarna) are dynamically enabled based on your merchant configuration.
-                        </p>
-                      </div>
-
-                      <a 
-                        href={stripeCheckoutUrl}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className="w-full flex items-center justify-center gap-2 bg-emerald-600 hover:bg-emerald-700 text-white font-black uppercase text-xs tracking-widest h-14 rounded-2xl transition-all shadow-lg shadow-emerald-500/10 cursor-pointer"
-                        onClick={() => {
-                          setStripeFormStep('processing');
-                          setStripeLoadingMessage('Awaiting secure Stripe payment completion status callback...');
-                        }}
-                      >
-                        Proceed to Secure Checkout 🡥
-                      </a>
-
-                      <div className="p-3 bg-background border border-border rounded-xl text-center">
-                        <span className="text-[9.5px] text-muted font-black uppercase tracking-widest block mb-1.5 font-mono font-mono">AVAILABLE PAYMENT OPTIONS</span>
-                        <div className="flex justify-center items-center gap-3">
-                          <span className="text-[10px] bg-foreground/5 text-foreground px-2 py-1 rounded font-bold border border-border">Visa / Mastercard</span>
-                          <span className="text-[10px] bg-pink-500/10 text-pink-400 px-2 py-1 rounded font-bold border border-pink-500/15 font-sans">Afterpay</span>
-                          <span className="text-[10px] bg-cyan-500/10 text-cyan-400 px-2 py-1 rounded font-bold border border-cyan-500/15">Klarna</span>
-                        </div>
-                      </div>
-                    </div>
-                  )}
-
-                  <div className="flex gap-2.5 pt-2">
-                    <Button
-                      variant="ghost"
-                      onClick={() => setShowStripeModal(false)}
-                      className="flex-1 text-[10px] font-bold uppercase tracking-widest text-muted hover:text-foreground border border-border/60 h-12 rounded-xl"
-                    >
-                      Bail Out / Close
-                    </Button>
-                  </div>
-                </div>
-              )}
-
-              {stripeFormStep === 'processing' && (
-                <div className="py-12 space-y-6 text-center">
-                  <div className="relative w-24 h-24 mx-auto flex items-center justify-center">
-                    <div className="absolute inset-0 border-4 border-emerald-500/20 rounded-full" />
-                    <div className="absolute inset-0 border-4 border-t-emerald-500 rounded-full animate-spin" />
-                    <CreditCard size={32} className="text-emerald-500 animate-pulse" />
-                  </div>
-                  <div className="space-y-4">
-                    <h4 className="text-lg font-black tracking-tighter text-foreground">Processing Secure Payment...</h4>
-                    <p className="text-xs text-muted font-bold font-mono text-center tracking-tight animate-pulse text-emerald-500 bg-emerald-500/10 max-w-sm mx-auto py-2 p-3 rounded-xl border border-emerald-500/15">
-                      {stripeLoadingMessage}
-                    </p>
-                    
-                    <div className="pt-2 max-w-xs mx-auto">
-                      <Button
-                        onClick={async () => {
-                          const pending = localStorage.getItem('pending_booking');
-                          if (pending) {
-                            try {
-                              const booking = JSON.parse(pending);
-                              booking.paymentStatus = 'confirmed';
-                              booking.status = 'booked';
-                              setActiveJobs(prev => [...prev, booking]);
-                              setLatestBooking(booking);
-                              await triggerEmailConfirmation(booking);
-                            } catch (err) {
-                              console.error(err);
-                            }
-                          }
-                          setStripeFormStep('success');
-                        }}
-                        className="w-full bg-emerald-600 hover:bg-emerald-700 text-white font-black uppercase text-[10px] h-10 tracking-widest rounded-xl transition-all shadow"
-                      >
-                        Simulate Payment Webhook Success
-                      </Button>
-                    </div>
-                  </div>
-                </div>
-              )}
-
-              {stripeFormStep === 'success' && (
-                <div className="py-10 space-y-6 text-center">
-                  <div className="w-20 h-20 bg-emerald-500 text-white rounded-full flex items-center justify-center mx-auto shadow-xl shadow-emerald-500/20">
-                    <CheckCircle2 size={44} />
-                  </div>
-                  <div className="space-y-2">
-                    <h4 className="text-2xl font-black tracking-tight text-foreground">Booking Confirmed! 🏁</h4>
-                    <p className="text-xs text-muted max-w-sm mx-auto leading-relaxed">
-                      Stripe successfully charged and secured your payment. Your live vehicle history has been updated and sent to {selectedMechanic?.name}.
-                    </p>
-                  </div>
-                  <Button
-                    fullWidth
-                    onClick={() => {
-                      setShowStripeModal(false);
-                      setStep(7); // Show confirmation portal step
-                    }}
-                    className="bg-emerald-600 hover:bg-emerald-700 text-white font-black uppercase text-[10px] tracking-widest h-12 rounded-xl"
-                  >
-                    View Active Mechanic Progress
-                  </Button>
-                </div>
-              )}
             </motion.div>
           </div>
         )}

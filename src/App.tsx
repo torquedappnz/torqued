@@ -38,19 +38,20 @@ export default function App() {
     return () => window.removeEventListener('popstate', onPop);
   }, []);
 
-  // Redirect logged-in users to their portal if on landing
+  // Redirect logged-in users to their portal only from the landing root — not if they've
+  // explicitly navigated to /customer or /mechanic already (avoids mechanic session hijacking customer view)
   useEffect(() => {
-    if (user && userRole && view === 'landing') {
+    if (user && userRole && view === 'landing' && window.location.pathname === '/') {
       navigateTo(userRole === 'mechanic' ? 'mechanic' : 'customer');
     }
   }, [user, userRole]);
 
   if (!isAuthReady) {
     return (
-      <div className="min-h-screen bg-torqued-dark flex items-center justify-center text-white">
+      <div className="min-h-screen bg-background flex items-center justify-center text-foreground">
         <div className="space-y-4 text-center">
           <div className="w-12 h-12 border-4 border-torqued-red border-t-transparent rounded-full animate-spin mx-auto" />
-          <p className="font-bold tracking-tight text-sm text-white/50 animate-pulse">LOADING...</p>
+          <p className="font-bold tracking-tight text-sm text-muted animate-pulse">LOADING...</p>
         </div>
       </div>
     );

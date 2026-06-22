@@ -6,6 +6,15 @@ export const passkeysSupported = () => {
   try { return browserSupportsWebAuthn(); } catch { return false; }
 };
 
+/** Whether this actor already has a passkey registered (so we don't re-prompt). */
+export async function hasPasskey(actorType: ActorType, ownerRef: string): Promise<boolean> {
+  try {
+    const r = await fetch(`/api/passkey/has?actorType=${encodeURIComponent(actorType)}&ownerRef=${encodeURIComponent(ownerRef)}`);
+    const d = await r.json();
+    return !!d.has;
+  } catch { return false; }
+}
+
 /** Register a new passkey for the given actor. Throws on failure / user cancel. */
 export async function registerPasskey(actorType: ActorType, ownerRef: string): Promise<void> {
   const optRes = await fetch('/api/passkey/register-options', {

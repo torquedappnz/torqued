@@ -78,10 +78,13 @@ export interface Job {
   vehicleId: string;
   serviceIds: string[];
   mechanicId: string;
-  status: 'booked' | 'pending' | 'parts_ordered' | 'dropped_off' | 'in_progress' | 'ready' | 'completed';
-  paymentStatus: 'pending' | 'confirmed' | 'partially_paid' | 'awaiting_approval';
+  mechanicName?: string;
+  mechanicAddress?: string;
+  mechanicPhone?: string;
+  status: 'booked' | 'accepted' | 'confirmed' | 'pending' | 'parts_ordered' | 'dropped_off' | 'in_progress' | 'ready' | 'completed';
+  paymentStatus: 'pending' | 'confirmed' | 'partially_paid' | 'awaiting_approval' | 'refunded' | 'partially_refunded';
   paymentMethod: string;
-  date: string;
+  date?: string;
   totalPrice: number;
   depositPaid?: number;
   faultCode?: string;

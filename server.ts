@@ -12,7 +12,7 @@ const app = express();
 const PORT = 3000;
 
 // Public URL of the Torqued logo for email templates
-const LOGO_URL = 'https://torquednz.vercel.app/torqued-logo.png';
+const LOGO_URL = 'https://torqued-psi.vercel.app/torqued-logo.png';
 
 // Capture raw body for Stripe webhook signature verification.
 // 10mb limit so receipt photo/PDF uploads (base64) aren't rejected.
@@ -72,6 +72,8 @@ function getSupabaseAdmin() {
 }
 
 function getOrigin(req: express.Request): string {
+  // SITE_URL env var is the canonical production origin — always wins when set
+  if (process.env.SITE_URL) return process.env.SITE_URL.replace(/\/$/, '');
   if (req.headers.origin && typeof req.headers.origin === 'string') {
     return req.headers.origin;
   }
@@ -109,37 +111,54 @@ function readMagicToken(token: string): { rego: string } | null {
   } catch { return null; }
 }
 
-function generateMagicEmailHtml(rego: string, link: string, appLink?: string): string {
-  return `<!DOCTYPE html><html><head><meta charset="utf-8">
-<meta name="color-scheme" content="light dark"><meta name="supported-color-schemes" content="light dark">
-<style>
-  @media (prefers-color-scheme: dark) {
-    .bg { background:#0b0201 !important; }
-    .card { background:#150402 !important; border-color:rgba(255,24,0,.2) !important; }
-    .head { background:#050100 !important; }
-    .title { color:#ffffff !important; }
-    .muted { color:rgba(255,255,255,.6) !important; }
-    .faint { color:rgba(255,255,255,.4) !important; }
-  }
-</style></head>
-<body class="bg" style="margin:0;padding:0;background:#f4f4f6;font-family:-apple-system,Arial,sans-serif">
-<table width="100%" cellpadding="0" cellspacing="0" class="bg" style="background:#f4f4f6;padding:32px 8px"><tr><td align="center">
-<table width="100%" cellpadding="0" cellspacing="0" class="card" style="max-width:480px;background:#ffffff;border-radius:20px;overflow:hidden;border:1px solid #e6e6ea">
-<tr><td class="head" style="background:#150402;padding:24px 32px;border-bottom:3px solid #FF1800;text-align:center"><img src="${LOGO_URL}" width="200" height="67" style="display:inline-block;width:200px;height:67px;border:0"/></td></tr>
-<tr><td style="padding:40px 32px;text-align:center">
-<span style="display:inline-block;background:rgba(255,24,0,.1);color:#FF1800;font-size:9.5px;font-weight:900;letter-spacing:2px;text-transform:uppercase;padding:6px 14px;border-radius:6px">VEHICLE VERIFICATION</span>
-<h1 class="title" style="margin:20px 0 8px;font-size:20px;font-weight:900;color:#150402;text-transform:uppercase">Confirm it's you</h1>
-<p class="muted" style="margin:0 0 28px;font-size:13px;color:#555;line-height:1.5">Tap below to securely access the history for <strong style="color:#FF1800">${rego}</strong>.</p>
-<a href="${link}" style="display:inline-block;background:#FF1800;color:#fff;font-size:13px;font-weight:900;text-transform:uppercase;letter-spacing:1.5px;text-decoration:none;padding:15px 36px;border-radius:12px">Verify &amp; Continue</a>
-${appLink ? `<p style="margin:14px 0 0"><a href="${appLink}" style="display:inline-block;color:#FF1800;font-size:12px;font-weight:700;text-decoration:none">📱 Open in the Torqued app</a></p>` : ''}
-<p class="faint" style="margin:28px 0 0;font-size:11px;color:#999;line-height:1.5">Link expires in 15 minutes. Or paste:<br/><a href="${link}" style="color:#999;word-break:break-all">${link}</a></p>
-</td></tr>
-<tr><td class="head" style="background:#150402;padding:18px 32px;text-align:center"><p style="margin:0;font-size:10px;color:rgba(255,255,255,.4)">Didn't request this? You can ignore this email.</p></td></tr>
+// ── Shared email base ────────────────────────────────────────────────────────
+// Raleway (Google Fonts) for headings, Avenir for body text, light-mode default
+const EMAIL_FONT_IMPORT = `<link rel="preconnect" href="https://fonts.googleapis.com"><link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Raleway:wght@700;900&display=swap">`;
+const EMAIL_BODY_FONT = `'Avenir Next', 'Avenir', -apple-system, 'Segoe UI', Arial, sans-serif`;
+const EMAIL_TITLE_FONT = `'Raleway', 'Avenir Next', Arial, sans-serif`;
+const EMAIL_BG = '#f5f4f2';
+const EMAIL_CARD = '#ffffff';
+const EMAIL_DARK = '#150402';
+const EMAIL_RED = '#FF1800';
+const EMAIL_MUTED = '#64748b';
+
+function emailWrap(content: string): string {
+  return `<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="color-scheme" content="light">${EMAIL_FONT_IMPORT}<style>body{margin:0;padding:0;background:${EMAIL_BG};font-family:${EMAIL_BODY_FONT}}</style></head>
+<body style="margin:0;padding:0;background:${EMAIL_BG};">
+<table width="100%" cellpadding="0" cellspacing="0" style="background:${EMAIL_BG};padding:32px 8px;"><tr><td align="center">
+<table width="100%" cellpadding="0" cellspacing="0" style="max-width:520px;background:${EMAIL_CARD};border-radius:20px;overflow:hidden;border:1px solid #e2e0dc;">
+<tr><td style="background:${EMAIL_DARK};padding:22px 32px;border-bottom:3px solid ${EMAIL_RED};text-align:center;"><img src="${LOGO_URL}" width="180" height="60" alt="Torqued" style="display:inline-block;border:0;width:180px;height:60px;" /></td></tr>
+${content}
+<tr><td style="background:#f8f7f5;border-top:1px solid #e2e0dc;padding:16px 32px;text-align:center;"><p style="margin:0;font-size:10px;font-family:${EMAIL_BODY_FONT};color:#aaa;">Torqued NZ &nbsp;·&nbsp; <a href="mailto:torqued.nz@icloud.com" style="color:#aaa;text-decoration:none;">torqued.nz@icloud.com</a> &nbsp;·&nbsp; <a href="https://torqued-psi.vercel.app/privacy-policy.pdf" style="color:#aaa;text-decoration:none;">Privacy Policy</a></p></td></tr>
 </table></td></tr></table></body></html>`;
 }
 
+function emailTitle(text: string): string {
+  return `<h1 style="margin:0 0 10px;font-family:${EMAIL_TITLE_FONT};font-size:22px;font-weight:900;color:${EMAIL_DARK};letter-spacing:-0.3px;">${text}</h1>`;
+}
+
+function emailPara(html: string): string {
+  return `<p style="margin:0 0 16px;font-family:${EMAIL_BODY_FONT};font-size:14px;line-height:1.6;color:#374151;">${html}</p>`;
+}
+
+function emailGreeting(name: string | null | undefined): string {
+  return emailPara(`Kia ora${name ? ` <strong>${name.split(' ')[0]}</strong>` : ''},`);
+}
+
+function generateMagicEmailHtml(rego: string, link: string, appLink?: string, customerName?: string): string {
+  return emailWrap(`<tr><td style="padding:36px 32px;text-align:center;">
+<span style="display:inline-block;background:rgba(255,24,0,.08);color:${EMAIL_RED};font-size:9px;font-weight:900;letter-spacing:2px;text-transform:uppercase;padding:5px 12px;border-radius:6px;font-family:${EMAIL_BODY_FONT};">VEHICLE VERIFICATION</span>
+<div style="margin:18px 0 0;">${emailTitle("Confirm it's you")}</div>
+${emailGreeting(customerName)}
+${emailPara(`Tap below to securely access the history for <strong style="color:${EMAIL_RED};">${rego}</strong>.`)}
+<a href="${link}" style="display:inline-block;background:${EMAIL_RED};color:#fff;font-family:${EMAIL_TITLE_FONT};font-size:13px;font-weight:900;text-transform:uppercase;letter-spacing:1px;text-decoration:none;padding:14px 34px;border-radius:12px;">Verify &amp; Continue</a>
+${appLink ? `<p style="margin:14px 0 0;font-family:${EMAIL_BODY_FONT};font-size:12px;"><a href="${appLink}" style="color:${EMAIL_RED};font-weight:700;text-decoration:none;">📱 Open in the Torqued app</a></p>` : ''}
+<p style="margin:24px 0 0;font-family:${EMAIL_BODY_FONT};font-size:11px;color:#aaa;line-height:1.5;">Link expires in 15 minutes. Didn't request this? You can safely ignore this email.<br/><a href="${link}" style="color:#aaa;word-break:break-all;">${link}</a></p>
+</td></tr>`);
+}
+
 // Create a magic token, email the link, and return delivery info (+ fallback link if email fails)
-async function sendMagicLink(rego: string, email: string, origin: string) {
+async function sendMagicLink(rego: string, email: string, origin: string, customerName?: string) {
   const token = makeMagicToken(rego);
   const link = `${origin}/customer?vt=${token}`;
   const appLink = `torqued://verify?vt=${token}`;   // opens the iOS app if installed
@@ -151,7 +170,7 @@ async function sendMagicLink(rego: string, email: string, origin: string) {
         from: process.env.SMTP_FROM || '"Torqued" <torquedapp.nz@gmail.com>',
         to: email,
         subject: `Verify your vehicle on Torqued`,
-        html: generateMagicEmailHtml(rego, link, appLink),
+        html: generateMagicEmailHtml(rego, link, appLink, customerName),
       });
       delivered = true;
     } catch (e) { console.warn('[magic] send failed:', (e as Error)?.message); }
@@ -165,81 +184,28 @@ function maskEmail(email: string): string {
   return `${local.slice(0, Math.min(3, local.length))}***@${domain}`;
 }
 
-function generateOtpEmailHtml(rego: string, code: string): string {
-  return `<!DOCTYPE html>
-<html>
-<head><meta charset="utf-8"><title>Your Torqued Verification Code</title></head>
-<body style="margin:0;padding:0;background:#0b0201;font-family:-apple-system,Arial,sans-serif;">
-  <table border="0" cellpadding="0" cellspacing="0" width="100%" style="background:#0b0201;padding:32px 8px;">
-    <tr><td align="center">
-      <table border="0" cellpadding="0" cellspacing="0" width="100%" style="max-width:480px;background:#150402;border-radius:20px;border:1px solid rgba(255,24,0,0.15);overflow:hidden;">
-        <tr>
-          <td style="background:#050100;padding:24px 32px;border-bottom:3px solid #FF1800;text-align:center;">
-            <img src="${LOGO_URL}" alt="Torqued" width="200" height="67" style="display:inline-block;width:200px;height:67px;border:0;" />
-          </td>
-        </tr>
-        <tr>
-          <td style="padding:40px 32px;text-align:center;">
-            <span style="display:inline-block;background:rgba(255,24,0,0.12);color:#FF1800;font-size:9.5px;font-weight:900;letter-spacing:2px;text-transform:uppercase;padding:6px 14px;border-radius:6px;">VEHICLE VERIFICATION</span>
-            <h1 style="margin:20px 0 8px;font-size:20px;font-weight:900;color:#fff;text-transform:uppercase;">Your one-time code</h1>
-            <p style="margin:0 0 32px;font-size:13px;color:rgba(255,255,255,0.55);line-height:1.5;">
-              Enter this code to verify ownership of <strong style="color:#fff;">${rego}</strong>
-            </p>
-            <div style="display:inline-block;background:#FF1800;color:#fff;font-family:monospace;font-size:40px;font-weight:900;letter-spacing:12px;padding:18px 32px;border-radius:14px;">${code}</div>
-            <p style="margin:24px 0 0;font-size:11.5px;color:rgba(255,255,255,0.35);">
-              Expires in <strong style="color:rgba(255,255,255,0.6);">10 minutes</strong> &bull; one-time use only
-            </p>
-          </td>
-        </tr>
-        <tr>
-          <td style="background:#050100;padding:18px 32px;text-align:center;">
-            <p style="margin:0;font-size:10px;color:rgba(255,255,255,0.3);">Didn't request this? Someone entered your plate number. You can safely ignore this email.</p>
-          </td>
-        </tr>
-      </table>
-    </td></tr>
-  </table>
-</body>
-</html>`;
+function generateOtpEmailHtml(rego: string, code: string, customerName?: string): string {
+  return emailWrap(`<tr><td style="padding:36px 32px;text-align:center;">
+<span style="display:inline-block;background:rgba(255,24,0,.08);color:${EMAIL_RED};font-size:9px;font-weight:900;letter-spacing:2px;text-transform:uppercase;padding:5px 12px;border-radius:6px;font-family:${EMAIL_BODY_FONT};">VEHICLE VERIFICATION</span>
+<div style="margin:18px 0 0;">${emailTitle('Your one-time code')}</div>
+${emailGreeting(customerName)}
+${emailPara(`Enter this code to verify ownership of <strong style="color:${EMAIL_DARK};">${rego}</strong>:`)}
+<div style="display:inline-block;background:${EMAIL_RED};color:#fff;font-family:monospace;font-size:38px;font-weight:900;letter-spacing:10px;padding:16px 28px;border-radius:14px;margin:4px 0 20px;">${code}</div>
+<p style="margin:0;font-family:${EMAIL_BODY_FONT};font-size:12px;color:#aaa;">Expires in <strong>10 minutes</strong> &bull; one-time use only</p>
+<p style="margin:24px 0 0;font-family:${EMAIL_BODY_FONT};font-size:11px;color:#bbb;line-height:1.5;">Didn't request this? Someone entered your plate number. You can safely ignore this email.</p>
+</td></tr>`);
 }
 
 function generateMechanicConfirmEmailHtml(name: string, link: string): string {
-  return `<!DOCTYPE html>
-<html>
-<head><meta charset="utf-8"><title>Confirm your Torqued account</title></head>
-<body style="margin:0;padding:0;background:#0b0201;font-family:-apple-system,Arial,sans-serif;">
-  <table border="0" cellpadding="0" cellspacing="0" width="100%" style="background:#0b0201;padding:32px 8px;">
-    <tr><td align="center">
-      <table border="0" cellpadding="0" cellspacing="0" width="100%" style="max-width:480px;background:#150402;border-radius:20px;border:1px solid rgba(255,24,0,0.15);overflow:hidden;">
-        <tr>
-          <td style="background:#050100;padding:24px 32px;border-bottom:3px solid #FF1800;text-align:center;">
-            <img src="${LOGO_URL}" alt="Torqued" width="200" height="67" style="display:inline-block;width:200px;height:67px;border:0;" />
-          </td>
-        </tr>
-        <tr>
-          <td style="padding:40px 32px;text-align:center;">
-            <span style="display:inline-block;background:rgba(255,24,0,0.12);color:#FF1800;font-size:9.5px;font-weight:900;letter-spacing:2px;text-transform:uppercase;padding:6px 14px;border-radius:6px;">PARTNER HUB</span>
-            <h1 style="margin:20px 0 8px;font-size:20px;font-weight:900;color:#fff;text-transform:uppercase;">Confirm your account</h1>
-            <p style="margin:0 0 28px;font-size:13px;color:rgba(255,255,255,0.55);line-height:1.5;">
-              G'day ${name}, welcome to Torqued. Confirm your email to activate your workshop account and start receiving jobs.
-            </p>
-            <a href="${link}" style="display:inline-block;background:#FF1800;color:#fff;font-size:13px;font-weight:900;text-transform:uppercase;letter-spacing:1.5px;text-decoration:none;padding:15px 36px;border-radius:12px;">Confirm Email &amp; Activate</a>
-            <p style="margin:28px 0 0;font-size:11px;color:rgba(255,255,255,0.35);line-height:1.5;">
-              Or paste this link into your browser:<br/>
-              <a href="${link}" style="color:rgba(255,255,255,0.5);word-break:break-all;">${link}</a>
-            </p>
-          </td>
-        </tr>
-        <tr>
-          <td style="background:#050100;padding:18px 32px;text-align:center;">
-            <p style="margin:0;font-size:10px;color:rgba(255,255,255,0.3);">Didn't sign up? You can safely ignore this email. Questions? torquedapp.nz@gmail.com</p>
-          </td>
-        </tr>
-      </table>
-    </td></tr>
-  </table>
-</body>
-</html>`;
+  return emailWrap(`<tr><td style="padding:36px 32px;text-align:center;">
+<span style="display:inline-block;background:rgba(255,24,0,.08);color:${EMAIL_RED};font-size:9px;font-weight:900;letter-spacing:2px;text-transform:uppercase;padding:5px 12px;border-radius:6px;font-family:${EMAIL_BODY_FONT};">PARTNER HUB</span>
+<div style="margin:18px 0 0;">${emailTitle('Your workshop account is ready')}</div>
+${emailGreeting(name)}
+${emailPara(`Welcome to Torqued. Your workshop account is active and ready to go — log in to set up your profile and start receiving jobs.`)}
+<a href="${link}" style="display:inline-block;background:${EMAIL_RED};color:#fff;font-family:${EMAIL_TITLE_FONT};font-size:13px;font-weight:900;text-transform:uppercase;letter-spacing:1px;text-decoration:none;padding:14px 34px;border-radius:12px;">Open my portal</a>
+<p style="margin:24px 0 0;font-family:${EMAIL_BODY_FONT};font-size:11px;color:#aaa;line-height:1.5;">Or paste this link into your browser:<br/><a href="${link}" style="color:#aaa;word-break:break-all;">${link}</a></p>
+<p style="margin:16px 0 0;font-family:${EMAIL_BODY_FONT};font-size:11px;color:#bbb;">Didn't sign up? You can safely ignore this email.</p>
+</td></tr>`);
 }
 
 // GET /api/mechanics — real mechanics (active subscription) for the customer to choose from
@@ -247,11 +213,22 @@ app.get('/api/mechanics', async (_req, res) => {
   try {
     const supabase = getSupabaseAdmin();
     if (!supabase) return res.json({ mechanics: [] });
-    const { data } = await supabase
+    let data: any;
+    const first = await supabase
       .from('profiles')
-      .select('id, name, address, labour_rate, technicians, parts_lead_days, rating, review_count, latitude, longitude')
+      .select('id, name, address, labour_rate, technicians, parts_lead_days, rating, review_count, latitude, longitude, offers_ppi, wof_disabled')
       .eq('role', 'mechanic')
       .eq('subscription_active', true);
+    data = first.data;
+    // Pre-migration: wof_disabled column may not exist yet — retry without it.
+    if (first.error && /wof_disabled/.test(first.error.message || '')) {
+      const second = await supabase
+        .from('profiles')
+        .select('id, name, address, labour_rate, technicians, parts_lead_days, rating, review_count, latitude, longitude, offers_ppi')
+        .eq('role', 'mechanic')
+        .eq('subscription_active', true);
+      data = second.data;
+    }
     res.json({ mechanics: data ?? [] });
   } catch (err) {
     console.error('[mechanics]', err);
@@ -267,6 +244,25 @@ app.post('/api/mechanic/update-job-status', async (req, res) => {
     if (!bookingId || !allowed.includes(status)) return res.status(400).json({ error: 'bookingId and a valid status are required' });
     const supabase = getSupabaseAdmin();
     if (!supabase) return res.status(500).json({ error: 'Database not configured' });
+
+    // Enforce billing_start_date: mechanic cannot accept jobs before their billing starts
+    if (status === 'in_progress') {
+      const { data: booking } = await supabase.from('bookings').select('mechanic_id').eq('id', bookingId).single();
+      if (booking?.mechanic_id) {
+        const { data: profile } = await supabase.from('profiles').select('billing_start_date').eq('id', booking.mechanic_id).single();
+        if (profile?.billing_start_date) {
+          const startDate = new Date(profile.billing_start_date);
+          startDate.setHours(0, 0, 0, 0);
+          const today = new Date();
+          today.setHours(0, 0, 0, 0);
+          if (startDate > today) {
+            const fmt = startDate.toLocaleDateString('en-NZ', { day: 'numeric', month: 'long', year: 'numeric' });
+            return res.status(403).json({ error: `Your subscription has not yet started. You can accept jobs from ${fmt}.` });
+          }
+        }
+      }
+    }
+
     const update: Record<string, any> = { status };
     if (status === 'completed') { update.completed_at = new Date().toISOString(); }
     const { error } = await supabase.from('bookings').update(update).eq('id', bookingId);
@@ -285,14 +281,17 @@ app.post('/api/bookings/persist', async (req, res) => {
     if (!bookingData?.id) return res.status(400).json({ error: 'bookingData.id required' });
     const supabase = getSupabaseAdmin();
     if (!supabase) return res.status(500).json({ error: 'Database not configured' });
-    const { error } = await supabase.from('bookings').upsert({
-      id: bookingData.id,
+
+    const serviceIds: string[] = bookingData.serviceIds || [];
+    const hasDiag = serviceIds.includes('diag_inspection');
+    const hasNonDiag = serviceIds.some((s: string) => s !== 'diag_inspection');
+
+    const baseFields = {
       customer_id: userId || null,
       mechanic_id: bookingData.mechanicId,
       vehicle_rego: bookingData.vehicleId || null,
-      service_ids: bookingData.serviceIds || [],
       status: bookingData.status || 'booked',
-      payment_status: bookingData.paymentStatus || 'confirmed',
+      payment_status: bookingData.paymentStatus || 'pending_payment',
       payment_method: bookingData.paymentMethod || null,
       date: bookingData.date || null,
       total_price: bookingData.totalPrice || 0,
@@ -300,8 +299,22 @@ app.post('/api/bookings/persist', async (req, res) => {
       customer_name: bookingData.customerName || null,
       email: bookingData.email || null,
       description: bookingData.description || null,
-    }, { onConflict: 'id' });
-    if (error) return res.status(500).json({ error: error.message });
+    };
+
+    if (hasDiag && hasNonDiag) {
+      const diagId = bookingData.id;
+      const repairId = crypto.randomUUID();
+      const diagPrice = 99;
+      const repairPrice = Math.max(0, (bookingData.totalPrice || 0) - diagPrice);
+      const { error: e1 } = await supabase.from('bookings').upsert({ ...baseFields, id: diagId, service_ids: ['diag_inspection'], total_price: diagPrice, transaction_id: diagId }, { onConflict: 'id' });
+      if (e1) return res.status(500).json({ error: e1.message });
+      const { error: e2 } = await supabase.from('bookings').upsert({ ...baseFields, id: repairId, service_ids: serviceIds.filter((s: string) => s !== 'diag_inspection'), total_price: repairPrice, transaction_id: diagId }, { onConflict: 'id' });
+      if (e2) return res.status(500).json({ error: e2.message });
+    } else {
+      const { error } = await supabase.from('bookings').upsert({ ...baseFields, id: bookingData.id, service_ids: serviceIds }, { onConflict: 'id' });
+      if (error) return res.status(500).json({ error: error.message });
+    }
+
     res.json({ success: true });
   } catch (err) {
     console.error('[bookings/persist]', err);
@@ -332,6 +345,27 @@ app.post('/api/vehicles/:rego/mileage', async (req, res) => {
   } catch (err) {
     console.error('[vehicles/mileage]', err);
     res.status(500).json({ error: 'Could not update mileage' });
+  }
+});
+
+// GET /api/platform/stats — live platform stats for the landing page
+app.get('/api/platform/stats', async (_req, res) => {
+  try {
+    const supabase = getSupabaseAdmin();
+    if (!supabase) return res.json({ avgLow: 1059, avgHigh: 1185, bookingsCount: 0 });
+    const { data: prices } = await supabase
+      .from('bookings')
+      .select('total_price, quoted_price')
+      .eq('payment_status', 'confirmed')
+      .not('total_price', 'is', null);
+    const vals = (prices || []).map((r: any) => parseFloat(r.quoted_price || r.total_price)).filter((v: number) => v > 50 && v < 20000);
+    if (vals.length < 5) return res.json({ avgLow: 1059, avgHigh: 1185, bookingsCount: vals.length });
+    const sorted = [...vals].sort((a, b) => a - b);
+    const p25 = sorted[Math.floor(sorted.length * 0.25)];
+    const p75 = sorted[Math.floor(sorted.length * 0.75)];
+    res.json({ avgLow: Math.round(p25), avgHigh: Math.round(p75), bookingsCount: vals.length });
+  } catch {
+    res.json({ avgLow: 1059, avgHigh: 1185, bookingsCount: 0 });
   }
 });
 
@@ -370,7 +404,32 @@ app.get('/api/customer/bookings', async (req, res) => {
     else if (regos) q = q.in('vehicle_rego', regos);
     const { data, error } = await q;
     if (error) return res.status(500).json({ error: error.message });
-    res.json({ bookings: data ?? [] });
+
+    // Enrich each booking with mechanic profile data so the customer portal PDF is accurate
+    const bookings = data ?? [];
+    const mechIds = [...new Set(bookings.map((b: any) => b.mechanic_id).filter(Boolean))];
+    let mechMap: Record<string, any> = {};
+    if (mechIds.length) {
+      const { data: mechs } = await supabase
+        .from('profiles')
+        .select('id, name, address, phone, email, cancellation_notice_hours, cancellation_partial_refund_pct, labour_rate')
+        .in('id', mechIds);
+      (mechs ?? []).forEach((m: any) => { mechMap[m.id] = m; });
+    }
+    const enriched = bookings.map((b: any) => {
+      const m = mechMap[b.mechanic_id] || {};
+      return {
+        ...b,
+        transaction_id: b.transaction_id || null,
+        mechanic_name: m.name || null,
+        mechanic_address: m.address || null,
+        mechanic_phone: m.phone || null,
+        mechanic_email: m.email || null,
+        cancellation_notice_hours: m.cancellation_notice_hours ?? 24,
+        cancellation_partial_refund_pct: m.cancellation_partial_refund_pct ?? 50,
+      };
+    });
+    res.json({ bookings: enriched });
   } catch (err) {
     console.error('[customer/bookings]', err);
     res.json({ bookings: [] });
@@ -385,10 +444,19 @@ app.get('/api/history/:rego', async (req, res) => {
     if (!supabase) return res.json({ imported: [], jobs: [] });
     const [{ data: imported }, { data: jobs }] = await Promise.all([
       supabase.from('vehicle_history').select('*').eq('rego', rego).order('created_at', { ascending: false }),
-      supabase.from('bookings').select('id, service_ids, status, payment_status, total_price, date, created_at, mechanic_id, completed_at')
+      supabase.from('bookings').select('id, service_ids, quote_items, status, payment_status, total_price, date, created_at, mechanic_id, completed_at, mileage_out')
         .eq('vehicle_rego', rego).order('created_at', { ascending: false }),
     ]);
-    res.json({ imported: imported ?? [], jobs: jobs ?? [] });
+    // Resolve workshop names so completed-job history shows who did the work.
+    const jobsList = jobs ?? [];
+    const mechIds = [...new Set(jobsList.map((j: any) => j.mechanic_id).filter(Boolean))];
+    let mechNames: Record<string, string> = {};
+    if (mechIds.length) {
+      const { data: profs } = await supabase.from('profiles').select('id, name').in('id', mechIds);
+      mechNames = Object.fromEntries((profs ?? []).map((p: any) => [p.id, p.name]));
+    }
+    const enriched = jobsList.map((j: any) => ({ ...j, mechanic_name: mechNames[j.mechanic_id] || 'Torqued workshop' }));
+    res.json({ imported: imported ?? [], jobs: enriched });
   } catch (err) {
     console.error('[history]', err);
     res.json({ imported: [], jobs: [] });
@@ -509,6 +577,86 @@ app.get('/api/mechanic/customers', async (req, res) => {
   }
 });
 
+// POST /api/mechanic/update-customer — a workshop edits a customer's contact details.
+// The mechanic-customers list is aggregated from bookings, so we update this mechanic's
+// bookings for the customer's vehicles AND the linked customer profile so edits stick.
+app.post('/api/mechanic/update-customer', async (req, res) => {
+  try {
+    const { mechanicId, regos, oldEmail, oldPhone, name, email, phone } = req.body;
+    if (!mechanicId) return res.status(400).json({ error: 'mechanicId required' });
+    const supabase = getSupabaseAdmin();
+    if (!supabase) return res.status(500).json({ error: 'Database not configured' });
+
+    const regoList: string[] = Array.isArray(regos) ? regos.map((r: string) => String(r).toUpperCase().trim()).filter(Boolean) : [];
+
+    // Build the patch for booking rows (note: bookings use customer_phone, not phone).
+    const bookingPatch: Record<string, any> = {};
+    if (typeof name === 'string') bookingPatch.customer_name = name.trim();
+    if (typeof email === 'string' && email.trim()) bookingPatch.email = email.trim();
+    if (typeof phone === 'string') bookingPatch.customer_phone = phone.trim();
+    if (Object.keys(bookingPatch).length === 0) return res.status(400).json({ error: 'Nothing to update' });
+
+    // Update this mechanic's bookings matching the customer's vehicles.
+    if (regoList.length) {
+      await supabase.from('bookings').update(bookingPatch).eq('mechanic_id', mechanicId).in('vehicle_rego', regoList);
+    }
+    // Also catch bookings matched by the customer's previous email/phone (e.g. no rego).
+    if (oldEmail) await supabase.from('bookings').update(bookingPatch).eq('mechanic_id', mechanicId).eq('email', oldEmail);
+    if (oldPhone) await supabase.from('bookings').update(bookingPatch).eq('mechanic_id', mechanicId).eq('customer_phone', oldPhone);
+
+    // Propagate to the customer's profile (resolved via any of their vehicles).
+    let ownerId: string | null = null;
+    for (const rego of regoList) {
+      const { data: v } = await supabase.from('vehicles').select('owner_id').eq('rego', rego).maybeSingle();
+      if (v?.owner_id) { ownerId = v.owner_id; break; }
+    }
+    if (ownerId) {
+      const profilePatch: Record<string, any> = {};
+      if (typeof name === 'string') profilePatch.name = name.trim();
+      if (typeof email === 'string' && email.trim()) profilePatch.email = email.trim();
+      if (typeof phone === 'string') profilePatch.phone = phone.trim();
+      if (Object.keys(profilePatch).length) {
+        await supabase.from('profiles').update(profilePatch).eq('id', ownerId);
+        if (profilePatch.email) { try { await supabase.auth.admin.updateUserById(ownerId, { email: profilePatch.email }); } catch {} }
+      }
+    }
+    res.json({ success: true });
+  } catch (err) {
+    console.error('[mechanic/update-customer]', err);
+    res.status(500).json({ error: 'Could not update customer' });
+  }
+});
+
+// GET /api/mechanic/profile?mechanicId= — fetch mechanic profile via admin client (bypasses RLS)
+app.get('/api/mechanic/profile', async (req, res) => {
+  try {
+    const mechanicId = req.query.mechanicId as string;
+    if (!mechanicId) return res.status(400).json({ error: 'mechanicId required' });
+    const supabase = getSupabaseAdmin();
+    if (!supabase) return res.status(500).json({ error: 'DB not configured' });
+    // Try the full select; if a newer column (e.g. offers_ppi pre-migration) is missing,
+    // fall back to the core columns so the profile NEVER fails to load.
+    let { data, error } = await supabase
+      .from('profiles')
+      .select('name, phone, address, nzbn, service_areas, diagnostic_tools, certifications, labour_rate, shop_fee, banner_image, technicians, parts_lead_days, billing_start_date, cancellation_notice_hours, cancellation_partial_refund_pct, offers_ppi')
+      .eq('id', mechanicId)
+      .single();
+    if (error) {
+      console.warn('[mechanic/profile] full select failed, falling back:', error.message);
+      ({ data, error } = await supabase
+        .from('profiles')
+        .select('name, phone, address, nzbn, service_areas, diagnostic_tools, certifications, labour_rate, shop_fee, banner_image, technicians, parts_lead_days')
+        .eq('id', mechanicId)
+        .single());
+      if (error) return res.status(500).json({ error: error.message });
+    }
+    res.json({ profile: data ?? null });
+  } catch (err) {
+    console.error('[mechanic/profile]', err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
 // GET /api/mechanic/jobs?mechanicId= — bookings for a mechanic (service role, bypasses RLS)
 app.get('/api/mechanic/jobs', async (req, res) => {
   try {
@@ -522,17 +670,113 @@ app.get('/api/mechanic/jobs', async (req, res) => {
       .eq('mechanic_id', mechanicId)
       .order('created_at', { ascending: false });
     if (error) return res.status(500).json({ error: error.message });
-    res.json({ jobs: data ?? [] });
+    const jobs = data ?? [];
+    // Enrich with vehicle data (year, make, model, mileage) for use in quote PDFs and display
+    const uniqueRegos = [...new Set(jobs.map((j: any) => j.vehicle_rego).filter(Boolean))] as string[];
+    if (uniqueRegos.length) {
+      const { data: vehicles } = await supabase.from('vehicles')
+        .select('rego, make, model, year, mileage').in('rego', uniqueRegos);
+      const vehicleMap: Record<string, any> = {};
+      (vehicles ?? []).forEach((v: any) => { vehicleMap[v.rego] = v; });
+      jobs.forEach((j: any) => {
+        const v = vehicleMap[j.vehicle_rego];
+        if (v) {
+          j.vehicle_make = v.make || null;
+          j.vehicle_model = v.model || null;
+          j.vehicle_year = v.year || null;
+          j.vehicle_mileage = v.mileage || null;
+          const yearStr = v.year ? `${v.year} ` : '';
+          j.vehicle_label = v.make ? `${yearStr}${v.make} ${v.model || ''}`.trim() : j.vehicle_rego;
+        }
+      });
+    }
+    res.json({ jobs });
   } catch (err) {
     console.error('[mechanic/jobs]', err);
     res.json({ jobs: [] });
   }
 });
 
+// POST /api/customer/save-profile — save name/location/email for customer portal users (uses admin key, bypasses RLS)
+app.post('/api/customer/save-profile', async (req, res) => {
+  const { email, ownerId, name, homeLocation, email_update } = req.body as Record<string, string>;
+  if (!email && !ownerId) return res.json({ ok: false });
+  try {
+    const supabase = getSupabaseAdmin();
+    if (!supabase) return res.json({ ok: false });
+    const fields: Record<string, any> = {};
+    if (name !== undefined) fields.name = name;
+    if (homeLocation !== undefined) fields.home_location = homeLocation;
+    if (email_update && email_update.trim() && email_update !== email) fields.email = email_update.trim();
+    if (Object.keys(fields).length === 0) return res.json({ ok: true });
+    let query = supabase.from('profiles').update(fields);
+    if (ownerId) query = (query as any).eq('id', ownerId);
+    else query = (query as any).ilike('email', email.trim());
+    const { error } = await query;
+    if (error) { console.error('[save-profile]', error.message); return res.json({ ok: false, error: error.message }); }
+    // Also update Supabase auth email if changed
+    if (fields.email && ownerId) {
+      try { await supabase.auth.admin.updateUserById(ownerId, { email: fields.email }); } catch {}
+    }
+    res.json({ ok: true });
+  } catch (err) { console.error('[save-profile]', err); res.json({ ok: false }); }
+});
+
+// GET /api/customer/ppi-report?rego= — most recent completed PPI inspection for a vehicle
+app.get('/api/customer/ppi-report', async (req, res) => {
+  const rego = String(req.query.rego || '').toUpperCase().trim();
+  if (!rego) return res.json({ ppi: null });
+  try {
+    const supabase = getSupabaseAdmin();
+    if (!supabase) return res.json({ ppi: null });
+    const { data } = await supabase.from('ppi_inspections')
+      .select('*')
+      .eq('rego', rego)
+      .eq('status', 'completed')
+      .order('completed_at', { ascending: false })
+      .limit(1)
+      .single();
+    res.json({ ppi: data || null });
+  } catch { res.json({ ppi: null }); }
+});
+
+// GET /api/mechanic/customer-lookup?mechanicId=&rego= — most recent customer info for a rego
+app.get('/api/mechanic/customer-lookup', async (req, res) => {
+  const { mechanicId, rego } = req.query as Record<string, string>;
+  if (!mechanicId || !rego) return res.json({ customer: null });
+  try {
+    const supabase = getSupabaseAdmin();
+    if (!supabase) return res.json({ customer: null });
+    const { data } = await supabase
+      .from('bookings')
+      .select('customer_name, email, customer_phone, mileage_in')
+      .eq('mechanic_id', mechanicId)
+      .ilike('vehicle_rego', rego.trim())
+      .order('created_at', { ascending: false })
+      .limit(1)
+      .single();
+    return res.json({ customer: data || null });
+  } catch { return res.json({ customer: null }); }
+});
+
 // ── Passkeys (WebAuthn) ─────────────────────────────────────
 const RP_ID = 'torqued-psi.vercel.app';
 const RP_ORIGIN = 'https://torqued-psi.vercel.app';
 const RP_NAME = 'Torqued';
+
+// GET /api/passkey/has — does this actor already have a passkey registered?
+app.get('/api/passkey/has', async (req, res) => {
+  try {
+    const actorType = req.query.actorType as string;
+    const ownerRef = req.query.ownerRef as string;
+    if (!actorType || !ownerRef) return res.json({ has: false });
+    const supabase = getSupabaseAdmin();
+    if (!supabase) return res.json({ has: false });
+    const { data } = await supabase.from('webauthn_credentials')
+      .select('credential_id').eq('actor_type', actorType).eq('owner_ref', String(ownerRef).toLowerCase()).limit(1);
+    res.json({ has: !!(data && data.length) });
+  } catch { res.json({ has: false }); }
+});
 
 // POST /api/passkey/register-options — begin passkey registration
 app.post('/api/passkey/register-options', async (req, res) => {
@@ -682,67 +926,107 @@ app.post('/api/passkey/auth-verify', async (req, res) => {
   }
 });
 
+// GET /api/passkey/list — list all passkeys for a given actor
+app.get('/api/passkey/list', async (req, res) => {
+  try {
+    const { actorType, ownerRef } = req.query as { actorType: string; ownerRef: string };
+    if (!actorType || !ownerRef) return res.status(400).json({ error: 'Missing actorType or ownerRef' });
+    const supabase = getSupabaseAdmin();
+    if (!supabase) return res.status(500).json({ error: 'Database not configured' });
+    const { data, error } = await supabase.from('webauthn_credentials')
+      .select('id, credential_id, created_at, transports')
+      .eq('actor_type', actorType)
+      .eq('owner_ref', String(ownerRef).toLowerCase())
+      .order('created_at', { ascending: false });
+    if (error) return res.status(500).json({ error: error.message });
+    res.json({ passkeys: data || [] });
+  } catch (err) {
+    console.error('[passkey/list]', err);
+    res.status(500).json({ error: 'Could not list passkeys' });
+  }
+});
+
+// DELETE /api/passkey/delete — remove a specific passkey by row id
+app.delete('/api/passkey/delete', async (req, res) => {
+  try {
+    const { id, actorType, ownerRef } = req.body;
+    if (!id || !actorType || !ownerRef) return res.status(400).json({ error: 'Missing fields' });
+    const supabase = getSupabaseAdmin();
+    if (!supabase) return res.status(500).json({ error: 'Database not configured' });
+    const { error } = await supabase.from('webauthn_credentials')
+      .delete()
+      .eq('id', id)
+      .eq('actor_type', actorType)
+      .eq('owner_ref', String(ownerRef).toLowerCase());
+    if (error) return res.status(500).json({ error: error.message });
+    res.json({ success: true });
+  } catch (err) {
+    console.error('[passkey/delete]', err);
+    res.status(500).json({ error: 'Could not delete passkey' });
+  }
+});
+
 // ── Carjam ABCD API helper ───────────────────────────────────────────────────
-// Calls the Carjam NZ plate lookup and normalises the response into clean fields.
-// Returns null if the plate isn't found or the key isn't configured.
+// Shared vehicle data shape — used by FuelSaver (active) and CarJam (archived).
+// CarJam implementation: archive/carjam/carjam-api.ts
 interface CarjamVehicle {
   make: string;
   model: string;
   year: number;
-  variant: string;          // submodel field verbatim, e.g. "GSX PTR 2.5P/4WD/6AT"
+  variant: string;
   vin: string | null;
   engineCc: number | null;
-  transmissionType: string | null;  // e.g. "6-GEAR AUTO"
-  fuelType: string | null;          // e.g. "Petrol", "Diesel", "Electric"
+  transmissionType: string | null;
+  fuelType: string | null;
   stolenFlag: boolean;
   latestOdometer: number | null;
   power: number | null;             // kW
-  rawMake: string;                  // ALLCAPS make as returned by Carjam
-}
-
-function normaliseCarjamFuel(code: string | null): string | null {
-  if (!code) return null;
-  const map: Record<string, string> = {
-    '01': 'Petrol', '02': 'Diesel', '04': 'Electric', '05': 'LPG',
-    '06': 'Petrol/Electric', '07': 'Diesel/Electric', '08': 'CNG',
-  };
-  return map[code] || code;
+  rawMake: string;
 }
 
 function titleCase(s: string): string {
   return s.toLowerCase().replace(/\b\w/g, c => c.toUpperCase());
 }
 
-async function callCarjamAPI(plate: string): Promise<CarjamVehicle | null> {
-  const key = process.env.CARJAM_API_KEY;
-  if (!key) {
-    console.warn('[carjam] CARJAM_API_KEY not set — skipping Carjam lookup');
-    return null;
-  }
+// Calls the FuelSaver (NZ govt) API and normalises the response into the same CarjamVehicle shape.
+// Only fields relevant to vehicle identification are mapped; emissions/cost fields are ignored.
+async function callFuelSaverAPI(plate: string): Promise<CarjamVehicle | null> {
+  const login = process.env.FUELSAVER_LOGIN;
+  if (!login) return null;
   try {
-    const url = `https://www.carjam.co.nz/api/car/?plate=${encodeURIComponent(plate)}&key=${key}`;
-    const resp = await fetch(url, { signal: AbortSignal.timeout(8000) });
+    const params = JSON.stringify({ api: 'labels', listingid: plate, login, plate });
+    const url = `https://resources.fuelsaver.govt.nz/api/?params=${encodeURIComponent(params)}`;
+    const resp = await fetch(url, {
+      signal: AbortSignal.timeout(8000),
+      headers: { 'User-Agent': 'TorquedNZ/1.0 (torquedappnz@gmail.com)' },
+    });
     if (!resp.ok) return null;
     const d = await resp.json() as any;
-    if (!d?.make || !d?.model) return null;
+    if (d?.ErrorCode !== 0 || !d?.Make) return null;
+    const year = d.mvrYear ? parseInt(String(d.mvrYear), 10) : new Date().getFullYear();
     return {
-      make: titleCase(String(d.make)),
-      model: String(d.model),
-      year: parseInt(d.year_of_manufacture, 10) || new Date().getFullYear(),
-      variant: String(d.submodel || '').trim(),
-      vin: d.vin ? String(d.vin).trim() : null,
-      engineCc: d.cc_rating ? parseInt(d.cc_rating, 10) || null : null,
-      transmissionType: d.transmission_type ? String(d.transmission_type) : null,
-      fuelType: normaliseCarjamFuel(d.fuel_type ? String(d.fuel_type) : null),
-      stolenFlag: String(d.reported_stolen || 'N').toUpperCase() === 'Y',
-      latestOdometer: d.latest_odometer_reading ? parseInt(d.latest_odometer_reading, 10) || null : null,
-      power: d.power ? parseInt(d.power, 10) || null : null,
-      rawMake: String(d.make),
+      make: titleCase(String(d.Make)),
+      model: String(d.Model || ''),
+      year,
+      variant: String(d.SubModel || '').trim(),
+      vin: null,
+      engineCc: d.EngineSize ? parseInt(String(d.EngineSize), 10) || null : null,
+      transmissionType: d.Transmission ? String(d.Transmission) : null,
+      fuelType: d.FuelType ? String(d.FuelType) : null,
+      stolenFlag: false,
+      latestOdometer: null,
+      power: d.EnginePower ? parseInt(String(d.EnginePower), 10) || null : null,
+      rawMake: String(d.Make).toUpperCase(),
     };
   } catch (err: any) {
-    console.warn('[carjam] lookup failed:', err?.message);
+    console.warn('[fuelsaver] lookup failed:', err?.message);
     return null;
   }
+}
+
+// Active lookup — FuelSaver only. CarJam is archived (archive/carjam/carjam-api.ts).
+async function lookupPlateData(plate: string): Promise<CarjamVehicle | null> {
+  return callFuelSaverAPI(plate);
 }
 
 // POST /api/customer/check-plate — checks plate, triggers OTP for returning customers
@@ -762,8 +1046,8 @@ app.post('/api/customer/check-plate', async (req, res) => {
       .single();
 
     if (!vehicle) {
-      // Plate not in our DB — try Carjam ABCD API to identify the vehicle
-      const carjam = await callCarjamAPI(formattedRego);
+      // Plate not in our DB — try CarJam then FuelSaver to identify the vehicle
+      const carjam = await lookupPlateData(formattedRego);
       if (!carjam) {
         return res.status(404).json({ error: 'Plate not found in our registry', notFound: true });
       }
@@ -834,16 +1118,24 @@ app.post('/api/customer/check-plate', async (req, res) => {
 
     if (!ownerEmail) return res.json({ found: true, isNew: true });
 
-    // Returning customer — email a magic verification link
-    const { delivered, fallbackLink } = await sendMagicLink(formattedRego, ownerEmail, getOrigin(req));
-
+    // Returning customer — send a 6-digit verification code (DB-backed, Vercel-safe)
+    const code = crypto.randomInt(100000, 999999).toString();
+    await supabase.from('customer_otps').upsert({
+      rego: formattedRego, code_hash: hashOtp(code), email: ownerEmail,
+      expires_at: new Date(Date.now() + 10 * 60 * 1000).toISOString(), attempts: 0,
+    }, { onConflict: 'rego' });
+    const transporter = getMailTransporter();
+    if (transporter) {
+      await transporter.sendMail({
+        from: process.env.SMTP_FROM || '"Torqued" <torquedapp.nz@gmail.com>',
+        to: ownerEmail,
+        subject: `${code} is your Torqued verification code`,
+        html: generateOtpEmailHtml(formattedRego, code),
+      }).catch(e => console.warn('[check-plate] OTP email failed:', e?.message));
+    }
     return res.json({
-      found: true,
-      isNew: false,
-      customerName,
-      maskedEmail: maskEmail(ownerEmail),
-      magicSent: true,
-      ...(delivered ? {} : { fallbackLink }),
+      found: true, isNew: false, customerName,
+      maskedEmail: maskEmail(ownerEmail), codeSent: true,
     });
   } catch (err) {
     console.error('[check-plate]', err);
@@ -851,12 +1143,27 @@ app.post('/api/customer/check-plate', async (req, res) => {
   }
 });
 
-// GET /api/rego/carjam?plate=ABC123 — raw Carjam ABCD lookup (used by iOS and admin tools)
-app.get('/api/rego/carjam', async (req, res) => {
+// GET /api/rego/carjam — ARCHIVED. CarJam is disabled; use /api/rego/fuelsaver or /api/rego/lookup.
+// Implementation preserved in archive/carjam/carjam-api.ts.
+app.get('/api/rego/carjam', (_req, res) => {
+  res.status(410).json({ error: 'CarJam integration is archived. Use /api/rego/lookup instead.' });
+});
+
+// GET /api/rego/fuelsaver?plate=ABC123 — FuelSaver label lookup (NZ govt, free)
+app.get('/api/rego/fuelsaver', async (req, res) => {
   const plate = String(req.query.plate || '').toUpperCase().trim();
   if (!plate) return res.status(400).json({ error: 'plate required' });
-  const data = await callCarjamAPI(plate);
-  if (!data) return res.status(404).json({ error: 'Vehicle not found via Carjam' });
+  const data = await callFuelSaverAPI(plate);
+  if (!data) return res.status(404).json({ error: 'Vehicle not found via FuelSaver' });
+  res.json(data);
+});
+
+// GET /api/rego/lookup?plate=ABC123 — tries CarJam then FuelSaver, returns first match
+app.get('/api/rego/lookup', async (req, res) => {
+  const plate = String(req.query.plate || '').toUpperCase().trim();
+  if (!plate) return res.status(400).json({ error: 'plate required' });
+  const data = await lookupPlateData(plate);
+  if (!data) return res.status(404).json({ error: 'Vehicle not found' });
   res.json(data);
 });
 
@@ -1354,8 +1661,8 @@ app.post('/api/mechanic/email-trial', async (req, res) => {
 <p style="margin:0 0 6px;font-size:11px;text-transform:uppercase;letter-spacing:2px;color:rgba(255,255,255,.5)">Trial Code</p>
 <p style="margin:0;font-family:monospace;font-size:28px;font-weight:900;letter-spacing:4px;color:#FF1800">sritorqued</p>
 </div>
-<p style="font-size:13px;color:rgba(255,255,255,.7)">Log in at <a href="https://torquednz.vercel.app/mechanic" style="color:#FF1800">torquednz.vercel.app/mechanic</a>, enter <strong>sritorqued</strong> in the promo field on the activation screen, and click Apply — your Garage Hub unlocks instantly.</p>
-<a href="https://torquednz.vercel.app/mechanic" style="display:inline-block;background:#FF1800;color:#fff;font-weight:900;text-transform:uppercase;font-size:13px;letter-spacing:1px;text-decoration:none;padding:14px 32px;border-radius:10px;margin-top:8px">Open Mechanic Portal</a>
+<p style="font-size:13px;color:rgba(255,255,255,.7)">Log in at <a href="https://torqued-psi.vercel.app/mechanic" style="color:#FF1800">torqued-psi.vercel.app/mechanic</a>, enter <strong>sritorqued</strong> in the promo field on the activation screen, and click Apply — your Garage Hub unlocks instantly.</p>
+<a href="https://torqued-psi.vercel.app/mechanic" style="display:inline-block;background:#FF1800;color:#fff;font-weight:900;text-transform:uppercase;font-size:13px;letter-spacing:1px;text-decoration:none;padding:14px 32px;border-radius:10px;margin-top:8px">Open Mechanic Portal</a>
 </div></div>`;
 
     await transporter.sendMail({
@@ -1373,22 +1680,25 @@ app.post('/api/mechanic/email-trial', async (req, res) => {
 
 // Resolve customer name, car label ("VW Golf GTE (RAH190)") and mechanic name for a booking
 async function getBookingContext(bookingId: string) {
-  const ctx = { custName: '', email: '', rego: '', vehicleLabel: '', mechanicName: '', mechanicEmail: '' };
+  const ctx = { custName: '', email: '', custPhone: '', rego: '', vehicleLabel: '', mileage: null as number | null, mechanicName: '', mechanicEmail: '' };
   const supabase = getSupabaseAdmin();
   if (!supabase || !bookingId) return ctx;
-  const { data: b } = await supabase.from('bookings').select('email, customer_name, customer_id, vehicle_rego, mechanic_id').eq('id', bookingId).single();
+  const { data: b } = await supabase.from('bookings').select('email, customer_name, customer_phone, customer_id, vehicle_rego, mechanic_id').eq('id', bookingId).single();
   if (!b) return ctx;
-  ctx.custName = b.customer_name || ''; ctx.email = b.email || ''; ctx.rego = b.vehicle_rego || '';
+  ctx.custName = b.customer_name || ''; ctx.email = b.email || ''; ctx.custPhone = b.customer_phone || ''; ctx.rego = b.vehicle_rego || '';
   if (b.vehicle_rego) {
-    const { data: v } = await supabase.from('vehicles').select('make, model, owner_id').eq('rego', b.vehicle_rego).single();
-    ctx.vehicleLabel = v?.make ? `${v.make} ${v.model} (${b.vehicle_rego})` : `(${b.vehicle_rego})`;
+    const { data: v } = await supabase.from('vehicles').select('make, model, year, mileage, owner_id').eq('rego', b.vehicle_rego).single();
+    const yearStr = v?.year ? `${v.year} ` : '';
+    ctx.vehicleLabel = v?.make ? `${yearStr}${v.make} ${v.model || ''} (${b.vehicle_rego})`.trim() : `(${b.vehicle_rego})`;
+    ctx.mileage = v?.mileage ? Number(v.mileage) : null;
     // Backfill the customer's real name/email from their profile so emails address them by name (never "Dear Customer").
     if (!ctx.custName || !ctx.email) {
       const ownerId = b.customer_id || v?.owner_id;
       if (ownerId) {
-        const { data: p } = await supabase.from('profiles').select('name, email').eq('id', ownerId).single();
+        const { data: p } = await supabase.from('profiles').select('name, email, phone').eq('id', ownerId).single();
         if (!ctx.custName) ctx.custName = p?.name || '';
         if (!ctx.email) ctx.email = p?.email || '';
+        if (!ctx.custPhone) ctx.custPhone = p?.phone || '';
       }
     }
   }
@@ -1568,19 +1878,15 @@ app.post('/api/customer/reply', async (req, res) => {
 function quoteReadyEmailHtml(custName: string, vehicleLabel: string, mechanicName: string, bookingId: string): string {
   const car = vehicleLabel || 'your vehicle';
   const mech = mechanicName ? ` from ${mechanicName}` : '';
-  const link = `https://torquednz.vercel.app/customer?quote=${encodeURIComponent(bookingId)}`;
-  return `<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="color-scheme" content="light"></head>
-<body style="margin:0;padding:0;background:#f4f4f6;font-family:-apple-system,Arial,sans-serif">
-<table width="100%" cellpadding="0" cellspacing="0" style="background:#f4f4f6;padding:32px 8px"><tr><td align="center">
-<table width="100%" cellpadding="0" cellspacing="0" style="max-width:480px;background:#ffffff;border-radius:20px;overflow:hidden;border:1px solid #e6e6ea">
-<tr><td style="background:#150402;padding:24px 32px;border-bottom:3px solid #FF1800;text-align:center"><img src="${LOGO_URL}" width="200" height="67" style="width:200px;height:67px;border:0"/></td></tr>
-<tr><td style="padding:36px 32px;color:#150402;font-size:15px;line-height:1.6">
-<p style="margin:0 0 16px">Dear ${custName ? custName.split(' ')[0] : 'there'},</p>
-<p style="margin:0 0 16px">Thanks for booking with Torqued. Your quote for your ${car}${mech} is ready.</p>
-<p style="margin:0 0 24px">We have a wide range of flexible payment options to suit your budget.</p>
-<a href="${link}" style="display:inline-block;background:#FF1800;color:#fff;font-weight:900;text-transform:uppercase;font-size:13px;letter-spacing:1px;text-decoration:none;padding:14px 32px;border-radius:10px">View your quote</a>
-<p style="margin:28px 0 0;color:#555">Kind regards,<br/>the Torqued team</p>
-</td></tr></table></td></tr></table></body></html>`;
+  const link = `https://torqued-psi.vercel.app/customer?quote=${encodeURIComponent(bookingId)}`;
+  return emailWrap(`<tr><td style="padding:36px 32px;">
+${emailTitle('Your quote is ready')}
+${emailGreeting(custName)}
+${emailPara(`Thanks for booking with Torqued. Your quote for your <strong>${car}</strong>${mech} is ready to view.`)}
+${emailPara(`We offer a wide range of flexible payment options to suit your budget.`)}
+<a href="${link}" style="display:inline-block;background:${EMAIL_RED};color:#fff;font-family:${EMAIL_TITLE_FONT};font-weight:900;text-transform:uppercase;font-size:13px;letter-spacing:1px;text-decoration:none;padding:14px 32px;border-radius:12px;">View your quote</a>
+${emailPara(`<span style="color:#999;">Kind regards,<br/>The Torqued team</span>`)}
+</td></tr>`);
 }
 
 // POST /api/mechanic/cold-quote — mechanic creates a booking for a NON-Torqued customer (CRM).
@@ -1626,18 +1932,14 @@ app.post('/api/mechanic/message-customer', async (req, res) => {
     if (!transporter) return res.status(503).json({ error: 'Email not configured' });
     const car = ctx.vehicleLabel || 'your vehicle';
     const safeMsg = String(message).replace(/</g, '&lt;').replace(/\n/g, '<br/>');
-    const html = `<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="color-scheme" content="light"></head>
-<body style="margin:0;padding:0;background:#f4f4f6;font-family:-apple-system,Arial,sans-serif">
-<table width="100%" cellpadding="0" cellspacing="0" style="background:#f4f4f6;padding:32px 8px"><tr><td align="center">
-<table width="100%" cellpadding="0" cellspacing="0" style="max-width:480px;background:#fff;border-radius:20px;overflow:hidden;border:1px solid #e6e6ea">
-<tr><td style="background:#150402;padding:24px 32px;border-bottom:3px solid #FF1800;text-align:center"><img src="${LOGO_URL}" width="200" height="67" style="width:200px;height:67px;border:0"/></td></tr>
-<tr><td style="padding:36px 32px;color:#150402;font-size:15px;line-height:1.6">
-<p style="margin:0 0 16px">Dear ${ctx.custName ? ctx.custName.split(' ')[0] : 'there'},</p>
-<p style="margin:0 0 8px;color:#777;font-size:12px;text-transform:uppercase;letter-spacing:1px;font-weight:bold">Message from ${ctx.mechanicName || 'your workshop'} regarding ${car}</p>
-<div style="margin:0 0 20px;padding:16px;background:#f7f7f9;border-radius:12px;border-left:3px solid #FF1800">${safeMsg}</div>
-<p style="margin:0;color:#555">Reply to this email to respond directly.</p>
-<p style="margin:24px 0 0;color:#555">Kind regards,<br/>${ctx.mechanicName || 'Your workshop'} via Torqued</p>
-</td></tr></table></td></tr></table></body></html>`;
+    const html = emailWrap(`<tr><td style="padding:36px 32px;">
+${emailTitle(`Message from ${ctx.mechanicName || 'your workshop'}`)}
+${emailGreeting(ctx.custName)}
+<p style="margin:0 0 8px;font-family:${EMAIL_BODY_FONT};font-size:11px;color:${EMAIL_MUTED};text-transform:uppercase;letter-spacing:1px;font-weight:700;">Regarding ${car}</p>
+<div style="margin:0 0 20px;padding:16px;background:#f7f7f9;border-radius:12px;border-left:3px solid ${EMAIL_RED};font-family:${EMAIL_BODY_FONT};font-size:14px;line-height:1.6;color:#374151;">${safeMsg}</div>
+${emailPara(`Reply to this email to respond directly.`)}
+${emailPara(`<span style="color:#999;">Kind regards,<br/>${ctx.mechanicName || 'Your workshop'} via Torqued</span>`)}
+</td></tr>`);
     // Reply routes to the mechanic if they have an email on file; otherwise a no-reply address
     await transporter.sendMail({
       from: process.env.SMTP_FROM || '"Torqued" <torquedapp.nz@gmail.com>',
@@ -1729,7 +2031,7 @@ app.post('/api/mechanic/send-quote-pdf', async (req, res) => {
 // POST /api/stripe/refund — full or partial refund tied to a booking
 app.post('/api/stripe/refund', async (req, res) => {
   try {
-    const { bookingId, amount } = req.body; // amount optional (full if omitted)
+    const { bookingId, amount, reason } = req.body; // amount optional (full if omitted)
     if (!bookingId) return res.status(400).json({ error: 'bookingId required' });
     const stripe = getStripe();
     const supabase = getSupabaseAdmin();
@@ -1753,7 +2055,8 @@ app.post('/api/stripe/refund', async (req, res) => {
       payment_status: amount ? 'partially_refunded' : 'refunded',
     }).eq('id', bookingId);
     await supabase.from('platform_events').insert({
-      type: 'refund', amount: refundedDollars, mechanic_id: booking.mechanic_id, booking_id: bookingId, note: 'Stripe refund',
+      type: 'refund', amount: refundedDollars, mechanic_id: booking.mechanic_id, booking_id: bookingId,
+      note: reason ? `Stripe refund — ${reason}` : 'Stripe refund',
     });
 
     res.json({ success: true, refunded: refundedDollars });
@@ -1908,13 +2211,16 @@ app.post('/api/reviews/request', async (req, res) => {
     const to = booking.email || ctx.email;
     const transporter = getMailTransporter();
     if (to && transporter) {
-      const html = `<div style="font-family:-apple-system,Arial,sans-serif;max-width:480px;margin:auto;background:#fff;border-radius:16px;overflow:hidden;border:1px solid #eee">
-<div style="background:#150402;padding:24px;text-align:center"><img src="${LOGO_URL}" width="180" style="height:auto"/></div>
-<div style="padding:32px;color:#150402">
-<h2 style="margin:0 0 8px">Rate your experience with ${mechName}</h2>
-<p style="color:#555;font-size:14px">Thanks for booking in your <strong>${vehicleLabel}</strong> with Torqued. Please leave a review to help others find a mechanic near them.</p>
-<a href="${reviewUrl}" style="display:inline-block;background:#FF1800;color:#fff;font-weight:900;text-transform:uppercase;font-size:13px;letter-spacing:1px;text-decoration:none;padding:14px 32px;border-radius:10px;margin-top:12px">Leave a Review</a>
-</div></div>`;
+      const html = emailWrap(`<tr><td style="padding:36px 32px;">
+${emailTitle('How was your service?')}
+${emailPara(`Thanks for booking your <strong>${vehicleLabel}</strong> with Torqued. Your feedback helps other Kiwis find a trusted mechanic.`)}
+<table width="100%" cellpadding="0" cellspacing="0" style="margin:20px 0;background:#f7f4f0;border-radius:12px;border:1px solid #e8e4df;">
+  <tr><td style="padding:20px 18px;text-align:center;">
+    <p style="margin:0 0 14px;font-family:${EMAIL_BODY_FONT};font-size:13px;font-weight:700;color:${EMAIL_DARK};">Rate your experience with <strong>${mechName}</strong></p>
+    <a href="${reviewUrl}" style="display:inline-block;background:${EMAIL_RED};color:#fff;font-family:${EMAIL_BODY_FONT};font-size:12px;font-weight:900;text-transform:uppercase;letter-spacing:1px;text-decoration:none;padding:13px 28px;border-radius:10px;">Leave a Review</a>
+  </td></tr>
+</table>
+</td></tr>`);
       await transporter.sendMail({ from: process.env.SMTP_FROM || '"Torqued" <torquedapp.nz@gmail.com>', to, subject: `Rate your experience with ${mechName}`, html }).catch(()=>{});
     }
     await notify({ bookingId, rego: booking.vehicle_rego, ownerId: booking.customer_id, type: 'review_reminder',
@@ -2025,21 +2331,19 @@ app.post('/api/admin/request-setup', async (req, res) => {
     await supabase.from('admin_users').upsert({ email }, { onConflict: 'email' });
 
     const token = signAdmin({ kind: 'admin-setup', email }, 24 * 60 * 60 * 1000);
-    const link = `https://torquednz.vercel.app/admin?setup=${token}`;
+    const link = `https://torqued-psi.vercel.app/admin?setup=${token}`;
     const transporter = getMailTransporter();
     if (transporter) {
-      const html = `<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="color-scheme" content="light dark"></head>
-<body style="margin:0;padding:0;background:#f4f4f6;font-family:-apple-system,Arial,sans-serif">
-<table width="100%" cellpadding="0" cellspacing="0" style="background:#f4f4f6;padding:32px 8px"><tr><td align="center">
-<table width="100%" cellpadding="0" cellspacing="0" style="max-width:480px;background:#ffffff;border-radius:20px;overflow:hidden;border:1px solid #e6e6ea">
-<tr><td style="background:#150402;padding:24px 32px;border-bottom:3px solid #FF1800;text-align:center"><img src="${LOGO_URL}" width="200" height="67" style="width:200px;height:67px;border:0"/></td></tr>
-<tr><td style="padding:36px 32px;color:#150402">
-<span style="display:inline-block;background:rgba(255,24,0,.1);color:#FF1800;font-size:9.5px;font-weight:900;letter-spacing:2px;text-transform:uppercase;padding:6px 14px;border-radius:6px">ADMIN ACCESS</span>
-<h1 style="margin:18px 0 6px;font-size:22px;font-weight:900;text-transform:uppercase">Create your admin password</h1>
-<p style="margin:0 0 22px;font-size:14px;color:#555;line-height:1.5">You've been granted admin access to the Torqued back-office. Set your own secure password using the button below — it's never shared.</p>
-<a href="${link}" style="display:inline-block;background:#FF1800;color:#fff;font-weight:900;text-transform:uppercase;font-size:13px;letter-spacing:1px;text-decoration:none;padding:14px 32px;border-radius:10px">Create Password</a>
-<p style="margin:22px 0 0;font-size:11px;color:#999;line-height:1.5">Link expires in 24 hours. Or paste:<br/><a href="${link}" style="color:#999;word-break:break-all">${link}</a></p>
-</td></tr></table></td></tr></table></body></html>`;
+      const html = emailWrap(`<tr><td style="padding:36px 32px;">
+${emailTitle('Create Your Admin Password')}
+${emailPara("You've been granted admin access to the Torqued back-office. Set your own secure password using the button below — it's never shared.")}
+<table width="100%" cellpadding="0" cellspacing="0" style="margin:20px 0;">
+  <tr><td>
+    <a href="${link}" style="display:inline-block;background:${EMAIL_RED};color:#fff;font-family:${EMAIL_BODY_FONT};font-size:12px;font-weight:900;text-transform:uppercase;letter-spacing:1px;text-decoration:none;padding:13px 28px;border-radius:10px;">Create Password</a>
+  </td></tr>
+</table>
+${emailPara(`Link expires in 24 hours. Or paste: <a href="${link}" style="color:${EMAIL_MUTED};word-break:break-all;font-size:11px;">${link}</a>`)}
+</td></tr>`);
       await transporter.sendMail({ from: process.env.SMTP_FROM || '"Torqued" <torquedapp.nz@gmail.com>', to: email, subject: 'Set your Torqued admin password', html });
     }
     res.json({ sent: true });
@@ -2142,24 +2446,20 @@ app.post('/api/admin/send-login', async (req, res) => {
     if (!transporter) return res.status(503).json({ error: 'Email not configured' });
 
     const tempPass = process.env.ADMIN_PASSWORD || 'torqued-admin-2026';
-    const html = `<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="color-scheme" content="light dark"></head>
-<body style="margin:0;padding:0;background:#f4f4f6;font-family:-apple-system,Arial,sans-serif">
-<table width="100%" cellpadding="0" cellspacing="0" style="background:#f4f4f6;padding:32px 8px"><tr><td align="center">
-<table width="100%" cellpadding="0" cellspacing="0" style="max-width:480px;background:#ffffff;border-radius:20px;overflow:hidden;border:1px solid #e6e6ea">
-<tr><td style="background:#150402;padding:24px 32px;border-bottom:3px solid #FF1800;text-align:center"><img src="${LOGO_URL}" width="200" height="67" style="width:200px;height:67px;border:0"/></td></tr>
-<tr><td style="padding:36px 32px;color:#150402">
-<span style="display:inline-block;background:rgba(255,24,0,.1);color:#FF1800;font-size:9.5px;font-weight:900;letter-spacing:2px;text-transform:uppercase;padding:6px 14px;border-radius:6px">ADMIN ACCESS</span>
-<h1 style="margin:18px 0 6px;font-size:22px;font-weight:900;text-transform:uppercase">Back-Office Login</h1>
-<p style="margin:0 0 20px;font-size:14px;color:#555;line-height:1.5">You've been granted admin access to the Torqued back-office.</p>
-<div style="background:#f7f7f9;border:1px solid #e6e6ea;border-radius:12px;padding:16px;font-size:14px">
-<p style="margin:0 0 8px"><strong>Portal:</strong> <a href="https://torquednz.vercel.app/admin" style="color:#FF1800">torquednz.vercel.app/admin</a></p>
-<p style="margin:0"><strong>Temporary password:</strong> <span style="font-family:monospace">${tempPass}</span></p>
+    const html = emailWrap(`<tr><td style="padding:36px 32px;">
+${emailTitle('Admin Portal Access')}
+${emailPara("You've been granted admin access to the Torqued back-office.")}
+<table width="100%" cellpadding="0" cellspacing="0" style="margin:16px 0;background:#f7f4f0;border-radius:12px;border:1px solid #e8e4df;">
+  <tr><td style="padding:16px 18px;">
+    <p style="margin:0 0 8px;font-family:${EMAIL_BODY_FONT};font-size:13px;color:${EMAIL_DARK};"><strong>Portal:</strong> <a href="https://torqued-psi.vercel.app/admin" style="color:${EMAIL_RED};">torqued-psi.vercel.app/admin</a></p>
+    <p style="margin:0;font-family:${EMAIL_BODY_FONT};font-size:13px;color:${EMAIL_DARK};"><strong>Temporary password:</strong> <span style="font-family:monospace;">${tempPass}</span></p>
+  </td></tr>
+</table>
+<div style="background:#fff7e6;border:1px solid #ffe2a8;border-radius:12px;padding:14px 16px;margin-bottom:20px;">
+  <p style="margin:0;font-family:${EMAIL_BODY_FONT};font-size:13px;color:#7a5b00;"><strong>Action required:</strong> please set a strong personal password — do not keep the temporary one.</p>
 </div>
-<div style="background:#fff7e6;border:1px solid #ffe2a8;border-radius:12px;padding:16px;margin-top:16px">
-<p style="margin:0;font-size:13px;color:#7a5b00"><strong>Action required:</strong> for security, please generate a strong password of your own and reply with it (or send it to the team) so we can set it on your admin account. Don't keep the temporary password.</p>
-</div>
-<a href="https://torquednz.vercel.app/admin" style="display:inline-block;background:#FF1800;color:#fff;font-weight:900;text-transform:uppercase;font-size:13px;letter-spacing:1px;text-decoration:none;padding:14px 32px;border-radius:10px;margin-top:18px">Open Admin Portal</a>
-</td></tr></table></td></tr></table></body></html>`;
+<a href="https://torqued-psi.vercel.app/admin" style="display:inline-block;background:${EMAIL_RED};color:#fff;font-family:${EMAIL_BODY_FONT};font-size:12px;font-weight:900;text-transform:uppercase;letter-spacing:1px;text-decoration:none;padding:13px 28px;border-radius:10px;">Open Admin Portal</a>
+</td></tr>`);
 
     await transporter.sendMail({
       from: process.env.SMTP_FROM || '"Torqued" <torquedapp.nz@gmail.com>',
@@ -2241,12 +2541,15 @@ app.post('/api/admin/update-profile', async (req, res) => {
   try {
     const { id, fields } = req.body;
     if (!id || !fields) return res.status(400).json({ error: 'id and fields required' });
-    const allowed = ['name','email','phone','role','subscription_active','address','nzbn','labour_rate','technicians','parts_lead_days'];
+    const allowed = ['name','email','phone','role','subscription_active','address','nzbn','labour_rate','technicians','parts_lead_days','wof_disabled'];
     const update: Record<string, any> = {};
     for (const k of allowed) if (fields[k] !== undefined) update[k] = fields[k];
     const supabase = getSupabaseAdmin();
     if (!supabase) return res.status(500).json({ error: 'Database not configured' });
-    const { error } = await supabase.from('profiles').update(update).eq('id', id);
+    let { error } = await supabase.from('profiles').update(update).eq('id', id);
+    if (error && /wof_disabled/.test(error.message || '')) {
+      return res.status(500).json({ error: 'The wof_disabled column is missing — run roster-schema.sql in Supabase first.' });
+    }
     if (error) return res.status(500).json({ error: error.message });
     res.json({ success: true });
   } catch (err) {
@@ -2260,10 +2563,20 @@ app.get('/api/admin/mechanics', async (req, res) => {
   if (!adminOk(req)) return res.status(401).json({ error: 'Unauthorized' });
   const supabase = getSupabaseAdmin();
   if (!supabase) return res.status(500).json({ error: 'Database not configured' });
-  const { data } = await supabase.from('profiles')
-    .select('id, name, email, subscription_active, rating, review_count, created_at')
+  // Prefer the richer onboarding fields, but degrade gracefully if a column is
+  // missing (e.g. migration 028 not yet applied) so the list never comes back empty.
+  const rich = await supabase.from('profiles')
+    .select('id, name, email, address, subscription_active, onboarding_complete, agreement_signed_at, billing_start_date, rating, review_count, created_at')
     .eq('role', 'mechanic').order('created_at', { ascending: false });
-  res.json({ mechanics: data ?? [] });
+  let mechanics: any[] = rich.data ?? [];
+  if (rich.error) {
+    console.warn('[admin/mechanics] rich select failed, falling back:', rich.error.message);
+    const basic = await supabase.from('profiles')
+      .select('id, name, email, address, subscription_active, onboarding_complete, rating, review_count, created_at')
+      .eq('role', 'mechanic').order('created_at', { ascending: false });
+    mechanics = basic.data ?? [];
+  }
+  res.json({ mechanics });
 });
 
 // GET /api/admin/bookings — recent bookings
@@ -2355,32 +2668,97 @@ app.post('/api/admin/reset-password', async (req, res) => {
     }
     if (!email) return res.status(400).json({ error: 'No email for this user' });
     const origin = getOrigin(req);
-    const { data: link } = await supabase.auth.admin.generateLink({
-      type: 'recovery', email, options: { redirectTo: `${origin}/mechanic` },
-    });
-    const resetLink = link?.properties?.action_link;
-    if (!resetLink) return res.status(500).json({ error: 'Could not generate reset link' });
+    const resetLink = buildResetLink(origin, email);
     const transporter = getMailTransporter();
     if (transporter) {
       await transporter.sendMail({
         from: process.env.SMTP_FROM || '"Torqued" <torquedapp.nz@gmail.com>',
         to: email,
         subject: 'Reset your Torqued password',
-        html: `<!DOCTYPE html><html><body style="margin:0;padding:0;background:#f4f4f6;font-family:-apple-system,Arial,sans-serif">
-<table width="100%" cellpadding="0" cellspacing="0" style="background:#f4f4f6;padding:32px 8px"><tr><td align="center">
-<table width="100%" cellpadding="0" cellspacing="0" style="max-width:480px;background:#fff;border-radius:20px;overflow:hidden;border:1px solid #e6e6ea">
-<tr><td style="background:#150402;padding:24px 32px;border-bottom:3px solid #FF1800;text-align:center"><img src="${LOGO_URL}" width="200" height="67" style="width:200px;height:67px;border:0"/></td></tr>
-<tr><td style="padding:36px 32px;color:#150402;font-size:15px;line-height:1.6">
-<p style="margin:0 0 16px">A password reset was requested for your Torqued account.</p>
-<p style="margin:0 0 20px"><a href="${resetLink}" style="display:inline-block;background:#FF1800;color:#fff;font-weight:900;text-transform:uppercase;font-size:13px;letter-spacing:1px;text-decoration:none;padding:14px 32px;border-radius:10px">Reset password</a></p>
-<p style="margin:0;color:#555">If you didn't request this, you can ignore this email.</p>
-</td></tr></table></td></tr></table></body></html>`,
+        html: emailWrap(`<tr><td style="padding:36px 32px;">
+${emailTitle('Reset Your Password')}
+${emailPara('A password reset was requested for your Torqued account.')}
+<table width="100%" cellpadding="0" cellspacing="0" style="margin:20px 0;">
+  <tr><td>
+    <a href="${resetLink}" style="display:inline-block;background:${EMAIL_RED};color:#fff;font-family:${EMAIL_BODY_FONT};font-size:12px;font-weight:900;text-transform:uppercase;letter-spacing:1px;text-decoration:none;padding:13px 28px;border-radius:10px;">Reset Password</a>
+  </td></tr>
+</table>
+${emailPara(`If you didn't request this, you can ignore this email.`)}
+</td></tr>`),
       }).catch(e => console.warn('Reset email failed (non-blocking):', e?.message));
     }
     res.json({ success: true, resetLink });
   } catch (err) {
     console.error('[admin/reset-password]', err);
     res.status(500).json({ error: 'Could not send reset' });
+  }
+});
+
+// POST /api/mechanic/forgot-password — self-service reset. Public, but only emails
+// existing mechanic/admin accounts. Always returns success so we never reveal whether
+// an email is registered.
+app.post('/api/mechanic/forgot-password', async (req, res) => {
+  try {
+    const email = String(req.body?.email || '').trim().toLowerCase();
+    if (!email || !/^\S+@\S+\.\S+$/.test(email)) return res.status(400).json({ error: 'Enter a valid email address.' });
+    const supabase = getSupabaseAdmin();
+    if (!supabase) return res.status(500).json({ error: 'Database not configured' });
+    const { data: profile } = await supabase.from('profiles').select('id, role').eq('email', email).maybeSingle();
+    // Don't leak account existence — pretend success if there's no match.
+    if (!profile) return res.json({ success: true });
+    const origin = getOrigin(req);
+    // Self-contained signed reset link — does NOT depend on Supabase's redirect allowlist,
+    // so it reliably lands on our own set-password page instead of the plain login screen.
+    const resetLink = buildResetLink(origin, email);
+    const transporter = getMailTransporter();
+    if (transporter) {
+      await transporter.sendMail({
+        from: process.env.SMTP_FROM || '"Torqued" <torquedapp.nz@gmail.com>',
+        to: email,
+        subject: 'Reset your Torqued password',
+        html: emailWrap(`<tr><td style="padding:36px 32px;">
+${emailTitle('Reset Your Password')}
+${emailPara('We received a request to reset the password for your Torqued workshop account. Tap below to choose a new one — the link expires in 1 hour.')}
+<table width="100%" cellpadding="0" cellspacing="0" style="margin:20px 0;">
+  <tr><td>
+    <a href="${resetLink}" style="display:inline-block;background:${EMAIL_RED};color:#fff;font-family:${EMAIL_BODY_FONT};font-size:12px;font-weight:900;text-transform:uppercase;letter-spacing:1px;text-decoration:none;padding:13px 28px;border-radius:10px;">Set a new password</a>
+  </td></tr>
+</table>
+${emailPara(`If you didn't request this, you can safely ignore this email.`)}
+</td></tr>`),
+      }).catch(e => console.warn('Reset email failed (non-blocking):', e?.message));
+    }
+    res.json({ success: true });
+  } catch (err) {
+    console.error('[mechanic/forgot-password]', err);
+    res.status(500).json({ error: 'Could not send reset link' });
+  }
+});
+
+// Build a signed 1-hour reset link to our own set-password page.
+function buildResetLink(origin: string, email: string): string {
+  const token = signAdmin({ kind: 'pw-reset', email: String(email).toLowerCase() }, 60 * 60 * 1000);
+  return `${origin}/mechanic?reset_token=${encodeURIComponent(token)}`;
+}
+
+// POST /api/auth/set-password — verify a signed reset/onboarding token and set the password.
+app.post('/api/auth/set-password', async (req, res) => {
+  try {
+    const { token, password } = req.body;
+    if (!token || !password) return res.status(400).json({ error: 'token and password required' });
+    if (String(password).length < 8) return res.status(400).json({ error: 'Password must be at least 8 characters.' });
+    const data = readSigned(token);
+    if (!data || data.kind !== 'pw-reset' || !data.email) return res.status(400).json({ error: 'This link is invalid or has expired. Request a new one.' });
+    const supabase = getSupabaseAdmin();
+    if (!supabase) return res.status(500).json({ error: 'Database not configured' });
+    const { data: profile } = await supabase.from('profiles').select('id').eq('email', String(data.email).toLowerCase()).maybeSingle();
+    if (!profile?.id) return res.status(404).json({ error: 'Account not found.' });
+    const { error } = await supabase.auth.admin.updateUserById(profile.id, { password: String(password), email_confirm: true });
+    if (error) return res.status(500).json({ error: error.message });
+    res.json({ success: true, email: data.email });
+  } catch (err) {
+    console.error('[auth/set-password]', err);
+    res.status(500).json({ error: 'Could not set password' });
   }
 });
 
@@ -2436,12 +2814,218 @@ app.post('/api/admin/set-subscription', async (req, res) => {
   res.json({ success: true });
 });
 
+// POST /api/admin/apply-promo — apply free months or a percentage discount to a mechanic's subscription
+app.post('/api/admin/apply-promo', async (req, res) => {
+  if (!adminOk(req)) return res.status(401).json({ error: 'Unauthorized' });
+  const { mechanicId, promoType, months, percent } = req.body;
+  if (!mechanicId || !promoType) return res.status(400).json({ error: 'mechanicId and promoType required' });
+  if (!['free_months', 'percent_off'].includes(promoType)) return res.status(400).json({ error: 'promoType must be free_months or percent_off' });
+  const numMonths = parseInt(months, 10);
+  if (!numMonths || numMonths < 1 || numMonths > 24) return res.status(400).json({ error: 'months must be 1–24' });
+  const numPercent = promoType === 'percent_off' ? parseInt(percent, 10) : 100;
+  if (promoType === 'percent_off' && (!numPercent || numPercent < 1 || numPercent > 99)) return res.status(400).json({ error: 'percent must be 1–99' });
+
+  const supabase = getSupabaseAdmin();
+  if (!supabase) return res.status(500).json({ error: 'Database not configured' });
+
+  const stripe = getStripe();
+  if (!stripe) {
+    await supabase.from('profiles').update({ subscription_active: true }).eq('id', mechanicId);
+    return res.json({ success: true, message: 'Stripe not configured — activated in DB only' });
+  }
+
+  const { data: profile } = await supabase.from('profiles').select('id, email, name, stripe_subscription_id').eq('id', mechanicId).single();
+  if (!profile) return res.status(404).json({ error: 'Mechanic not found' });
+
+  try {
+    const couponName = promoType === 'free_months'
+      ? `Torqued Admin – ${numMonths} free month${numMonths > 1 ? 's' : ''}`
+      : `Torqued Admin – ${numPercent}% off ${numMonths} month${numMonths > 1 ? 's' : ''}`;
+
+    const coupon = await stripe.coupons.create({
+      percent_off: numPercent,
+      duration: 'repeating',
+      duration_in_months: numMonths,
+      name: couponName,
+    });
+
+    let message: string;
+
+    if (profile.stripe_subscription_id) {
+      // Apply coupon to existing subscription
+      await (stripe.subscriptions as any).update(profile.stripe_subscription_id, { coupon: coupon.id });
+      await supabase.from('profiles').update({ subscription_active: true }).eq('id', mechanicId);
+      message = promoType === 'free_months'
+        ? `Applied ${numMonths} free month${numMonths > 1 ? 's' : ''} to existing subscription`
+        : `Applied ${numPercent}% off for ${numMonths} month${numMonths > 1 ? 's' : ''} to existing subscription`;
+    } else {
+      // No subscription yet — create one with a free trial (for testing without a card on file)
+      // The coupon is attached for post-trial billing (for percent_off); for free_months it's 100% off
+      const existing = await stripe.customers.list({ email: profile.email, limit: 1 });
+      const customerId = existing.data.length > 0
+        ? existing.data[0].id
+        : (await stripe.customers.create({ email: profile.email, name: profile.name || undefined, metadata: { mechanicId } })).id;
+
+      const price = await stripe.prices.create({
+        currency: 'nzd',
+        unit_amount: 9900,
+        recurring: { interval: 'month' },
+        product_data: { name: 'Torqued Garage Portal Subscription' },
+      });
+
+      const sub = await (stripe.subscriptions as any).create({
+        customer: customerId,
+        items: [{ price: price.id }],
+        coupon: coupon.id,
+        trial_period_days: numMonths * 30,
+        payment_behavior: 'default_incomplete',
+        payment_settings: { save_default_payment_method: 'on_subscription' },
+      });
+
+      await supabase.from('profiles').update({ stripe_subscription_id: sub.id, subscription_active: true }).eq('id', mechanicId);
+      message = promoType === 'free_months'
+        ? `Created subscription with ${numMonths}-month trial — activated, no card required`
+        : `Created subscription with ${numPercent}% off + ${numMonths}-month trial — activated, card needed at renewal`;
+    }
+
+    res.json({ success: true, message });
+  } catch (err: any) {
+    console.error('[admin/apply-promo]', err);
+    res.status(500).json({ error: err?.message || 'Could not apply promo' });
+  }
+});
+
+// POST /api/admin/upload-document — upload a document for a mechanic (base64 JSON approach)
+app.post('/api/admin/upload-document', async (req, res) => {
+  if (!adminOk(req)) return res.status(401).json({ error: 'Unauthorized' });
+  try {
+    const { mechanicId, fileBase64, fileName, mimeType, description } = req.body;
+    if (!mechanicId || !fileBase64 || !fileName) return res.status(400).json({ error: 'mechanicId, fileBase64, and fileName are required' });
+    const supabase = getSupabaseAdmin();
+    if (!supabase) return res.status(500).json({ error: 'Database not configured' });
+    const fileBuffer = Buffer.from(fileBase64, 'base64');
+    const storagePath = `${mechanicId}/${Date.now()}_${fileName.replace(/[^a-zA-Z0-9._-]/g, '_')}`;
+    // Ensure bucket exists
+    await supabase.storage.createBucket('mechanic-documents', { public: false }).catch(() => {});
+    const { error: uploadError } = await supabase.storage.from('mechanic-documents').upload(storagePath, fileBuffer, { contentType: mimeType || 'application/octet-stream', upsert: false });
+    if (uploadError) return res.status(500).json({ error: uploadError.message });
+    const { data: urlData } = supabase.storage.from('mechanic-documents').getPublicUrl(storagePath);
+    const fileUrl = urlData?.publicUrl || storagePath;
+    const { data: doc, error: dbError } = await supabase.from('mechanic_documents').insert({ mechanic_id: mechanicId, file_name: fileName, file_url: fileUrl, description: description || null }).select().single();
+    if (dbError) return res.status(500).json({ error: dbError.message });
+    res.json({ url: fileUrl, id: doc?.id });
+  } catch (err) {
+    console.error('[admin/upload-document]', err);
+    res.status(500).json({ error: 'Could not upload document' });
+  }
+});
+
+// GET /api/admin/documents/:mechanicId — list documents for a mechanic
+app.get('/api/admin/documents/:mechanicId', async (req, res) => {
+  if (!adminOk(req)) return res.status(401).json({ error: 'Unauthorized' });
+  try {
+    const { mechanicId } = req.params;
+    const supabase = getSupabaseAdmin();
+    if (!supabase) return res.status(500).json({ error: 'Database not configured' });
+    const { data, error } = await supabase.from('mechanic_documents').select('*').eq('mechanic_id', mechanicId).order('uploaded_at', { ascending: false });
+    if (error) return res.status(500).json({ error: error.message });
+    res.json({ documents: data || [] });
+  } catch (err) {
+    console.error('[admin/documents]', err);
+    res.status(500).json({ error: 'Could not fetch documents' });
+  }
+});
+
+// POST /api/admin/document-request — ask a workshop to email in documents, and log the ask.
+// Documents arrive via the Torqued inbox (the email asks them to reply); nothing is uploaded here.
+app.post('/api/admin/document-request', async (req, res) => {
+  if (!adminOk(req)) return res.status(401).json({ error: 'Unauthorized' });
+  try {
+    const { mechanicId, description } = req.body;
+    if (!mechanicId || !description || !String(description).trim()) {
+      return res.status(400).json({ error: 'mechanicId and a document description are required' });
+    }
+    const supabase = getSupabaseAdmin();
+    if (!supabase) return res.status(500).json({ error: 'Database not configured' });
+    const { data: profile } = await supabase.from('profiles').select('name, email').eq('id', mechanicId).maybeSingle();
+    if (!profile?.email) return res.status(404).json({ error: 'No email on file for this workshop' });
+
+    const { data: row, error: dbError } = await supabase.from('mechanic_document_requests')
+      .insert({ mechanic_id: mechanicId, description: String(description).trim(), status: 'pending' })
+      .select().single();
+    if (dbError) return res.status(500).json({ error: dbError.message });
+
+    const transporter = getMailTransporter();
+    if (transporter) {
+      const docsHtml = String(description).trim().split('\n').filter(Boolean)
+        .map(line => `<li style="margin:0 0 6px;font-family:${EMAIL_BODY_FONT};font-size:14px;color:${EMAIL_DARK};">${line.replace(/^[-•]\s*/, '')}</li>`)
+        .join('');
+      const html = emailWrap(`<tr><td style="padding:36px 32px;">
+${emailTitle('A quick document request')}
+<p style="margin:0 0 14px;font-family:${EMAIL_BODY_FONT};font-size:15px;color:${EMAIL_DARK};">Kia ora ${profile.name || 'there'},</p>
+${emailPara("So we can get you on Torqued soon, please reply to this email with the following documents:")}
+<ul style="margin:8px 0 18px;padding-left:20px;">${docsHtml}</ul>
+${emailPara("Just hit reply and attach them — our team will take care of the rest. Ngā mihi, The Torqued Team.")}
+</td></tr>`);
+      await transporter.sendMail({
+        from: process.env.SMTP_FROM || '"Torqued" <torquedapp.nz@gmail.com>',
+        to: profile.email,
+        subject: 'Torqued — documents needed to get you set up',
+        html,
+      }).catch(e => console.warn('Doc request email failed (non-blocking):', e?.message));
+    }
+    res.json({ success: true, request: row });
+  } catch (err) {
+    console.error('[admin/document-request]', err);
+    res.status(500).json({ error: 'Could not send document request' });
+  }
+});
+
+// GET /api/admin/document-requests/:mechanicId — list document requests for a workshop
+app.get('/api/admin/document-requests/:mechanicId', async (req, res) => {
+  if (!adminOk(req)) return res.status(401).json({ error: 'Unauthorized' });
+  try {
+    const supabase = getSupabaseAdmin();
+    if (!supabase) return res.status(500).json({ error: 'Database not configured' });
+    const { data, error } = await supabase.from('mechanic_document_requests')
+      .select('*').eq('mechanic_id', req.params.mechanicId).order('requested_at', { ascending: false });
+    if (error) return res.status(500).json({ error: error.message });
+    res.json({ requests: data || [] });
+  } catch (err) {
+    console.error('[admin/document-requests]', err);
+    res.status(500).json({ error: 'Could not fetch document requests' });
+  }
+});
+
+// POST /api/admin/document-request-update — mark resolved / unresolved and set an internal comment
+app.post('/api/admin/document-request-update', async (req, res) => {
+  if (!adminOk(req)) return res.status(401).json({ error: 'Unauthorized' });
+  try {
+    const { id, status, internal_comment } = req.body;
+    if (!id) return res.status(400).json({ error: 'id required' });
+    const supabase = getSupabaseAdmin();
+    if (!supabase) return res.status(500).json({ error: 'Database not configured' });
+    const update: Record<string, any> = {};
+    if (status === 'pending' || status === 'resolved') {
+      update.status = status;
+      update.resolved_at = status === 'resolved' ? new Date().toISOString() : null;
+    }
+    if (internal_comment !== undefined) update.internal_comment = internal_comment;
+    const { data, error } = await supabase.from('mechanic_document_requests').update(update).eq('id', id).select().single();
+    if (error) return res.status(500).json({ error: error.message });
+    res.json({ success: true, request: data });
+  } catch (err) {
+    console.error('[admin/document-request-update]', err);
+    res.status(500).json({ error: 'Could not update document request' });
+  }
+});
+
 // POST /api/admin/onboard-mechanic — a Torqued employee onboards a workshop directly
 app.post('/api/admin/onboard-mechanic', async (req, res) => {
   if (!adminOk(req)) return res.status(401).json({ error: 'Unauthorized' });
   try {
-    const { email, name, address, phone, labour_rate, technicians, parts_lead_days, owner_name } = req.body;
-    // billing: 'stripe' (paid link, default) | 'trial' (Stripe link w/ free trial days) | 'comp' (free, activated now)
+    const { email, name, legal_name, address, phone, labour_rate, technicians, parts_lead_days, owner_name, owner_phone, nzbn, years_in_trade, billing_start_date } = req.body;
+    // billing: 'stripe' | 'half3months' (50% off 3 months) | 'trial' | 'comp'
     const billing: string = req.body.billing || 'stripe';
     const trialDays: number = Number(req.body.trialDays) || 0;
     if (!email || !name) return res.status(400).json({ error: 'Workshop name and email are required' });
@@ -2484,12 +3068,16 @@ app.post('/api/admin/onboard-mechanic', async (req, res) => {
 
     // Comp accounts go live immediately; paid/trial accounts activate on successful Stripe checkout.
     const compActivate = billing === 'comp';
+    const startDate = billing_start_date || null;
     await supabase.from('profiles').upsert({
       id: userId, email, name, role: 'mechanic',
-      address: address || null, phone: phone || null, owner_name: owner_name || null,
+      legal_name: legal_name || null,
+      address: address || null, phone: phone || null, owner_name: owner_name || null, owner_phone: owner_phone || null,
+      nzbn: nzbn || null, years_in_trade: years_in_trade ? Number(years_in_trade) : null,
       labour_rate: labour_rate != null && labour_rate !== '' ? Number(labour_rate) : null,
       technicians: technicians != null && technicians !== '' ? Number(technicians) : 1,
       parts_lead_days: parts_lead_days != null && parts_lead_days !== '' ? Number(parts_lead_days) : 1,
+      billing_start_date: startDate,
       latitude, longitude,
       subscription_active: compActivate,
       onboarding_complete: true,
@@ -2498,44 +3086,66 @@ app.post('/api/admin/onboard-mechanic', async (req, res) => {
     // Build the Stripe subscription checkout link (unless comped)
     let billingLink = '';
     if (!compActivate) {
-      const sub = await makeSubscriptionCheckout(email, userId, origin, billing === 'trial' ? (trialDays || 30) : 0);
+      const effectiveTrialDays = billing === 'trial' ? (trialDays || 30) : 0;
+      const sub = await makeSubscriptionCheckout(email, userId, origin, billing === 'half3months' ? 'half3months' : effectiveTrialDays);
       billingLink = sub.url || '';
     }
 
-    // Magic login link so they can access the portal + set their password
-    const { data: link } = await supabase.auth.admin.generateLink({
-      type: 'magiclink', email, options: { redirectTo: `${origin}/mechanic` },
-    });
-    const loginLink = link?.properties?.action_link || `${origin}/mechanic`;
+    // Self-contained signed link so step 1 ("Set your password") reliably lands on our
+    // own set-password page (no dependency on Supabase's redirect allowlist).
+    const setPasswordLink = buildResetLink(origin, email);
+    const loginLink = `${origin}/mechanic`;
 
     const transporter = getMailTransporter();
+    const billingLabel = billing === 'half3months' ? '$49.50/mo for 3 months, then $99/mo'
+      : billing === 'trial' ? `free for ${trialDays || 30} days then $99/mo`
+      : '$99/mo';
     if (transporter) {
-      const activationBlock = compActivate
-        ? `<p style="margin:0 0 20px">Your workshop is live on Torqued — complimentary access has been applied. Log in to set up your profile.</p>`
-        : `<p style="margin:0 0 8px">To go live and start receiving leads, activate your $99/month subscription${billing === 'trial' ? ` (your first ${trialDays || 30} days are free)` : ''}:</p>
-           <p style="margin:0 0 20px"><a href="${billingLink}" style="display:inline-block;background:#FF1800;color:#fff;font-weight:900;text-transform:uppercase;font-size:13px;letter-spacing:1px;text-decoration:none;padding:14px 32px;border-radius:10px">Activate subscription</a></p>`;
-      const html = `<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="color-scheme" content="light"></head>
-<body style="margin:0;padding:0;background:#f4f4f6;font-family:-apple-system,Arial,sans-serif">
-<table width="100%" cellpadding="0" cellspacing="0" style="background:#f4f4f6;padding:32px 8px"><tr><td align="center">
-<table width="100%" cellpadding="0" cellspacing="0" style="max-width:480px;background:#fff;border-radius:20px;overflow:hidden;border:1px solid #e6e6ea">
-<tr><td style="background:#150402;padding:24px 32px;border-bottom:3px solid #FF1800;text-align:center"><img src="${LOGO_URL}" width="200" height="67" style="width:200px;height:67px;border:0"/></td></tr>
-<tr><td style="padding:36px 32px;color:#150402;font-size:15px;line-height:1.6">
-<p style="margin:0 0 16px">Kia ora ${name},</p>
-<p style="margin:0 0 16px">Welcome to Torqued — your workshop account has been created.</p>
-${activationBlock}
-<p style="margin:0 0 8px">Access your portal:</p>
-<p style="margin:0 0 20px"><a href="${loginLink}" style="display:inline-block;background:#150402;color:#fff;font-weight:900;text-transform:uppercase;font-size:13px;letter-spacing:1px;text-decoration:none;padding:14px 32px;border-radius:10px">Open Garage Portal</a></p>
-<p style="margin:24px 0 0;color:#555">Kind regards,<br/>the Torqued team</p>
-</td></tr></table></td></tr></table></body></html>`;
+      // Numbered onboarding checklist. Steps adapt to billing (comp accounts skip Stripe).
+      const stepBtn = (href: string, label: string, dark = false) =>
+        `<a href="${href}" style="display:inline-block;background:${dark ? EMAIL_DARK : EMAIL_RED};color:#fff;font-family:${EMAIL_BODY_FONT};font-size:11px;font-weight:900;text-transform:uppercase;letter-spacing:1px;text-decoration:none;padding:11px 22px;border-radius:9px;">${label}</a>`;
+      const step = (n: number, title: string, body: string) =>
+        `<tr><td style="padding:0 0 18px;">
+          <table cellpadding="0" cellspacing="0"><tr>
+            <td valign="top" style="width:30px;"><div style="width:24px;height:24px;border-radius:50%;background:${EMAIL_RED};color:#fff;font-family:${EMAIL_BODY_FONT};font-size:12px;font-weight:900;text-align:center;line-height:24px;">${n}</div></td>
+            <td valign="top" style="padding-left:10px;">
+              <p style="margin:0 0 6px;font-family:${EMAIL_BODY_FONT};font-size:14px;font-weight:800;color:${EMAIL_DARK};">${title}</p>
+              ${body}
+            </td>
+          </tr></table>
+        </td></tr>`;
+
+      const steps: string[] = [];
+      steps.push(step(1, 'Set your password',
+        `<p style="margin:0 0 9px;font-family:${EMAIL_BODY_FONT};font-size:13px;color:#555;">Choose a secure password and you'll be taken straight into your portal.</p>${stepBtn(setPasswordLink, 'Set my password')}`));
+      if (!compActivate) {
+        steps.push(step(2, 'Activate your subscription',
+          `<p style="margin:0 0 9px;font-family:${EMAIL_BODY_FONT};font-size:13px;color:#555;">${billingLabel}. ${startDate ? `Your listing goes live on <strong>${startDate}</strong>.` : 'This puts your workshop live to receive leads.'}</p>${stepBtn(billingLink || `${origin}/mechanic`, 'Set up Stripe billing')}`));
+      }
+      const contractStepNo = compActivate ? 2 : 3;
+      steps.push(step(contractStepNo, 'Sign your onboarding contract',
+        `<p style="margin:0;font-family:${EMAIL_BODY_FONT};font-size:13px;color:#555;">Review and sign your Torqued onboarding contract in your portal — it appears automatically after you log in.</p>`));
+      steps.push(step(contractStepNo + 1, "Log in — you're ready to go",
+        `<p style="margin:0 0 9px;font-family:${EMAIL_BODY_FONT};font-size:13px;color:#555;">Set your services, hours and rates, then start accepting jobs.</p>${stepBtn(loginLink, 'Open my portal', true)}`));
+
+      const html = emailWrap(`<tr><td style="padding:36px 32px;">
+${emailTitle('Welcome to Torqued')}
+${emailGreeting(name)}
+${emailPara("Your workshop account is ready. Here are the few steps to get you live on Torqued — the NZ repair marketplace:")}
+<table width="100%" cellpadding="0" cellspacing="0" style="margin:18px 0 0;">
+${steps.join('\n')}
+</table>
+${emailPara('Need a hand? Just reply to this email and our team will help you get set up.')}
+</td></tr>`);
       await transporter.sendMail({
         from: process.env.SMTP_FROM || '"Torqued" <torquedapp.nz@gmail.com>',
         to: email,
-        subject: compActivate ? 'Your Torqued workshop account is live' : 'Activate your Torqued workshop subscription',
+        subject: 'Welcome to Torqued — 4 steps to go live',
         html,
       }).catch(e => console.warn('Onboard email failed (non-blocking):', e?.message));
     }
 
-    res.json({ success: true, mechanicId: userId, loginLink, billingLink, activated: compActivate });
+    res.json({ success: true, mechanicId: userId, loginLink, setPasswordLink, billingLink, activated: compActivate });
   } catch (err) {
     console.error('[admin/onboard-mechanic]', err);
     res.status(500).json({ error: 'Onboarding failed' });
@@ -2550,7 +3160,7 @@ app.post('/api/mechanic/save-onboarding', async (req, res) => {
     const supabase = getSupabaseAdmin();
     if (!supabase) return res.status(500).json({ error: 'Database not configured' });
 
-    const allowed = ['name','nzbn','address','phone','owner_name','bank_account_name','bank_account_number','labour_rate','shop_fee','technicians','parts_lead_days','service_areas','cancellation_notice_hours','cancellation_partial_refund_pct'];
+    const allowed = ['name','legal_name','nzbn','address','phone','owner_name','owner_phone','years_in_trade','bio','bank_account_name','bank_account_number','labour_rate','shop_fee','technicians','parts_lead_days','service_areas','diagnostic_tools','certifications','banner_image','cancellation_notice_hours','cancellation_partial_refund_pct','billing_start_date','agreement_signed_at','agreement_signed_by','offers_ppi'];
     const update: Record<string, any> = {};
     for (const k of allowed) if (fields[k] !== undefined) update[k] = fields[k];
     if (complete) update.onboarding_complete = true;
@@ -2563,11 +3173,115 @@ app.post('/api/mechanic/save-onboarding', async (req, res) => {
       delete update.cancellation_partial_refund_pct;
       ({ error } = await supabase.from('profiles').update(update).eq('id', mechanicId));
     }
+    // Pre-migration 034: offers_ppi column may not exist yet — retry without it.
+    if (error && /offers_ppi/.test(error.message || '')) {
+      delete update.offers_ppi;
+      ({ error } = await supabase.from('profiles').update(update).eq('id', mechanicId));
+    }
     if (error) return res.status(500).json({ error: error.message });
     res.json({ success: true });
   } catch (err) {
     console.error('[save-onboarding]', err);
     res.status(500).json({ error: 'Could not save' });
+  }
+});
+
+// POST /api/mechanic/email-contract — email the signed partnership agreement PDF to the mechanic
+app.post('/api/mechanic/email-contract', async (req, res) => {
+  try {
+    const { mechanicId, pdfBase64, email, workshopName } = req.body;
+    if (!mechanicId || !pdfBase64 || !email) return res.status(400).json({ error: 'mechanicId, pdfBase64, and email are required' });
+    const transporter = getMailTransporter();
+    if (!transporter) {
+      console.log('[email-contract] Mail transporter not configured — skipping email');
+      return res.json({ sent: false, reason: 'mail_not_configured' });
+    }
+    const html = emailWrap(`
+      <tr><td style="padding:36px 32px;">
+        ${emailTitle('Your Torqued Onboarding Contract')}
+        ${emailGreeting(workshopName || null)}
+        ${emailPara('Thank you for joining the Torqued platform. Your signed onboarding contract is attached to this email. Please keep it for your records.')}
+        ${emailPara(`If you have any questions about the contract, please contact us at <a href="mailto:torquedapp.nz@gmail.com" style="color:${EMAIL_RED};font-weight:700;">torquedapp.nz@gmail.com</a>.`)}
+        ${emailPara('We look forward to working with you.')}
+      </td></tr>
+    `);
+    await transporter.sendMail({
+      from: `"Torqued" <${process.env.SMTP_USER}>`,
+      to: email,
+      subject: 'Your Torqued Onboarding Contract',
+      html,
+      attachments: [{
+        filename: 'Torqued-Onboarding-Contract.pdf',
+        content: Buffer.from(pdfBase64, 'base64'),
+        contentType: 'application/pdf',
+      }],
+    });
+    res.json({ sent: true });
+  } catch (err) {
+    console.error('[email-contract]', err);
+    res.status(500).json({ error: 'Could not send contract email' });
+  }
+});
+
+// POST /api/mechanic/send-email-otp — send a 6-digit OTP to the mechanic's workshop email
+app.post('/api/mechanic/send-email-otp', async (req, res) => {
+  try {
+    const { email, mechanicId } = req.body;
+    if (!email || !mechanicId) return res.status(400).json({ error: 'email and mechanicId are required' });
+    const supabase = getSupabaseAdmin();
+    if (!supabase) return res.status(500).json({ error: 'Database not configured' });
+    const code = Math.floor(100000 + Math.random() * 900000).toString();
+    const expiresAt = new Date(Date.now() + 15 * 60 * 1000).toISOString();
+    // Delete any existing codes for this mechanic/email
+    await supabase.from('mechanic_email_verifications').delete().eq('mechanic_id', mechanicId).eq('email', email);
+    await supabase.from('mechanic_email_verifications').insert({ mechanic_id: mechanicId, email, code, expires_at: expiresAt });
+    const transporter = getMailTransporter();
+    if (transporter) {
+      const html = emailWrap(`
+        <tr><td style="padding:36px 32px;text-align:center;">
+          <span style="display:inline-block;background:rgba(255,24,0,.08);color:${EMAIL_RED};font-size:9px;font-weight:900;letter-spacing:2px;text-transform:uppercase;padding:5px 12px;border-radius:6px;font-family:${EMAIL_BODY_FONT};">EMAIL VERIFICATION</span>
+          <div style="margin:18px 0 0;">${emailTitle('Your Verification Code')}</div>
+          ${emailGreeting(null)}
+          ${emailPara('Use the code below to verify your workshop email address. This code expires in 15 minutes.')}
+          <div style="margin:24px 0;font-family:${EMAIL_TITLE_FONT};font-size:36px;font-weight:900;letter-spacing:8px;color:${EMAIL_DARK};">${code}</div>
+          ${emailPara('If you did not request this code, please ignore this email.')}
+        </td></tr>
+      `);
+      await transporter.sendMail({
+        from: `"Torqued" <${process.env.SMTP_USER}>`,
+        to: email,
+        subject: 'Your Torqued Verification Code',
+        html,
+      });
+    } else {
+      console.warn('[send-email-otp] Mail not configured — verification email not sent.');
+    }
+    res.json({ sent: true });
+  } catch (err) {
+    console.error('[send-email-otp]', err);
+    res.status(500).json({ error: 'Could not send OTP' });
+  }
+});
+
+// POST /api/mechanic/verify-email-otp — verify the 6-digit OTP
+app.post('/api/mechanic/verify-email-otp', async (req, res) => {
+  try {
+    const { email, code, mechanicId } = req.body;
+    if (!email || !code || !mechanicId) return res.status(400).json({ error: 'email, code, and mechanicId are required' });
+    const supabase = getSupabaseAdmin();
+    if (!supabase) return res.status(500).json({ error: 'Database not configured' });
+    const { data } = await supabase.from('mechanic_email_verifications')
+      .select('*').eq('mechanic_id', mechanicId).eq('email', email).eq('code', code)
+      .gt('expires_at', new Date().toISOString()).maybeSingle();
+    if (!data) return res.json({ verified: false, error: 'Invalid or expired code' });
+    // Delete the used code
+    await supabase.from('mechanic_email_verifications').delete().eq('id', data.id);
+    // Update profile with verified workshop email
+    await supabase.from('profiles').update({ workshop_email: email, workshop_email_verified: true }).eq('id', mechanicId);
+    res.json({ verified: true });
+  } catch (err) {
+    console.error('[verify-email-otp]', err);
+    res.status(500).json({ error: 'Verification failed' });
   }
 });
 
@@ -2597,6 +3311,36 @@ app.get('/api/mechanic/status', async (req, res) => {
   } catch (err) {
     console.error('[mechanic/status]', err);
     res.json({ subscriptionActive: false });
+  }
+});
+
+// POST /api/mechanic/update-address — geocode a mechanic's address via Nominatim and update lat/lng
+app.post('/api/mechanic/update-address', async (req, res) => {
+  try {
+    const { mechanicId, address } = req.body;
+    if (!mechanicId || !address) return res.status(400).json({ error: 'mechanicId and address required' });
+    const supabase = getSupabaseAdmin();
+    if (!supabase) return res.status(500).json({ error: 'Database not configured' });
+
+    // Geocode via Nominatim
+    const encoded = encodeURIComponent(address);
+    const geoRes = await fetch(
+      `https://nominatim.openstreetmap.org/search?format=json&countrycodes=nz&limit=1&q=${encoded}`,
+      { headers: { 'User-Agent': 'TorquedNZ/1.0 (torquedapp.nz@gmail.com)' } }
+    );
+    const geoData = await geoRes.json();
+    const lat = geoData[0] ? parseFloat(geoData[0].lat) : null;
+    const lng = geoData[0] ? parseFloat(geoData[0].lon) : null;
+
+    const { error } = await supabase
+      .from('profiles')
+      .update({ address, latitude: lat, longitude: lng })
+      .eq('id', mechanicId);
+    if (error) return res.status(500).json({ error: error.message });
+    res.json({ success: true, latitude: lat, longitude: lng });
+  } catch (err) {
+    console.error('[mechanic/update-address]', err);
+    res.status(500).json({ error: 'Could not update address' });
   }
 });
 
@@ -2659,7 +3403,7 @@ app.post('/api/mechanic/resend', async (req, res) => {
         html: generateMechanicConfirmEmailHtml(name, linkData.properties.action_link),
       });
     } else {
-      console.log(`[Mechanic resend link] ${email} → ${linkData.properties.action_link}`);
+      console.warn('[Mechanic resend link] Mail not configured — login link not sent.');
     }
 
     res.json({ success: true });
@@ -2980,47 +3724,243 @@ const FLEET_SERVICE_TO_SLUG: Record<string, string> = {
 app.get('/api/fleet-prices', async (req, res) => {
   try {
     const rego = req.query.rego ? String(req.query.rego).toUpperCase().trim() : null;
-    if (!rego) return res.json({ prices: {} });
+    // vehicleModelId can be passed directly when the customer has confirmed their exact variant
+    const vehicleModelIdParam = req.query.vehicleModelId ? String(req.query.vehicleModelId) : null;
+    if (!rego && !vehicleModelIdParam) return res.json({ prices: {} });
     const supabase = getSupabaseAdmin();
     if (!supabase) return res.json({ prices: {} });
 
-    // 1. Resolve make/model/year from the customer's vehicle record
-    const { data: custVehicle } = await supabase
-      .from('vehicles').select('make, model, year').eq('rego', rego).single();
-    if (!custVehicle?.make) return res.json({ prices: {}, timingDrive: null, vehicleId: null });
-
-    // 2. Match vehicle_models — four-tier fallback:
-    //   1. Exact model + year range
-    //   2. First-word prefix + year range   ("Tiguan R-Line" → "Tiguan%")
-    //   3. Exact model, no year filter      (newer model than fleet DB covers)
-    //   4. First-word prefix, no year       (last resort — same make/platform)
-    const firstWord = String(custVehicle.model).split(' ')[0];
-    const queryVM = async (modelPat: string, withYear: boolean) => {
-      let q = (supabase as any)
-        .from('vehicle_models')
-        .select('id, timing_drive')
-        .ilike('make', custVehicle.make)
-        .ilike('model', modelPat);
-      if (withYear && custVehicle.year) {
-        q = q.lte('year_from', custVehicle.year)
-             .or(`year_to.is.null,year_to.gte.${custVehicle.year}`);
-      }
-      const { data } = await q.limit(1);
-      return data as any[] | null;
-    };
+    const mechanicId = req.query.mechanic ? String(req.query.mechanic) : null;
+    const PLATFORM_LABOUR_FALLBACK = 130;
 
     let vmRows: any[] | null = null;
-    vmRows = await queryVM(custVehicle.model, true);
-    if (!vmRows?.length && firstWord !== custVehicle.model)
-      vmRows = await queryVM(firstWord + '%', true);
-    if (!vmRows?.length)
-      vmRows = await queryVM(custVehicle.model, false);
-    if (!vmRows?.length && firstWord !== custVehicle.model)
-      vmRows = await queryVM(firstWord + '%', false);
+    let custVehicle: { make?: string; model?: string; year?: number } = {};
+
+    if (vehicleModelIdParam) {
+      // Fast path — customer confirmed their exact variant, skip the fuzzy lookup
+      const { data: vm } = await supabase
+        .from('vehicle_models')
+        .select('id, timing_drive, make, model')
+        .eq('id', vehicleModelIdParam)
+        .single();
+      if (vm) {
+        vmRows = [vm];
+        custVehicle = { make: vm.make, model: vm.model };
+      }
+    }
 
     if (!vmRows?.length) {
-      // No vehicle_models match — still try to return timing drive from vehicle_specs
-      // so water pump recommendation works even without parts data
+      if (!rego) return res.json({ prices: {}, timingDrive: null, vehicleId: null });
+
+      // 1. Resolve make/model/year from the customer's vehicle record
+      const { data: cv } = await supabase
+        .from('vehicles').select('make, model, year').eq('rego', rego).single();
+      if (!cv?.make) return res.json({ prices: {}, timingDrive: null, vehicleId: null });
+      custVehicle = cv;
+
+      // 2. Match vehicle_models — four-tier fallback
+      const firstWord = String(cv.model).split(' ')[0];
+      const queryVM = async (modelPat: string, withYear: boolean) => {
+        let q = (supabase as any)
+          .from('vehicle_models')
+          .select('id, timing_drive')
+          .ilike('make', cv.make)
+          .ilike('model', modelPat);
+        if (withYear && cv.year) {
+          q = q.lte('year_from', cv.year)
+               .or(`year_to.is.null,year_to.gte.${cv.year}`);
+        }
+        const { data } = await q.limit(1);
+        return data as any[] | null;
+      };
+
+      vmRows = await queryVM(cv.model, true);
+      if (!vmRows?.length && firstWord !== cv.model)
+        vmRows = await queryVM(firstWord + '%', true);
+      if (!vmRows?.length)
+        vmRows = await queryVM(cv.model, false);
+      if (!vmRows?.length && firstWord !== cv.model)
+        vmRows = await queryVM(firstWord + '%', false);
+    }
+
+    if (!vmRows?.length) {
+      // ── Try engine-family path via fleet_vehicles → ef_parts_data ──────────
+      if (custVehicle.make) {
+        const fvFirstWord = String(custVehicle.model || '').split(' ')[0];
+        const queryFV = async (modelPat: string, withYear: boolean) => {
+          let q = (supabase as any).from('fleet_vehicles')
+            .select('engine_family_id')
+            .ilike('make', custVehicle.make!)
+            .ilike('model', modelPat);
+          if (withYear && custVehicle.year)
+            q = q.lte('year_from', custVehicle.year).or(`year_to.is.null,year_to.gte.${custVehicle.year}`);
+          const { data } = await q.limit(1);
+          return data as any[] | null;
+        };
+        let fvRows = await queryFV(String(custVehicle.model || ''), true);
+        if (!fvRows?.length && fvFirstWord !== custVehicle.model)
+          fvRows = await queryFV(fvFirstWord + '%', true);
+        if (!fvRows?.length)
+          fvRows = await queryFV(String(custVehicle.model || ''), false);
+        if (!fvRows?.length && fvFirstWord !== custVehicle.model)
+          fvRows = await queryFV(fvFirstWord + '%', false);
+
+        if (fvRows?.length) {
+          const efFamilyId: string = fvRows[0].engine_family_id;
+
+          const [efFamilyRes, efPartsRes, efRateRes] = await Promise.all([
+            supabase.from('engine_families')
+              .select('timing_type, oil_capacity_l, oil_spec, segment_tier')
+              .eq('family_id', efFamilyId).single(),
+            (supabase as any).from('ef_parts_data')
+              .select('total_job_low, total_job_high, hours_low, hours_high, part_categories(slug)')
+              .eq('engine_family_id', efFamilyId),
+            mechanicId
+              ? supabase.from('profiles').select('labour_rate, shop_fee').eq('id', mechanicId).maybeSingle()
+              : supabase.from('profiles').select('labour_rate').eq('role', 'mechanic').eq('subscription_active', true).not('labour_rate', 'is', null),
+          ]);
+
+          const ef = efFamilyRes.data as any;
+          const efParts = (efPartsRes.data ?? []) as any[];
+
+          let efLabourRate: number;
+          if (mechanicId) {
+            efLabourRate = Number((efRateRes as any).data?.labour_rate) || PLATFORM_LABOUR_FALLBACK;
+          } else {
+            const rates = ((efRateRes as any).data as any[] | null) ?? [];
+            const valid = rates.map((r: any) => Number(r.labour_rate)).filter(n => n > 0);
+            efLabourRate = valid.length
+              ? Math.round(valid.reduce((a: number, b: number) => a + b, 0) / valid.length)
+              : PLATFORM_LABOUR_FALLBACK;
+          }
+          const efShopFee = mechanicId ? (Number((efRateRes as any).data?.shop_fee) || null) : null;
+
+          const EF_SLUG_TO_SVC: Record<string, string> = {
+            'brake_pads_front':            'brakes_front_pads',
+            'brake_pads_rear':             'brakes_rear_pads',
+            'brake_pads_and_rotors_front': 'brakes_front_rotors',
+            'basic_service':               'oil',
+            'comprehensive_service':       'full',
+            'cambelt_full':                'timing',
+            'wet_belt_replacement':        'timing',
+            'timing_chain_replacement':    'timing',
+          };
+
+          const efPrices: Record<string, any> = {};
+          for (const row of efParts) {
+            const slug = (row.part_categories as any)?.slug as string | undefined;
+            if (!slug) continue;
+            const svcId = EF_SLUG_TO_SVC[slug];
+            if (!svcId || efPrices[svcId]) continue; // first match wins
+
+            // ef_parts_data totals are already GST-inclusive NZD
+            const low  = Number(row.total_job_low);
+            const high = Number(row.total_job_high);
+            const hh   = Number(row.hours_high) || 0;
+            const chargedHrs = Math.ceil(hh * 4) / 4;
+            const labour = chargedHrs > 0 ? Math.round(chargedHrs * efLabourRate) : 0;
+            const hrsLabel = chargedHrs > 0 ? String(chargedHrs % 1 === 0 ? chargedHrs.toFixed(0) : chargedHrs.toFixed(2).replace(/0+$/, '')) : null;
+
+            efPrices[svcId] = {
+              low, high, midpoint: Math.round((low + high) / 2),
+              partsLow: Math.max(0, low - labour), partsHigh: Math.max(0, high - labour),
+              labourLow: labour, labourHigh: labour, labourHours: hrsLabel,
+              fromEngineFamily: true,
+            };
+
+            // Brake pad floor: 2.25hrs minimum
+            if (svcId === 'brakes_front_pads' || svcId === 'brakes_rear_pads') {
+              const bpLabour = Math.round(2.25 * efLabourRate);
+              efPrices[svcId].labourLow  = bpLabour;
+              efPrices[svcId].labourHigh = bpLabour;
+              efPrices[svcId].labourHours = '2.25';
+              efPrices[svcId].partsLow  = Math.max(0, low - bpLabour);
+              efPrices[svcId].partsHigh = Math.max(0, high - bpLabour);
+            }
+
+            // Annotate service jobs with oil info from engine_family
+            if ((slug === 'basic_service' || slug === 'comprehensive_service') && ef) {
+              efPrices[svcId].oilType = ef.oil_spec || null;
+              efPrices[svcId].oilCapacityL = ef.oil_capacity_l || null;
+            }
+          }
+
+          // Fixed-price services
+          if (!efPrices['wof'])
+            efPrices['wof'] = { low: 55, high: 75, midpoint: 65, partsLow: 0, partsHigh: 0, labourLow: 65, labourHigh: 65, labourHours: '0.5' };
+          if (!efPrices['diag_inspection'])
+            efPrices['diag_inspection'] = { low: 99, high: 99, midpoint: 99, partsLow: 0, partsHigh: 0, labourLow: 99, labourHigh: 99, labourHours: '1' };
+          if (!efPrices['ppi'])
+            efPrices['ppi'] = { low: 199, high: 199, midpoint: 199, partsLow: 0, partsHigh: 0, labourLow: 199, labourHigh: 199, labourHours: '2' };
+
+          // Brake fluid fallback
+          if (!efPrices['brake_fluid']) {
+            const bfLabour = Math.round(0.75 * efLabourRate);
+            efPrices['brake_fluid'] = { low: 25 + bfLabour, high: 45 + bfLabour, midpoint: 35 + bfLabour,
+              partsLow: 25, partsHigh: 45, labourLow: bfLabour, labourHigh: bfLabour, labourHours: '0.75',
+              fluidType: 'DOT 4', fluidCapacityL: 0.5, fluidCostHigh: 45, sundries: 5 };
+          }
+
+          // Coolant flush fallback
+          if (!efPrices['coolant_flush']) {
+            const cfL = 5.0;
+            const cfLabour = Math.round(1.0 * efLabourRate);
+            const cfFluidLow = Math.round(cfL * 9), cfFluidHigh = Math.round(cfL * 17);
+            efPrices['coolant_flush'] = { low: cfFluidLow + cfLabour, high: cfFluidHigh + cfLabour,
+              midpoint: Math.round((cfFluidLow + cfFluidHigh) / 2) + cfLabour,
+              partsLow: cfFluidLow, partsHigh: cfFluidHigh,
+              labourLow: cfLabour, labourHigh: cfLabour, labourHours: '1',
+              fluidType: 'OAT Coolant', fluidCapacityL: cfL, sundries: 10 };
+          }
+
+          // Timing drive from engine_family timing_type
+          const efTimingDrive = ef?.timing_type === 'chain' ? 'chain'
+            : (ef?.timing_type === 'belt' || ef?.timing_type === 'wet_belt') ? 'belt'
+            : null;
+
+          // Chain timing fallback if no ef_parts_data timing row
+          if (!efPrices['timing'] && efTimingDrive === 'chain') {
+            const tcLabour = Math.round(5.0 * efLabourRate);
+            efPrices['timing'] = { low: 600 + tcLabour, high: 1100 + tcLabour,
+              midpoint: 850 + tcLabour, partsLow: 600, partsHigh: 1100,
+              labourLow: tcLabour, labourHigh: tcLabour, labourHours: '5', indicative: true };
+          }
+
+          // Water pump fallback
+          if (!efPrices['water_pump']) {
+            const wpLabour = Math.round(2.0 * efLabourRate);
+            efPrices['water_pump'] = { low: 320 + 120 + 45 + wpLabour, high: 480 + 180 + 85 + wpLabour,
+              midpoint: 400 + 150 + 65 + wpLabour,
+              partsLow: 320 + 120 + 45, partsHigh: 480 + 180 + 85,
+              labourLow: wpLabour, labourHigh: wpLabour, labourHours: '2',
+              coolantLow: 45, coolantHigh: 85 };
+          }
+
+          const wpMakesEF = ['volkswagen', 'vw', 'skoda', 'seat', 'audi', 'volvo', 'land rover', 'jaguar'];
+          const efWPRec = efTimingDrive === 'belt'
+            && wpMakesEF.some(m => (custVehicle.make || '').toLowerCase().includes(m));
+          const wpEFLabour = Math.round(1.0 * efLabourRate);
+
+          return res.json({
+            prices: efPrices,
+            timingDrive: efTimingDrive,
+            vehicleId: null,
+            shopFee: efShopFee,
+            vehicleOilType: ef?.oil_spec || '',
+            waterPumpRecommended: efWPRec,
+            waterPumpInDB: efTimingDrive != null,
+            waterPump: efWPRec ? {
+              partsLow: 435, partsHigh: 660, coolantLow: 60, coolantHigh: 90,
+              labourExtra: wpEFLabour,
+              low: 435 + 60 + wpEFLabour, high: 660 + 90 + wpEFLabour,
+            } : null,
+            fromEngineFamily: true,
+            engineFamilyId: efFamilyId,
+          });
+        }
+      }
+
+      // ── No vehicle_models OR fleet_vehicles match — try timing drive from vehicle_specs
       const { data: specFallback } = await supabase.from('vehicle_specs')
         .select('cambelt_or_chain').eq('rego', rego).maybeSingle();
       let fallbackTimingDrive: string | null = null;
@@ -3081,11 +4021,6 @@ app.get('/api/fleet-prices', async (req, res) => {
     const TRANS_SUNDRIES = 10;   // gaskets, thread seal, rags
     const TRANS_SCAN_FEE = 25;   // service-light reset / TCU adaptation scan
 
-    const PLATFORM_LABOUR_FALLBACK = 130; // $/hr — used when no mechanic specified
-
-    // Optional specific mechanic — when passed the price uses their exact rate
-    const mechanicId = req.query.mechanic ? String(req.query.mechanic) : null;
-
     const [partsRes, labourRes, specRes, rateRes] = await Promise.all([
       supabase.from('parts_data')
         .select('category_id, part_cost_low, part_cost_high')
@@ -3094,11 +4029,11 @@ app.get('/api/fleet-prices', async (req, res) => {
         .select('category_id, hours_low, hours_high')
         .eq('vehicle_id', vehicleId).in('category_id', catIds),
       supabase.from('vehicle_specs')
-        .select('oil_capacity_litres, cambelt_or_chain')
+        .select('oil_capacity_litres, oil_type, cambelt_or_chain, transmission_fluid_type, transmission_fluid_capacity_litres, coolant_capacity_litres')
         .eq('rego', rego).maybeSingle(),
       // Fetch labour rate: specific mechanic if provided, else platform average
       mechanicId
-        ? supabase.from('profiles').select('labour_rate').eq('id', mechanicId).maybeSingle()
+        ? supabase.from('profiles').select('labour_rate, shop_fee').eq('id', mechanicId).maybeSingle()
         : supabase.from('profiles').select('labour_rate').eq('role', 'mechanic').eq('subscription_active', true).not('labour_rate', 'is', null),
     ]);
 
@@ -3113,6 +4048,31 @@ app.get('/api/fleet-prices', async (req, res) => {
         ? Math.round(validRates.reduce((a: number, b: number) => a + b, 0) / validRates.length)
         : PLATFORM_LABOUR_FALLBACK;
     }
+
+    const shopFee = mechanicId ? (Number((rateRes as any).data?.shop_fee) || null) : null;
+
+    // Transmission fluid: resolve type then derive capacity and per-litre cost
+    const transFluidTypeRaw = String(specRes.data?.transmission_fluid_type || '');
+    const transFluidType = transFluidTypeRaw.toLowerCase();
+    const transFluidKnown = transFluidTypeRaw.trim().length > 0;
+    const isDSG = transFluidType.includes('dsg') || transFluidType.includes('dct') || transFluidType.includes('dual');
+    const isCVT = transFluidType.includes('cvt');
+    const isManual = transFluidType.includes('manual');
+
+    // Capacity: use DB value if present, else fall back to type-based estimate
+    const transFluidCapacityL = Number(specRes.data?.transmission_fluid_capacity_litres) ||
+      (isDSG ? 5.5 : isCVT ? 6.0 : isManual ? 2.0 : 4.0);
+
+    // Fluid cost: per-litre rate × actual capacity
+    const transFluidPerLLow  = isDSG ? 25 : isCVT ? 20 : isManual ? 20 : 20;
+    const transFluidPerLHigh = isDSG ? 36 : isCVT ? 30 : isManual ? 30 : 30;
+    let transFluidCostLow  = Math.round(transFluidCapacityL * transFluidPerLLow);
+    let transFluidCostHigh = Math.round(transFluidCapacityL * transFluidPerLHigh);
+    // Floor so unknown ATF vehicles still get a sensible minimum
+    if (!transFluidKnown) { transFluidCostLow = Math.max(80, transFluidCostLow); transFluidCostHigh = Math.max(120, transFluidCostHigh); }
+    // Coolant capacity: use DB value if present, else default 5L
+    const coolantCapacityL = Number(specRes.data?.coolant_capacity_litres) || 5.0;
+    const vehicleOilType = String(specRes.data?.oil_type || '');
 
     const oilCapacity = Number(specRes.data?.oil_capacity_litres) || OIL_CHANGE_DEFAULT_LITRES;
     // Fall back to vehicle_specs.cambelt_or_chain if vehicle_models didn't carry timing_drive
@@ -3160,13 +4120,28 @@ app.get('/api/fleet-prices', async (req, res) => {
         low  = oilLow  + pLow  + NZD_LABOUR_RATE + OIL_CHANGE_SUNDRIES;
         high = oilHigh + pHigh + NZD_LABOUR_RATE + OIL_CHANGE_SUNDRIES;
         lHours = '1';
+        (prices as any)['_oil_detail'] = { oilType: vehicleOilType, oilCapacityL: oilCapacity, oilCostLow: oilLow, oilCostHigh: oilHigh };
       } else if (row.category_id === transCatId) {
-        // Transmission Service: parts (incl GST) + labour (top of range, rounded up) + freight + sundries + scan fee
-        lLow = lHigh = labourAmt;
-        lHours = hrsLabel;
+        // Transmission Service: cap at 1.25hrs — standard drain-and-fill including TCU adaptation
+        const TRANS_MAX_LABOUR_HRS = 1.25;
+        const cappedHrs = Math.min(chargedHrs || TRANS_MAX_LABOUR_HRS, TRANS_MAX_LABOUR_HRS);
+        const cappedLabour = Math.round(cappedHrs * NZD_LABOUR_RATE);
+        const cappedLabel = String(cappedHrs % 1 === 0 ? cappedHrs.toFixed(0) : cappedHrs.toFixed(2).replace(/0+$/, ''));
+        lLow = lHigh = cappedLabour;
+        lHours = cappedLabel;
         const extras = TRANS_FREIGHT + TRANS_SUNDRIES + TRANS_SCAN_FEE;
-        low  = pLow  + labourAmt + extras;
-        high = pHigh + labourAmt + extras;
+        low  = pLow  + transFluidCostLow  + cappedLabour + extras;
+        high = pHigh + transFluidCostHigh + cappedLabour + extras;
+        // Store fluid detail for UI display
+        (prices as any)['_trans_detail'] = {
+          fluidType: transFluidKnown ? transFluidTypeRaw : null,
+          fluidCapacityL: transFluidCapacityL,
+          fluidCostLow: transFluidCostLow,
+          fluidCostHigh: transFluidCostHigh,
+          freight: TRANS_FREIGHT,
+          sundries: TRANS_SUNDRIES,
+          scanFee: TRANS_SCAN_FEE,
+        };
       } else {
         // All other services: parts (incl GST) + labour (top of range, rounded up to 0.25hr)
         lLow = lHigh = labourAmt;
@@ -3183,6 +4158,20 @@ app.get('/api/fleet-prices', async (req, res) => {
       };
     }
 
+    // Brake pad jobs: enforce 2.25hrs to include rotor machining time
+    const BRAKE_PAD_LABOUR_HRS = 2.25;
+    const brakePadLabour = Math.round(BRAKE_PAD_LABOUR_HRS * NZD_LABOUR_RATE);
+    for (const svcId of ['brakes_front_pads', 'brakes_rear_pads']) {
+      if (prices[svcId]) {
+        prices[svcId].labourLow  = brakePadLabour;
+        prices[svcId].labourHigh = brakePadLabour;
+        prices[svcId].labourHours = '2.25';
+        prices[svcId].low  = prices[svcId].partsLow  + brakePadLabour;
+        prices[svcId].high = prices[svcId].partsHigh + brakePadLabour;
+        prices[svcId].midpoint = Math.round((prices[svcId].low + prices[svcId].high) / 2);
+      }
+    }
+
     // Fixed-price services: not in parts_data (no vehicle-specific parts), priced by labour rate
     if (!prices['wof']) {
       // WOF: ~0.5hr visual inspection; total is a regulated ~$55–75 flat fee in NZ
@@ -3194,11 +4183,88 @@ app.get('/api/fleet-prices', async (req, res) => {
       prices['diag_inspection'] = { low: 99, high: 99, midpoint: 99, partsLow: 0, partsHigh: 0,
         labourLow: 99, labourHigh: 99, labourHours: '1' };
     }
+    if (!prices['ppi']) {
+      // Pre-Purchase Inspection: fixed $199 (2hrs labour, no vehicle-specific parts)
+      prices['ppi'] = { low: 199, high: 199, midpoint: 199, partsLow: 0, partsHigh: 0,
+        labourLow: 199, labourHigh: 199, labourHours: '2' };
+    }
+    // Merge transmission fluid detail into the transmission price
+    if (prices['transmission'] && (prices as any)['_trans_detail']) {
+      Object.assign(prices['transmission'], (prices as any)['_trans_detail']);
+      delete (prices as any)['_trans_detail'];
+    }
+    // Merge oil detail into oil service price
+    if ((prices as any)['_oil_detail']) {
+      if (prices['oil']) Object.assign(prices['oil'], (prices as any)['_oil_detail']);
+      delete (prices as any)['_oil_detail'];
+    }
     if (!prices['brake_fluid']) {
       // ~0.75hr flush + DOT4 fluid ($25–35) + sundries
       const bfLabour = Math.round(0.75 * NZD_LABOUR_RATE);
       prices['brake_fluid'] = { low: 25 + bfLabour, high: 45 + bfLabour, midpoint: 35 + bfLabour,
-        partsLow: 25, partsHigh: 45, labourLow: bfLabour, labourHigh: bfLabour, labourHours: '0.75' };
+        partsLow: 25, partsHigh: 45, labourLow: bfLabour, labourHigh: bfLabour, labourHours: '0.75',
+        fluidType: 'DOT 4', fluidCapacityL: 0.5, fluidCostHigh: 45, sundries: 5 };
+    } else {
+      // If it came from parts_data, still annotate with fluid type
+      Object.assign(prices['brake_fluid'], { fluidType: 'DOT 4', fluidCapacityL: 0.5, sundries: 5 });
+    }
+    if (!prices['coolant_flush']) {
+      // ~1hr drain/flush/refill + OAT coolant (~5L @ $9–$17/L NZ retail)
+      const cfLabour = Math.round(1.0 * NZD_LABOUR_RATE);
+      const cfFluidLow = Math.round(coolantCapacityL * 9);
+      const cfFluidHigh = Math.round(coolantCapacityL * 17);
+      prices['coolant_flush'] = { low: cfFluidLow + cfLabour, high: cfFluidHigh + cfLabour,
+        midpoint: Math.round((cfFluidLow + cfFluidHigh) / 2) + cfLabour,
+        partsLow: cfFluidLow, partsHigh: cfFluidHigh, labourLow: cfLabour, labourHigh: cfLabour,
+        labourHours: '1', fluidType: 'OAT Coolant', fluidCapacityL: coolantCapacityL,
+        fluidCostHigh: cfFluidHigh, sundries: 10 };
+    } else {
+      Object.assign(prices['coolant_flush'], { fluidType: 'OAT Coolant', fluidCapacityL: coolantCapacityL, sundries: 10 });
+    }
+
+    // Timing chain: if chain-driven but no parts_data entry, add an indicative range
+    if (!prices['timing'] && timingDrive === 'chain') {
+      const tcLabour = Math.round(5.0 * NZD_LABOUR_RATE);
+      prices['timing'] = { low: 600 + tcLabour, high: 1100 + tcLabour,
+        midpoint: 850 + tcLabour, partsLow: 600, partsHigh: 1100,
+        labourLow: tcLabour, labourHigh: tcLabour, labourHours: '5',
+        indicative: true };
+    }
+
+    const waterPumpHasPartsData = !!prices['water_pump'];
+
+    // Water pump always includes thermostat housing + coolant drain/refill.
+    // Also add coolantLow/coolantHigh breakdown fields for the UI to display.
+    const WP_COOLANT_LOW = 45, WP_COOLANT_HIGH = 85;
+    const WP_THERMO_LOW = 120, WP_THERMO_HIGH = 180; // thermostat housing parts
+    const wpCoolantLabour = Math.round(0.5 * NZD_LABOUR_RATE);
+    if (prices['water_pump']) {
+      // Merge in thermostat housing parts if they have their own price; otherwise use defaults
+      const thParts = prices['thermostat_housing'];
+      const thermoLow  = thParts ? thParts.partsLow  : WP_THERMO_LOW;
+      const thermoHigh = thParts ? thParts.partsHigh : WP_THERMO_HIGH;
+      prices['water_pump'].low  += thermoLow  + WP_COOLANT_LOW  + wpCoolantLabour;
+      prices['water_pump'].high += thermoHigh + WP_COOLANT_HIGH + wpCoolantLabour;
+      prices['water_pump'].partsLow  += thermoLow  + WP_COOLANT_LOW;
+      prices['water_pump'].partsHigh += thermoHigh + WP_COOLANT_HIGH;
+      prices['water_pump'].labourLow  += wpCoolantLabour;
+      prices['water_pump'].labourHigh += wpCoolantLabour;
+      const prevHrs = parseFloat(prices['water_pump'].labourHours || '0');
+      prices['water_pump'].labourHours = String(prevHrs + 0.5);
+      prices['water_pump'].coolantLow  = WP_COOLANT_LOW;
+      prices['water_pump'].coolantHigh = WP_COOLANT_HIGH;
+      // Suppress thermostat_housing as a separate priced item (it's bundled into water_pump)
+      delete prices['thermostat_housing'];
+    }
+    if (!prices['water_pump']) {
+      // Fallback: pump + thermostat housing ($320-480) + coolant + 2hrs labour
+      const wpFallbackLabour = Math.round(2.0 * NZD_LABOUR_RATE);
+      prices['water_pump'] = { low: 320 + WP_THERMO_LOW + WP_COOLANT_LOW + wpFallbackLabour,
+        high: 480 + WP_THERMO_HIGH + WP_COOLANT_HIGH + wpFallbackLabour,
+        midpoint: 400 + 150 + 65 + wpFallbackLabour,
+        partsLow: 320 + WP_THERMO_LOW + WP_COOLANT_LOW, partsHigh: 480 + WP_THERMO_HIGH + WP_COOLANT_HIGH,
+        labourLow: wpFallbackLabour, labourHigh: wpFallbackLabour, labourHours: '2',
+        coolantLow: WP_COOLANT_LOW, coolantHigh: WP_COOLANT_HIGH };
     }
     if (!prices['full']) {
       // Full service: oil + filter + extras + 2.5hrs labour
@@ -3209,24 +4275,37 @@ app.get('/api/fleet-prices', async (req, res) => {
         midpoint: fsParts + fsLabour, partsLow: fsParts - 30, partsHigh: fsParts + 30,
         labourLow: fsLabour, labourHigh: fsLabour, labourHours: '2.5' };
     }
+    // Attach oil spec to full service
+    if (prices['full'] && vehicleOilType) {
+      prices['full'].oilType = vehicleOilType;
+      prices['full'].oilCapacityL = oilCapacity;
+    }
+    if (prices['oil'] && vehicleOilType && !prices['oil'].oilType) {
+      prices['oil'].oilType = vehicleOilType;
+      prices['oil'].oilCapacityL = oilCapacity;
+    }
 
     // Water pump recommendation: true when timing_drive is 'belt' and make is VW/Skoda/Seat/Audi
     // (belt-driven water pump engines where replacement is standard practice alongside cambelt).
-    // This list expands as we get better engine-family data.
     const wpMakes = ['volkswagen', 'vw', 'skoda', 'seat', 'audi'];
     const waterPumpRecommended = timingDrive === 'belt' &&
       wpMakes.some(m => (custVehicle.make || '').toLowerCase().includes(m));
-    // Water pump add-on (NZD incl GST): $280–$420 parts + 1hr extra labour
-    // VW EA211/EA888 pump + thermostat housing kit runs $300–$400 NZ retail; 1hr for coolant purge
-    const wpPartsLow  = 280;
-    const wpPartsHigh = 420;
+    // Cambelt add-on: Water Pump + Thermostat Housing + Auxiliary Belt + Coolant
+    // (standalone water_pump price already includes thermostat; this add-on is the incremental
+    //  cost of doing it at the same time as cambelt — labour savings vs separate job)
+    const wpPartsLow  = 280 + 35 + 120;  // pump + auxiliary belt + thermostat housing
+    const wpPartsHigh = 420 + 60 + 180;
+    const wpCoolantLow = 60, wpCoolantHigh = 90;
     const wpLabour    = Math.round(1.0 * NZD_LABOUR_RATE);
     res.json({
       prices, timingDrive, vehicleId,
+      shopFee: shopFee,
+      vehicleOilType,
       waterPumpRecommended,
+      waterPumpInDB: timingDrive !== 'na',
       waterPump: waterPumpRecommended
-        ? { partsLow: wpPartsLow, partsHigh: wpPartsHigh, labourExtra: wpLabour,
-            low: wpPartsLow + wpLabour, high: wpPartsHigh + wpLabour }
+        ? { partsLow: wpPartsLow, partsHigh: wpPartsHigh, coolantLow: wpCoolantLow, coolantHigh: wpCoolantHigh, labourExtra: wpLabour,
+            low: wpPartsLow + wpCoolantLow + wpLabour, high: wpPartsHigh + wpCoolantHigh + wpLabour }
         : null,
     });
   } catch (err) {
@@ -3254,7 +4333,10 @@ app.get('/api/services/search', async (req, res) => {
     { id: 'diag_inspection', name: 'Diagnostic Inspection', aliases: ['check', 'inspect', 'fault', 'warning light', 'engine light', 'scan', 'code', 'ecu', 'obd'], indicativePrice: 99 },
     { id: 'brake_fluid', name: 'Brake Fluid Flush', aliases: ['brake fluid', 'dot 4', 'dot4', 'bleeding brakes'], indicativePrice: 145 },
     { id: 'cabin_filter', name: 'Cabin Air Filter', aliases: ['cabin filter', 'pollen filter', 'air con filter', 'hvac filter'], indicativePrice: 110 },
-    { id: 'coolant', name: 'Coolant Flush', aliases: ['coolant', 'antifreeze', 'radiator flush', 'coolant service', 'overheating'], indicativePrice: 220 },
+    { id: 'coolant_flush', name: 'Coolant Flush', aliases: ['coolant', 'antifreeze', 'radiator flush', 'coolant service', 'overheating'], indicativePrice: 220 },
+    { id: 'ignition_coils', name: 'Ignition Coils', aliases: ['ignition coils', 'coil pack', 'coil packs', 'misfiring', 'misfire'], indicativePrice: 350 },
+    { id: 'water_pump', name: 'Water Pump Replacement', aliases: ['water pump', 'pump replacement', 'coolant pump', 'cooling'], indicativePrice: 435 },
+    { id: 'thermostat_housing', name: 'Thermostat Housing Replacement', aliases: ['thermostat', 'thermostat housing', 'cooling system'], indicativePrice: 380 },
     { id: 'ac_regas', name: 'Air Conditioning Re-gas', aliases: ['air con', 'ac regas', 'aircon', 'air conditioning', 'a/c', 'ac gas', 'cold air', 'ac not cold'], indicativePrice: 180 },
     { id: 'battery', name: 'Battery Replacement', aliases: ['battery', '12v', 'flat battery', 'wont start', "won't start", 'dead battery'], indicativePrice: 280 },
     { id: 'wiper_blades', name: 'Wiper Blades', aliases: ['wipers', 'wiper blade', 'windscreen wipers', 'smearing'], indicativePrice: 60 },
@@ -3298,6 +4380,10 @@ app.post('/api/ai/customer-assistant', async (req, res) => {
     if (!process.env.ANTHROPIC_API_KEY) return res.status(503).json({ error: 'AI assistant not configured (add Anthropic API key).' });
 
     const supabase = getSupabaseAdmin();
+    if (supabase && ownerId) {
+      const { data: prof } = await supabase.from('profiles').select('ai_disabled').eq('id', ownerId).maybeSingle();
+      if (prof?.ai_disabled) return res.status(403).json({ error: 'AI features have been disabled for this account. Contact support if you believe this is an error.' });
+    }
     let vehicles: any[] = [];
     if (supabase) {
       if (ownerId) {
@@ -3380,10 +4466,14 @@ How to respond:
 // Also accepts ?mechanic_id=<uuid> to restrict to vehicles that have come through that mechanic.
 app.post('/api/ai/health-insights', async (req, res) => {
   try {
-    const { rego, make, model, year, mileage, history: clientHistory, mechanic_id } = req.body;
+    const { rego, make, model, year, mileage, history: clientHistory, mechanic_id, ownerId } = req.body;
     if (!process.env.ANTHROPIC_API_KEY) return res.status(503).json({ error: 'AI not configured (add Anthropic API key).' });
 
     const supabase = getSupabaseAdmin();
+    if (supabase && ownerId && !mechanic_id) {
+      const { data: prof } = await supabase.from('profiles').select('ai_disabled').eq('id', ownerId).maybeSingle();
+      if (prof?.ai_disabled) return res.status(403).json({ error: 'AI features have been disabled for this account.' });
+    }
     const formattedRego = rego ? String(rego).toUpperCase().trim() : null;
 
     // When called from the mechanic portal: verify the vehicle has come through this mechanic
@@ -3407,18 +4497,26 @@ app.post('/api/ai/health-insights', async (req, res) => {
           .eq('rego', formattedRego)
           .order('service_date', { ascending: false }).limit(20),
         supabase.from('bookings')
-          .select('service_ids, completed_at, mileage_out')
+          .select('service_ids, quote_items, description, completed_at, mileage_out')
           .eq('vehicle_rego', formattedRego)
           .eq('status', 'completed')
           .order('completed_at', { ascending: false }).limit(10),
       ]);
       const dbHistory: any[] = histRes.data ?? [];
-      const jobHistory = (jobsRes.data ?? []).map((j: any) => ({
-        service_date: j.completed_at?.slice(0, 10) || null,
-        work_done: ((j.service_ids || []) as string[]).map((id: string) => SERVICE_NAMES[id] || id).join(', ') || 'Torqued service',
-        mileage: j.mileage_out ?? null,
-        provider: 'Torqued',
-      }));
+      const jobHistory = (jobsRes.data ?? []).map((j: any) => {
+        // Describe the work: standard services, else the quote's parts/notes, else the description.
+        const fromServices = ((j.service_ids || []) as string[]).map((id: string) => SERVICE_NAMES[id] || id).join(', ');
+        const qi = j.quote_items;
+        const fromQuote = qi && Array.isArray(qi.parts)
+          ? [qi.parts.filter((p: any) => p?.name).map((p: any) => p.name).join(', '), qi.notes].filter(Boolean).join(' — ')
+          : '';
+        return {
+          service_date: j.completed_at?.slice(0, 10) || null,
+          work_done: fromServices || fromQuote || j.description || 'Torqued service',
+          mileage: j.mileage_out ?? null,
+          provider: 'Torqued',
+        };
+      });
       const combined = [...dbHistory, ...jobHistory]
         .sort((a, b) => (b.service_date || '').localeCompare(a.service_date || ''))
         .slice(0, 20);
@@ -3562,6 +4660,132 @@ app.get('/api/mechanic/availability', async (req, res) => {
   }
 });
 
+// POST /api/mechanic/ppi — save / complete a Pre-Purchase Inspection.
+app.post('/api/mechanic/ppi', async (req, res) => {
+  try {
+    const { id, mechanicId, workshopName: workshopNameIn, bookingId, rego, make, model, submodel, engine, customerName, customerEmail, mileage, checklist, inspectorComments, recommendations, complete, pdfBase64 } = req.body;
+    if (!mechanicId) return res.status(400).json({ error: 'mechanicId required' });
+    const supabase = getSupabaseAdmin();
+    if (!supabase) return res.status(500).json({ error: 'Database not configured' });
+    const payload: Record<string, any> = {
+      mechanic_id: mechanicId,
+      booking_id: bookingId || null,
+      rego: rego ? String(rego).toUpperCase().trim() : null,
+      make: make || null, model: model || null, submodel: submodel || null, engine: engine || null,
+      customer_name: customerName || null, customer_email: customerEmail || null,
+      mileage: mileage != null && mileage !== '' ? Number(mileage) : null,
+      checklist: checklist || [],
+      inspector_comments: inspectorComments || null,
+      recommendations: recommendations || null,
+      status: complete ? 'completed' : 'in_progress',
+      completed_at: complete ? new Date().toISOString() : null,
+    };
+    if (id) payload.id = id;
+    const { data, error } = await supabase.from('ppi_inspections').upsert(payload, { onConflict: 'id' }).select().single();
+    if (error) return res.status(500).json({ error: error.message });
+
+    // Email customer the completed report
+    if (complete && customerEmail) {
+      try {
+        const { data: mechProfile } = await supabase.from('profiles').select('name').eq('id', mechanicId).single();
+        const workshopName = mechProfile?.name || workshopNameIn || 'your workshop';
+        const vehicleDesc = [make, model, submodel].filter(Boolean).join(' ') || String(rego).toUpperCase();
+        const transporter = getMailTransporter();
+        if (transporter) {
+          const attachments: any[] = [];
+          if (pdfBase64) {
+            attachments.push({
+              filename: `Torqued-PPI-${String(rego).toUpperCase()}.pdf`,
+              content: Buffer.from(pdfBase64, 'base64'),
+              contentType: 'application/pdf',
+            });
+          }
+          await transporter.sendMail({
+            from: process.env.SMTP_FROM || '"Torqued" <torquedapp.nz@gmail.com>',
+            to: customerEmail,
+            subject: `Your Pre-Purchase Inspection Report — ${String(rego).toUpperCase()}`,
+            attachments,
+            html: emailWrap(`<tr><td style="padding:36px 32px;">
+<span style="display:inline-block;background:rgba(255,24,0,.08);color:${EMAIL_RED};font-size:9px;font-weight:900;letter-spacing:2px;text-transform:uppercase;padding:5px 12px;border-radius:6px;font-family:${EMAIL_BODY_FONT};">Pre-Purchase Inspection</span>
+<div style="margin:18px 0 0;">${emailTitle('Your inspection report')}</div>
+${emailGreeting(customerName)}
+${emailPara(`Your pre-purchase inspection for <strong style="color:${EMAIL_DARK};">${vehicleDesc}</strong> (${String(rego).toUpperCase()}) has been completed by <strong style="color:${EMAIL_DARK};">${workshopName}</strong>. Your full itemised report is attached as a PDF.`)}
+${emailPara(pdfBase64 ? 'See the attached PDF for the full itemised inspection report.' : 'Your full itemised PDF report will be provided by the workshop directly.')}
+</td></tr>`),
+          }).catch(e => console.warn('[ppi] email failed:', e?.message));
+        }
+      } catch (emailErr) { console.warn('[ppi] email error:', emailErr); }
+    }
+
+    res.json({ success: true, ppi: data });
+  } catch (err) {
+    console.error('[mechanic/ppi]', err);
+    res.status(500).json({ error: 'Could not save inspection' });
+  }
+});
+
+// GET /api/mechanic/next-available — soonest bookable drop-off dates for a workshop.
+// Factors in: parts lead time (if the job needs parts ordered in), the workshop's
+// recurring weekly availability, closed periods (holidays), and a business-day floor.
+app.get('/api/mechanic/next-available', async (req, res) => {
+  try {
+    const mechanicId = req.query.mechanicId as string;
+    const needsParts = req.query.needsParts === '1' || req.query.needsParts === 'true';
+    const count = Math.min(6, Math.max(1, Number(req.query.count) || 3));
+    const leadDaysOverride = req.query.leadDays != null ? Math.max(0, Number(req.query.leadDays)) : null;
+    const supabase = getSupabaseAdmin();
+    if (!supabase || !mechanicId) return res.json({ dates: [], earliest: null });
+
+    const [profileRes, slotsRes, periodsRes] = await Promise.all([
+      supabase.from('profiles').select('parts_lead_days').eq('id', mechanicId).maybeSingle(),
+      supabase.from('mechanic_availability').select('day_of_week').eq('mechanic_id', mechanicId),
+      supabase.from('mechanic_closed_periods').select('start_date, end_date').eq('mechanic_id', mechanicId),
+    ]);
+
+    const partsLead = leadDaysOverride !== null ? leadDaysOverride : Math.max(0, Number(profileRes.data?.parts_lead_days ?? 1));
+    // day_of_week in our schema: 0=Mon … 6=Sun. Convert a JS Date to that index.
+    const toMonZero = (d: Date) => (d.getDay() + 6) % 7;
+    const openDows = new Set<number>((slotsRes.data ?? []).map((s: any) => Number(s.day_of_week)));
+    const hasAvailabilityConfigured = openDows.size > 0;
+    const closed = (periodsRes.data ?? []).map((p: any) => ({ start: p.start_date, end: p.end_date }));
+    const isClosed = (iso: string) => closed.some(c => iso >= c.start && iso <= c.end);
+
+    // Earliest possible drop-off: tomorrow, plus parts lead (business days) if needed.
+    const addBiz = (from: Date, days: number) => {
+      const d = new Date(from); let added = 0;
+      while (added < days) { d.setDate(d.getDate() + 1); const dow = d.getDay(); if (dow !== 0 && dow !== 6) added++; }
+      return d;
+    };
+    const start = needsParts ? addBiz(new Date(), partsLead + 1) : addBiz(new Date(), 1);
+
+    const isBookable = (d: Date) => {
+      const dow = toMonZero(d);
+      const iso = d.toISOString().slice(0, 10);
+      if (isClosed(iso)) return false;
+      // If the workshop set specific hours, respect them; otherwise default to Mon–Fri.
+      if (hasAvailabilityConfigured) return openDows.has(dow);
+      return d.getDay() !== 0 && d.getDay() !== 6;
+    };
+
+    const out: { date: string; day: string; label: string }[] = [];
+    const cursor = new Date(start);
+    const dayNames = ['Sunday','Monday','Tuesday','Wednesday','Thursday','Friday','Saturday'];
+    for (let i = 0; i < 90 && out.length < count; i++) {
+      if (isBookable(cursor)) {
+        const iso = cursor.toISOString().slice(0, 10);
+        const dnum = cursor.getDate();
+        const suffix = dnum % 10 === 1 && dnum !== 11 ? 'st' : dnum % 10 === 2 && dnum !== 12 ? 'nd' : dnum % 10 === 3 && dnum !== 13 ? 'rd' : 'th';
+        out.push({ date: iso, day: dayNames[cursor.getDay()], label: `${dayNames[cursor.getDay()]} ${dnum}${suffix}` });
+      }
+      cursor.setDate(cursor.getDate() + 1);
+    }
+    res.json({ dates: out, earliest: out[0]?.date ?? null, partsLead, needsParts });
+  } catch (err: any) {
+    console.error('[mechanic/next-available]', err);
+    res.status(500).json({ error: err?.message || 'Failed', dates: [], earliest: null });
+  }
+});
+
 // POST /api/mechanic/availability/replace — replace all slots (from operating hours table save)
 app.post('/api/mechanic/availability/replace', async (req, res) => {
   try {
@@ -3641,6 +4865,96 @@ app.delete('/api/mechanic/closed-periods/:id', async (req, res) => {
     const supabase = getSupabaseAdmin();
     if (!supabase) return res.status(500).json({ error: 'DB unavailable' });
     await supabase.from('mechanic_closed_periods').delete().eq('id', req.params.id);
+    res.json({ success: true });
+  } catch (err: any) {
+    res.status(500).json({ error: err?.message || 'Failed' });
+  }
+});
+
+// ── Staff Roster ─────────────────────────────────────────────────────────────
+// GET /api/mechanic/roster?mechanicId=&from=&to= — team members + shifts in a date range
+app.get('/api/mechanic/roster', async (req, res) => {
+  try {
+    const { mechanicId, from, to } = req.query as Record<string, string>;
+    if (!mechanicId) return res.status(400).json({ error: 'mechanicId required' });
+    const supabase = getSupabaseAdmin();
+    if (!supabase) return res.json({ staff: [], shifts: [] });
+
+    let shiftQ = supabase.from('mechanic_roster')
+      .select('id, staff_id, shift_date, start_time, end_time, break_start, break_end')
+      .eq('mechanic_id', mechanicId);
+    if (from) shiftQ = shiftQ.gte('shift_date', from);
+    if (to) shiftQ = shiftQ.lte('shift_date', to);
+
+    const [staffRes, shiftRes] = await Promise.all([
+      supabase.from('mechanic_staff').select('id, name, role').eq('mechanic_id', mechanicId).order('created_at'),
+      shiftQ.order('shift_date').order('start_time'),
+    ]);
+    res.json({ staff: staffRes.data ?? [], shifts: shiftRes.data ?? [] });
+  } catch (err: any) {
+    console.error('[roster]', err);
+    res.json({ staff: [], shifts: [] });
+  }
+});
+
+// POST /api/mechanic/staff — add a team member
+app.post('/api/mechanic/staff', async (req, res) => {
+  try {
+    const { mechanicId, name, role } = req.body;
+    if (!mechanicId || !name?.trim()) return res.status(400).json({ error: 'mechanicId and name required' });
+    const supabase = getSupabaseAdmin();
+    if (!supabase) return res.status(500).json({ error: 'DB unavailable' });
+    const { data, error } = await supabase.from('mechanic_staff')
+      .insert({ mechanic_id: mechanicId, name: name.trim(), role: role?.trim() || null })
+      .select('id, name, role').single();
+    if (error) throw error;
+    res.json({ staff: data });
+  } catch (err: any) {
+    console.error('[staff/add]', err);
+    res.status(500).json({ error: err?.message || 'Failed' });
+  }
+});
+
+// DELETE /api/mechanic/staff/:id — remove a team member (cascades their shifts)
+app.delete('/api/mechanic/staff/:id', async (req, res) => {
+  try {
+    const supabase = getSupabaseAdmin();
+    if (!supabase) return res.status(500).json({ error: 'DB unavailable' });
+    await supabase.from('mechanic_staff').delete().eq('id', req.params.id);
+    res.json({ success: true });
+  } catch (err: any) {
+    res.status(500).json({ error: err?.message || 'Failed' });
+  }
+});
+
+// POST /api/mechanic/roster/shift — roster a staff member on a date
+app.post('/api/mechanic/roster/shift', async (req, res) => {
+  try {
+    const { mechanicId, staffId, shiftDate, startTime, endTime, breakStart, breakEnd } = req.body;
+    if (!mechanicId || !staffId || !shiftDate || !startTime || !endTime) {
+      return res.status(400).json({ error: 'mechanicId, staffId, shiftDate, startTime, endTime required' });
+    }
+    const supabase = getSupabaseAdmin();
+    if (!supabase) return res.status(500).json({ error: 'DB unavailable' });
+    const { data, error } = await supabase.from('mechanic_roster').insert({
+      mechanic_id: mechanicId, staff_id: staffId, shift_date: shiftDate,
+      start_time: startTime, end_time: endTime,
+      break_start: breakStart || null, break_end: breakEnd || null,
+    }).select('id, staff_id, shift_date, start_time, end_time, break_start, break_end').single();
+    if (error) throw error;
+    res.json({ shift: data });
+  } catch (err: any) {
+    console.error('[roster/shift]', err);
+    res.status(500).json({ error: err?.message || 'Failed' });
+  }
+});
+
+// DELETE /api/mechanic/roster/shift/:id — remove a rostered shift
+app.delete('/api/mechanic/roster/shift/:id', async (req, res) => {
+  try {
+    const supabase = getSupabaseAdmin();
+    if (!supabase) return res.status(500).json({ error: 'DB unavailable' });
+    await supabase.from('mechanic_roster').delete().eq('id', req.params.id);
     res.json({ success: true });
   } catch (err: any) {
     res.status(500).json({ error: err?.message || 'Failed' });
@@ -3785,10 +5099,15 @@ Only include an OEM number if you are reasonably confident; otherwise empty stri
 // POST /api/ai/fault-code — translates a diagnostic fault code via Claude
 app.post('/api/ai/fault-code', async (req, res) => {
   try {
-    const { code, make, model, year, mileage } = req.body;
+    const { code, make, model, year, mileage, ownerId } = req.body;
     if (!code) return res.status(400).json({ error: 'code is required' });
     if (!process.env.ANTHROPIC_API_KEY) {
       return res.json({ translation: `Interpreting ${code.toUpperCase()}... AI not configured.` });
+    }
+    const supabase = getSupabaseAdmin();
+    if (supabase && ownerId) {
+      const { data: prof } = await supabase.from('profiles').select('ai_disabled').eq('id', ownerId).maybeSingle();
+      if (prof?.ai_disabled) return res.json({ translation: 'AI features are not available for this account.' });
     }
 
     const prompt = `You are a concise automotive diagnostic assistant for New Zealand mechanics.
@@ -3825,6 +5144,7 @@ app.post('/api/customer/save-history', async (req, res) => {
       service_date: r.date || null, work_done: r.service || null, provider: r.provider || null,
       mileage: r.mileage != null && r.mileage !== '' ? Number(r.mileage) : null,
       price: r.price || null, notes: r.notes || null, source: 'import',
+      source_type: 'ai_autoscan',
     }));
     const { error } = await supabase.from('vehicle_history').insert(rows);
     if (error) return res.status(500).json({ error: error.message });
@@ -3915,6 +5235,9 @@ app.post('/api/customer/delete-history', async (req, res) => {
     if (!id) return res.status(400).json({ error: 'id is required' });
     const supabase = getSupabaseAdmin();
     if (!supabase) return res.status(500).json({ error: 'Database not configured' });
+    // Guard: torqued_job records cannot be deleted
+    const { data: record } = await supabase.from('vehicle_history').select('source_type').eq('id', id).single();
+    if (record?.source_type === 'torqued_job') return res.status(403).json({ error: 'Torqued job records cannot be deleted.' });
     const { error } = await supabase.from('vehicle_history').delete().eq('id', id);
     if (error) return res.status(500).json({ error: error.message });
     res.json({ success: true });
@@ -3940,20 +5263,29 @@ app.post('/api/customer/notifications/dismiss', async (req, res) => {
   }
 });
 
-// POST /api/ai/summarize — short plain-English summary of a long message (for the iOS "AI summary")
+// POST /api/ai/summarize — short summary of a vehicle service description
+// Pass historyId to save the summary back to vehicle_history.ai_summary (avoids repeat API calls).
 app.post('/api/ai/summarize', async (req, res) => {
   try {
-    const { text, style } = req.body;
+    const { text, style, historyId } = req.body;
     if (!text || String(text).trim().length === 0) return res.status(400).json({ error: 'text is required' });
     if (!process.env.ANTHROPIC_API_KEY) return res.status(503).json({ error: 'AI summary is not configured yet.' });
     const system = style === 'title'
-      ? 'You turn a vehicle service description into a short headline of the key work, Title Case, max ~8 words, items joined with " & " or ", ". Example: "Cambelt & Water Pump Replaced, Oil & Filter Service". No prices, no dates, no preamble.'
+      ? 'You turn a vehicle service description into a headline of the key work done, max 5 words, Title Case, items joined with " & ". Example: "Cambelt & Water Pump Replaced". No prices, no dates, no preamble, no trailing punctuation.'
       : 'You summarise a vehicle workshop message for the car owner in 1–2 short, plain sentences. Keep any prices, dates and required actions. No preamble.';
     const summary = await callClaudeChat([
       { role: 'system', content: system },
       { role: 'user', content: String(text).slice(0, 4000) },
-    ], style === 'title' ? 40 : 160);
-    res.json({ summary: summary.trim() });
+    ], style === 'title' ? 30 : 160);
+    const trimmed = summary.trim();
+    // Save to DB if a history record id was supplied — avoids repeat API calls on reload
+    if (historyId && style === 'title') {
+      const supabase = getSupabaseAdmin();
+      if (supabase) {
+        supabase.from('vehicle_history').update({ ai_summary: trimmed }).eq('id', historyId).then(() => {});
+      }
+    }
+    res.json({ summary: trimmed });
   } catch (err) {
     console.error('[ai/summarize]', err);
     res.status(500).json({ error: 'Could not summarise' });
@@ -4121,14 +5453,13 @@ app.post('/api/customer/request-cancellation', async (req, res) => {
                 ? `<p style="margin:0 0 16px">A <strong>full refund of $${refundAmount.toFixed(2)}</strong> has been issued to your original payment method (allow 5–10 business days).</p>`
                 : `<p style="margin:0 0 16px">As this was short notice (less than ${policy.noticeHours} hours of open time before drop-off), a <strong>${refundPct}% refund of $${refundAmount.toFixed(2)}</strong> has been issued per ${ctx.mechanicName || 'the workshop'}'s cancellation policy.</p>`)
             : `<p style="margin:0 0 16px">No payment had been taken, so there's nothing to refund.</p>`;
-          const html = `<div style="font-family:-apple-system,Arial,sans-serif;max-width:480px;margin:auto;background:#fff;border-radius:16px;overflow:hidden;border:1px solid #eee">
-<div style="background:#150402;padding:24px;text-align:center"><img src="${LOGO_URL}" width="180" style="height:auto"/></div>
-<div style="padding:32px;color:#150402;font-size:15px;line-height:1.6">
-<p style="margin:0 0 16px">Dear ${ctx.custName ? ctx.custName.split(' ')[0] : 'there'},</p>
-<p style="margin:0 0 16px">Your booking for <strong>${ctx.vehicleLabel}</strong>${ctx.mechanicName ? ` with ${ctx.mechanicName}` : ''} (Ref #${bookingId}) has been <strong>cancelled</strong>.</p>
+          const html = emailWrap(`<tr><td style="padding:36px 32px;">
+${emailTitle('Booking Cancelled')}
+${emailGreeting(ctx.custName ? ctx.custName.split(' ')[0] : 'there')}
+${emailPara(`Your booking for <strong>${ctx.vehicleLabel}</strong>${ctx.mechanicName ? ` with ${ctx.mechanicName}` : ''} (Ref <strong style="color:${EMAIL_RED};">#${bookingId}</strong>) has been cancelled.`)}
 ${refundLine}
-<p style="margin:0;color:#555;font-size:13px">Changed your mind? You can re-book anytime in the Torqued app or at torquednz.vercel.app.</p>
-</div></div>`;
+${emailPara(`Changed your mind? You can re-book anytime at <a href="https://torqued-psi.vercel.app" style="color:${EMAIL_RED};">torqued-psi.vercel.app</a>.`)}
+</td></tr>`);
           await t.sendMail({
             from: process.env.SMTP_FROM || '"Torqued NZ" <no-reply@torqued.nz>',
             to: custTo, subject: `Your Torqued booking was cancelled (Ref #${bookingId})`, html,
@@ -4181,6 +5512,110 @@ app.post('/api/customer/reschedule', async (req, res) => {
   }
 });
 
+// POST /api/mechanic/reschedule-request — mechanic proposes a new date/time for a booking,
+// optionally leaving a comment. Saves the request to the booking and emails the customer.
+app.post('/api/mechanic/reschedule-request', async (req, res) => {
+  try {
+    const { bookingId, proposedDate, comment, mechanicName } = req.body;
+    if (!bookingId || !proposedDate) return res.status(400).json({ error: 'bookingId and proposedDate are required' });
+    const supabase = getSupabaseAdmin();
+    if (!supabase) return res.status(500).json({ error: 'Database not configured' });
+
+    const proposed = new Date(proposedDate);
+    if (isNaN(proposed.getTime()) || proposed.getTime() < Date.now() - 60 * 60 * 1000) {
+      return res.status(400).json({ error: 'Please choose a future date/time.' });
+    }
+
+    // Save reschedule request fields on the booking row
+    await supabase.from('bookings').update({
+      reschedule_requested_date: proposedDate,
+      reschedule_comment: comment || null,
+      reschedule_status: 'pending',
+    }).eq('id', bookingId);
+
+    const ctx = await getBookingContext(bookingId);
+    const dateStr = proposed.toLocaleString('en-NZ', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric', hour: '2-digit', minute: '2-digit' });
+    const mech = mechanicName || ctx.mechanicName || 'Your workshop';
+
+    if (ctx.email) {
+      const acceptLink = `https://torqued-psi.vercel.app/customer?reschedule_accept=${encodeURIComponent(bookingId)}&proposed=${encodeURIComponent(proposedDate)}`;
+      const html = emailWrap(`<tr><td style="padding:36px 32px;">
+${emailTitle('Reschedule Request')}
+${emailGreeting(ctx.custName)}
+${emailPara(`<strong>${mech}</strong> has requested to reschedule your booking (Ref: <strong style="color:${EMAIL_RED};">#${bookingId}</strong>) to:`)}
+<div style="background:#f7f4f0;border-radius:12px;padding:16px 18px;margin:16px 0;text-align:center;">
+  <p style="margin:0;font-family:${EMAIL_BODY_FONT};font-size:18px;font-weight:900;color:${EMAIL_RED};">${dateStr}</p>
+</div>
+${comment ? emailPara(`<strong>Reason:</strong> ${comment}`) : ''}
+${emailPara('If you are happy with this new time, click below to confirm. Otherwise, please contact us directly.')}
+<a href="${acceptLink}" style="display:inline-block;background:${EMAIL_RED};color:#fff;font-family:${EMAIL_TITLE_FONT};font-weight:900;text-transform:uppercase;font-size:13px;letter-spacing:1px;text-decoration:none;padding:14px 32px;border-radius:12px;">Accept New Time</a>
+</td></tr>`);
+      try {
+        const t = getMailTransporter();
+        if (t) await t.sendMail({
+          from: process.env.SMTP_FROM || '"Torqued NZ" <no-reply@torqued.nz>',
+          to: ctx.email,
+          subject: `Reschedule Request for Booking #${bookingId} — ${mech}`,
+          html,
+        });
+      } catch {}
+    }
+
+    res.json({ success: true });
+  } catch (err) {
+    console.error('[mechanic/reschedule-request]', err);
+    res.status(500).json({ error: 'Could not send reschedule request' });
+  }
+});
+
+// POST /api/mechanic/accept-reschedule — customer accepts a mechanic's proposed new date
+app.post('/api/mechanic/accept-reschedule', async (req, res) => {
+  try {
+    const { bookingId, proposedDate } = req.body;
+    if (!bookingId || !proposedDate) return res.status(400).json({ error: 'bookingId and proposedDate required' });
+    const supabase = getSupabaseAdmin();
+    if (!supabase) return res.status(500).json({ error: 'Database not configured' });
+
+    const { error } = await supabase.from('bookings').update({
+      date: proposedDate,
+      reschedule_status: 'accepted',
+      reschedule_requested_date: null,
+    }).eq('id', bookingId);
+    if (error) return res.status(500).json({ error: error.message });
+
+    // Notify mechanic via email
+    const ctx = await getBookingContext(bookingId);
+    const dateStr = new Date(proposedDate).toLocaleString('en-NZ', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric', hour: '2-digit', minute: '2-digit' });
+    if (ctx.mechanicEmail) {
+      const t = getMailTransporter();
+      if (t) {
+        const html = emailWrap(`<tr><td style="padding:36px 32px;">
+${emailTitle('Reschedule Accepted')}
+${emailGreeting(ctx.mechanicName)}
+${emailPara(`The customer has accepted your proposed reschedule for booking <strong style="color:${EMAIL_RED};">#${bookingId}</strong>.`)}
+<div style="background:#f7f4f0;border-radius:12px;padding:16px 18px;margin:16px 0;text-align:center;">
+  <p style="margin:0;font-family:${EMAIL_BODY_FONT};font-size:18px;font-weight:900;color:${EMAIL_RED};">${dateStr}</p>
+</div>
+${emailPara('The booking date has been updated. No further action needed.')}
+</td></tr>`);
+        try {
+          await t.sendMail({
+            from: process.env.SMTP_FROM || '"Torqued NZ" <no-reply@torqued.nz>',
+            to: ctx.mechanicEmail,
+            subject: `Reschedule Confirmed — Booking #${bookingId}`,
+            html,
+          });
+        } catch {}
+      }
+    }
+
+    res.json({ success: true, newDate: proposedDate, dateStr });
+  } catch (err) {
+    console.error('[mechanic/accept-reschedule]', err);
+    res.status(500).json({ error: 'Could not accept reschedule' });
+  }
+});
+
 // POST /api/ai/parse-receipt — extracts service history from a receipt image via Claude vision
 app.post('/api/ai/parse-receipt', async (req, res) => {
   try {
@@ -4190,25 +5625,41 @@ app.post('/api/ai/parse-receipt', async (req, res) => {
 
     const isPdf = String(mimeType).includes('pdf');
 
-    const prompt = `You are an automotive service receipt parser for New Zealand workshops.
-Read this service receipt/invoice and extract:
-- service: a concise summary of the work performed (e.g. "Oil & filter change, brake pads front")
-- date: the service date as written (e.g. "14 Oct 2025")
-- mileage: the odometer/mileage in km if shown (digits only, no units)
-- provider: the workshop/mechanic business name
-- price: the total amount including currency symbol if shown
-- notes: any other relevant detail (warranty, parts brands, next-service advice)
-Return ONLY a JSON object with keys: service, date, mileage, provider, price, notes.
-Use an empty string for anything you cannot find. Do not guess.`;
+    const prompt = `You are an expert automotive receipt parser for New Zealand workshops. Extract information from this service receipt/invoice image or PDF.
 
-    const fileBlock = isPdf
-      ? { type: 'file', file: { filename: 'receipt.pdf', file_data: `data:application/pdf;base64,${fileData}` } }
-      : { type: 'image_url', image_url: { url: `data:${mimeType};base64,${fileData}` } };
+EXTRACT THESE FIELDS EXACTLY:
+1. service: All work performed. If long, write a clear concise summary (e.g. "WOF, oil & filter change, front brake pads, wheel alignment"). Include all services listed.
+2. date: The service/invoice date. Look for date fields, invoice date, job date. Format as DD/MM/YYYY if possible or as written on the document.
+3. mileage: Odometer reading in km at time of service. Look for "km", "odometer", "mileage", "odo". Return digits only, no units or commas.
+4. provider: The workshop, garage, or mechanic business name. Look at the header, logo, or "From:" field.
+5. price: Total amount charged. Include $ symbol. Look for "Total", "Amount Due", "Grand Total", "Invoice Total".
+6. notes: Any other relevant information — warranty terms, parts used, next service date, technician notes.
 
-    const text = await callClaude([
-      { type: 'text', text: prompt },
-      fileBlock,
-    ], true);
+IMPORTANT: Even if the image is partially blurry or skewed, extract what you can read. Do not return empty strings if the information is visible anywhere in the document.
+
+Return ONLY a valid JSON object: {"service":"...","date":"...","mileage":"...","provider":"...","price":"...","notes":"..."}
+Use empty string "" only for fields genuinely not present in the document.`;
+
+    const apiKey = process.env.ANTHROPIC_API_KEY;
+    if (!apiKey) throw new Error('ANTHROPIC_API_KEY not configured');
+
+    const imgBlock = isPdf
+      ? { type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: fileData } }
+      : { type: 'image', source: { type: 'base64', media_type: mimeType, data: fileData } };
+
+    const receiptResp = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: { 'x-api-key': apiKey, 'anthropic-version': '2023-06-01', 'content-type': 'application/json' },
+      body: JSON.stringify({
+        model: 'claude-sonnet-4-6',
+        max_tokens: 1024,
+        system: 'Return only valid JSON. No markdown code fences, no explanation.',
+        messages: [{ role: 'user', content: [imgBlock, { type: 'text', text: prompt }] }],
+      }),
+    });
+    const receiptData = await receiptResp.json();
+    if (!receiptResp.ok) throw new Error(receiptData?.error?.message || 'Claude receipt request failed');
+    const text = receiptData.content?.[0]?.text ?? '';
 
     let parsed: any = {};
     try { parsed = JSON.parse(text.trim()); }
@@ -4268,6 +5719,11 @@ app.post('/api/otp/send', async (req, res) => {
       return res.json({ requiresOtp: false });
     }
 
+    // Throttle: refuse a new code if one was just issued (< 45s ago) for this plate.
+    const prior = otpStore.get(formattedRego);
+    if (prior && prior.expiresAt - Date.now() > (10 * 60 * 1000 - 45 * 1000)) {
+      return res.status(429).json({ error: 'A code was just sent. Please wait a moment before requesting another.' });
+    }
     // Generate 6-digit OTP and store for 10 minutes
     const code = crypto.randomInt(100000, 999999).toString();
     otpStore.set(formattedRego, { code, expiresAt: Date.now() + 10 * 60 * 1000 });
@@ -4282,8 +5738,8 @@ app.post('/api/otp/send', async (req, res) => {
         html: generateOtpEmailHtml(formattedRego, code),
       });
     } else {
-      // Dev fallback — print to console if SMTP not configured
-      console.log(`[OTP] ${formattedRego} → ${code} (SMTP not configured, not sent)`);
+      // SMTP not configured — never log the OTP code (log exposure risk).
+      console.warn('[OTP] SMTP not configured — code not sent.');
     }
 
     res.json({ requiresOtp: true, maskedEmail: maskEmail(ownerEmail!) });
@@ -4347,50 +5803,64 @@ app.get('/api/vehicles/:rego', async (req, res) => {
     .single();
 
   if (error || !data) return res.status(404).json({ error: 'Vehicle not found' });
+
   // Attach any saved/imported service history for this vehicle
   const { data: history } = await supabase
     .from('vehicle_history').select('*').eq('rego', formattedRego).order('created_at', { ascending: false });
-  res.json({ ...data, history: history ?? [] });
+
+  // Derive last known mileage from service history if vehicle record shows 0 or null
+  let mileage = Number(data.mileage) || 0;
+  if (!mileage && history && history.length > 0) {
+    const histMileages = history.map((h: any) => Number(h.mileage)).filter(n => n > 0);
+    if (histMileages.length > 0) mileage = Math.max(...histMileages);
+  }
+
+  res.json({ ...data, mileage, history: history ?? [] });
 });
 
-// POST /api/otp/verify — validates code, clears it, and returns the owner's email
+// POST /api/otp/verify — validates code against customer_otps table, returns owner data
 app.post('/api/otp/verify', async (req, res) => {
   const { rego, code } = req.body;
   if (!rego || !code) return res.status(400).json({ success: false, error: 'rego and code are required' });
 
   const formattedRego = (rego as string).toUpperCase().trim();
-  const entry = otpStore.get(formattedRego);
+  const supabase = getSupabaseAdmin();
+  if (!supabase) return res.status(500).json({ success: false, error: 'Database not configured' });
 
-  if (!entry) {
-    return res.json({ success: false, error: 'No code was sent for this plate. Please request a new one.' });
-  }
-  if (Date.now() > entry.expiresAt) {
-    otpStore.delete(formattedRego);
+  const codeHash = hashOtp(String(code).trim());
+  const { data: row } = await supabase
+    .from('customer_otps')
+    .select('rego, email, expires_at, attempts')
+    .eq('rego', formattedRego)
+    .eq('code_hash', codeHash)
+    .maybeSingle();
+
+  if (!row) return res.json({ success: false, error: 'Incorrect code. Please try again.' });
+  if (new Date(row.expires_at) < new Date()) {
+    await supabase.from('customer_otps').delete().eq('rego', formattedRego);
     return res.json({ success: false, error: 'Code has expired. Please request a new one.' });
   }
-  if (entry.code !== (code as string).trim()) {
-    return res.json({ success: false, error: 'Incorrect code. Please try again.' });
-  }
 
-  otpStore.delete(formattedRego); // One-time use
+  // Clear after use — one-time code
+  await supabase.from('customer_otps').delete().eq('rego', formattedRego);
 
   // Return the verified owner's email, id, and ALL their vehicles (the garage)
-  let email: string | null = null;
+  let email: string | null = row.email ?? null;
   let ownerId: string | null = null;
   let vehicles: any[] = [];
-  const supabase = getSupabaseAdmin();
-  if (supabase) {
-    const { data: vehicle } = await supabase.from('vehicles').select('owner_id').eq('rego', formattedRego).single();
-    if (vehicle?.owner_id) {
-      ownerId = vehicle.owner_id;
+
+  const { data: vehicle } = await supabase.from('vehicles').select('owner_id').eq('rego', formattedRego).single();
+  if (vehicle?.owner_id) {
+    ownerId = vehicle.owner_id;
+    if (!email) {
       const { data: profile } = await supabase.from('profiles').select('email').eq('id', ownerId).single();
       email = profile?.email ?? null;
-      const { data: rows } = await supabase
-        .from('vehicles')
-        .select('rego, make, model, year, variant, mileage, thumbnail')
-        .eq('owner_id', ownerId);
-      vehicles = rows ?? [];
     }
+    const { data: rows } = await supabase
+      .from('vehicles')
+      .select('rego, make, model, year, variant, mileage, thumbnail')
+      .eq('owner_id', ownerId);
+    vehicles = rows ?? [];
   }
 
   res.json({ success: true, email, ownerId, vehicles });
@@ -4463,7 +5933,7 @@ app.post('/api/customer/remove-vehicle', async (req, res) => {
       if (rp?.email && vp?.email && rp.email.toLowerCase() === vp.email.toLowerCase()) {
         authorised = true;
       }
-      console.log('[remove-vehicle] fallback email check', { requestOwnerId: ownerId, vehicleOwnerId: vehicle.owner_id, requestEmail: rp?.email, vehicleEmail: vp?.email, authorised });
+      console.log('[remove-vehicle] fallback ownership check →', authorised ? 'authorised' : 'denied');
     }
 
     if (!authorised) {
@@ -4515,19 +5985,32 @@ app.post('/api/stripe/webhook', async (req, res) => {
   switch (event.type) {
     case 'checkout.session.completed': {
       const session = event.data.object as Stripe.Checkout.Session;
-      const { type, bookingId, mechanicId, source } = session.metadata ?? {};
+      const { type, bookingId, mechanicId, source, userId } = session.metadata ?? {};
 
       if (type === 'repair_payment' && bookingId) {
         // Don't overwrite an existing customer email with Stripe's if we already have one on the booking.
         const update: Record<string, any> = {
           payment_status: 'confirmed', status: 'booked', stripe_session_id: session.id,
         };
+        const stripePhone = session.customer_details?.phone;
         if (session.customer_details?.email) update.email = session.customer_details.email;
         if (session.customer_details?.name) update.customer_name = session.customer_details.name;
-        if (session.customer_details?.phone) update.phone = session.customer_details.phone;
+        if (stripePhone) update.customer_phone = stripePhone;
         const { error } = await supabase.from('bookings').update(update).eq('id', bookingId);
         if (error) console.error('[Webhook] Failed to update booking:', error.message);
         else console.log(`[Webhook] Booking ${bookingId} confirmed via payment`);
+
+        // Sync the phone Stripe collected back to the customer's profile so it persists system-wide
+        // and can be shared with mechanics. Match by userId (if known) else by the Stripe email.
+        if (stripePhone) {
+          try {
+            if (userId) {
+              await supabase.from('profiles').update({ phone: stripePhone }).eq('id', userId);
+            } else if (session.customer_details?.email) {
+              await supabase.from('profiles').update({ phone: stripePhone }).ilike('email', session.customer_details.email);
+            }
+          } catch (e) { console.error('[Webhook] phone profile sync failed:', e); }
+        }
 
         // In-app (iOS) bookings get NO web success page, so send the confirmation email here,
         // built from the actual booking row so it always matches what was booked.
@@ -4578,15 +6061,30 @@ app.post('/api/stripe/webhook', async (req, res) => {
 
 // Endpoint 1: Create Stripe Checkout Session for Mechanic Subscription
 // Shared: create a $99/mo subscription checkout session (optionally with a free-trial). Returns {url,...}.
-async function makeSubscriptionCheckout(email: string, mechanicId: string, origin: string, trialDays?: number) {
+async function makeSubscriptionCheckout(email: string, mechanicId: string, origin: string, trialDaysOrBillingType?: number | string) {
   const stripe = getStripe();
   if (!stripe) {
     return { id: 'mock_sub_session_id', url: `${origin}/mechanic?session_id=mock_sub_session_id&mechanic_id=${mechanicId}`, isMock: true };
   }
+  const billingType = typeof trialDaysOrBillingType === 'string' ? trialDaysOrBillingType : null;
+  const trialDays = typeof trialDaysOrBillingType === 'number' ? trialDaysOrBillingType : 0;
+
+  // For 50% off first 3 months: create a coupon then apply it
+  let discounts: any[] | undefined;
+  if (billingType === 'half3months') {
+    const coupon = await stripe.coupons.create({
+      percent_off: 50,
+      duration: 'repeating',
+      duration_in_months: 3,
+      name: 'Torqued Launch - 50% off 3 months',
+    });
+    discounts = [{ coupon: coupon.id }];
+  }
+
   const session = await stripe.checkout.sessions.create({
     payment_method_types: ['card'],
     mode: 'subscription',
-    allow_promotion_codes: true,
+    ...(discounts ? { discounts } : { allow_promotion_codes: true }),
     line_items: [{
       price_data: {
         currency: 'nzd',
@@ -4596,7 +6094,7 @@ async function makeSubscriptionCheckout(email: string, mechanicId: string, origi
       },
       quantity: 1,
     }],
-    ...(trialDays && trialDays > 0 ? { subscription_data: { trial_period_days: trialDays } } : {}),
+    ...(!billingType && trialDays > 0 ? { subscription_data: { trial_period_days: trialDays } } : {}),
     success_url: `${origin}/mechanic?session_id={CHECKOUT_SESSION_ID}&mechanic_id=${mechanicId}`,
     cancel_url: `${origin}/mechanic?canceled=true`,
     customer_email: email,
@@ -4711,221 +6209,59 @@ app.get('/api/mechanic/billing', async (req, res) => {
 // Generates a beautiful HTML booking confirmation matching Torqued's design language
 function generateBookingEmailHtml(data: any): string {
   const {
-    customerName,
-    bookingId,
-    date,
-    time,
-    readyTime,
-    vehicle,
-    plate,
-    mechanicName,
-    mechanicAddress,
-    paymentMethod,
-    services,
-    price,
-    paymentOption,
-    depositPaid,
-    promoApplied,
-    promoDiscount
+    customerName, bookingId, date, time, readyTime, vehicle, plate,
+    mechanicName, mechanicAddress, paymentMethod, services, price,
+    paymentOption, promoApplied, promoDiscount,
   } = data;
 
-  const servicesListHtml = (services || []).map((s: string) => `
-    <tr style="border-bottom: 1px solid rgba(21, 4, 2, 0.08);">
-      <td style="padding: 14px 0; font-family: -apple-system, BlinkMacSystemFont, Arial, sans-serif; font-size: 13.5px; font-weight: bold; color: #150402; text-transform: uppercase; border-bottom: 1px solid rgba(21, 4, 2, 0.06);">
-        ${s}
-      </td>
-      <td style="padding: 14px 0; text-align: right; font-family: monospace; font-size: 13.5px; font-weight: bold; color: #150402; border-bottom: 1px solid rgba(21, 4, 2, 0.06);">
-        INCLUDED
-      </td>
-    </tr>
-  `).join('');
-
   const finalPrice = promoApplied ? Math.max(0, parseFloat(price) - parseFloat(promoDiscount)) : parseFloat(price);
-  
-  const discountHtml = promoApplied ? `
-    <tr>
-      <td style="padding: 12px 0; font-family: -apple-system, BlinkMacSystemFont, Arial, sans-serif; font-size: 13px; font-weight: bold; color: #FF1800; text-transform: uppercase;">
-        PROMO DISCOUNT (TORQUED219)
+  const serviceRows = (services || []).map((s: string) => `
+    <tr><td style="padding:10px 0;font-family:${EMAIL_BODY_FONT};font-size:13px;font-weight:700;color:#374151;border-bottom:1px solid #f0ede8;text-transform:uppercase;">${s}</td>
+    <td style="padding:10px 0;text-align:right;font-family:monospace;font-size:12px;font-weight:700;color:${EMAIL_MUTED};border-bottom:1px solid #f0ede8;">INCLUDED</td></tr>`).join('');
+  const discountRow = promoApplied ? `<tr><td style="padding:8px 0;font-family:${EMAIL_BODY_FONT};font-size:13px;font-weight:700;color:${EMAIL_RED};">PROMO DISCOUNT</td><td style="padding:8px 0;text-align:right;font-family:monospace;font-size:13px;font-weight:900;color:${EMAIL_RED};">-$${parseFloat(promoDiscount).toFixed(2)}</td></tr>` : '';
+
+  return emailWrap(`<tr><td style="padding:36px 32px;">
+${emailTitle('Booking Confirmed')}
+${emailGreeting(customerName)}
+${emailPara(`Your <strong>${vehicle}</strong> booking is confirmed. Reference: <strong style="color:${EMAIL_RED};">#${bookingId}</strong>`)}
+
+<table width="100%" cellpadding="0" cellspacing="0" style="margin:20px 0;border-radius:12px;overflow:hidden;border:1px solid #e8e4df;">
+  <tr><td style="background:#f7f4f0;padding:14px 18px;">
+    <p style="margin:0;font-family:${EMAIL_BODY_FONT};font-size:10px;font-weight:700;color:${EMAIL_MUTED};text-transform:uppercase;letter-spacing:1px;">Vehicle</p>
+    <p style="margin:4px 0 0;font-family:${EMAIL_BODY_FONT};font-size:14px;font-weight:700;color:${EMAIL_DARK};">${vehicle} <span style="font-family:monospace;font-size:12px;background:${EMAIL_RED};color:#fff;padding:2px 7px;border-radius:4px;margin-left:6px;">${plate}</span></p>
+  </td></tr>
+  <tr><td style="background:#fff;padding:14px 18px;border-top:1px solid #e8e4df;">
+    <p style="margin:0;font-family:${EMAIL_BODY_FONT};font-size:10px;font-weight:700;color:${EMAIL_MUTED};text-transform:uppercase;letter-spacing:1px;">Workshop</p>
+    <p style="margin:4px 0 0;font-family:${EMAIL_BODY_FONT};font-size:14px;font-weight:700;color:${EMAIL_DARK};">${mechanicName}</p>
+    <p style="margin:2px 0 0;font-family:${EMAIL_BODY_FONT};font-size:12px;color:${EMAIL_MUTED};">📍 ${mechanicAddress}</p>
+  </td></tr>
+  <tr><td style="background:#f7f4f0;padding:14px 18px;border-top:1px solid #e8e4df;">
+    <table width="100%"><tr>
+      <td width="50%" style="vertical-align:top;">
+        <p style="margin:0;font-family:${EMAIL_BODY_FONT};font-size:10px;font-weight:700;color:${EMAIL_MUTED};text-transform:uppercase;letter-spacing:1px;">Drop-off</p>
+        <p style="margin:4px 0 0;font-family:${EMAIL_BODY_FONT};font-size:13px;font-weight:700;color:${EMAIL_DARK};">${date}</p>
+        <p style="margin:2px 0 0;font-family:${EMAIL_BODY_FONT};font-size:16px;font-weight:900;color:${EMAIL_RED};">@ ${time}</p>
       </td>
-      <td style="padding: 12px 0; text-align: right; font-family: monospace; font-size: 13px; font-weight: 900; color: #FF1800;">
-        -$${parseFloat(promoDiscount).toFixed(2)}
+      <td width="50%" style="vertical-align:top;">
+        <p style="margin:0;font-family:${EMAIL_BODY_FONT};font-size:10px;font-weight:700;color:${EMAIL_MUTED};text-transform:uppercase;letter-spacing:1px;">Estimated pick-up</p>
+        <p style="margin:4px 0 0;font-family:${EMAIL_BODY_FONT};font-size:13px;font-weight:700;color:${EMAIL_DARK};">${readyTime}</p>
       </td>
-    </tr>
-  ` : '';
+    </tr></table>
+  </td></tr>
+</table>
 
-  return `
-<!DOCTYPE html>
-<html>
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Booking Confirmed - Torqued NZ</title>
-</head>
-<body style="margin: 0; padding: 0; background-color: #f7f7f9; -webkit-font-smoothing: antialiased; font-family: -apple-system, BlinkMacSystemFont, Arial, sans-serif;">
-  <table border="0" cellpadding="0" cellspacing="0" width="100%" style="table-layout: fixed; background-color: #f7f7f9;">
-    <tr>
-      <td align="center" style="padding: 24px 8px;">
-        <table border="0" cellpadding="0" cellspacing="0" width="100%" style="max-width: 580px; background-color: #ffffff; border-radius: 20px; overflow: hidden; box-shadow: 0 12px 40px rgba(21,4,2,0.06); border: 1px solid rgba(21,4,2,0.05);">
-          
-          <!-- BRAND HEADER -->
-          <tr>
-            <td style="background-color: #150402; padding: 28px; text-align: center;">
-              <table border="0" cellpadding="0" cellspacing="0" width="100%">
-                <tr>
-                  <td align="center">
-                    <img src="${LOGO_URL}" alt="Torqued" width="220" height="74" style="display:inline-block;width:220px;height:74px;border:0;" />
-                  </td>
-                </tr>
-                <tr>
-                  <td align="center" style="padding-top: 8px;">
-                    <span style="font-family: -apple-system, Arial, sans-serif; font-size: 10px; font-weight: bold; color: rgba(255,255,255,0.5); letter-spacing: 2px; text-transform: uppercase;">
-                      NZ REPAIR MARKETPLACE
-                    </span>
-                  </td>
-                </tr>
-              </table>
-            </td>
-          </tr>
+<p style="margin:0 0 8px;font-family:${EMAIL_BODY_FONT};font-size:10px;font-weight:700;color:${EMAIL_MUTED};text-transform:uppercase;letter-spacing:1px;">Services</p>
+<table width="100%" cellpadding="0" cellspacing="0" style="margin-bottom:16px;">
+  ${serviceRows}
+  ${discountRow}
+  <tr>
+    <td style="padding:12px 0 6px;font-family:${EMAIL_BODY_FONT};font-size:13px;font-weight:700;color:${EMAIL_DARK};">Total (incl. GST)</td>
+    <td style="padding:12px 0 6px;text-align:right;font-family:monospace;font-size:18px;font-weight:900;color:${EMAIL_RED};">$${finalPrice.toFixed(2)}</td>
+  </tr>
+  <tr><td colspan="2"><span style="background:${EMAIL_DARK};color:#fff;padding:4px 10px;border-radius:6px;font-family:${EMAIL_BODY_FONT};font-size:9px;font-weight:700;text-transform:uppercase;letter-spacing:1px;">${paymentOption === 'deposit' ? 'Deposit paid' : 'Paid in full'} via ${paymentMethod}</span></td></tr>
+</table>
 
-          <!-- BOOKING COVER BANNER -->
-          <tr>
-            <td style="padding: 32px 32px 24px 32px; text-align: center;">
-              <span style="display: inline-block; background-color: rgba(255, 24, 0, 0.08); color: #FF1800; font-family: -apple-system, Arial, sans-serif; font-size: 10px; font-weight: 900; letter-spacing: 2px; text-transform: uppercase; padding: 6px 12px; border-radius: 8px; margin-bottom: 12px;">
-                REPAIR SECURED & CONFIRMED
-              </span>
-              <h1 style="margin: 0; font-family: -apple-system, Arial, sans-serif; font-size: 24px; font-weight: 900; color: #150402; letter-spacing: -0.5px; text-transform: uppercase; line-height: 1.1;">
-                REF: #${bookingId}
-              </h1>
-              <p style="margin: 8px 0 0 0; font-family: -apple-system, Arial, sans-serif; font-size: 13.5px; color: rgba(21,4,2,0.65); font-weight: 500; line-height: 1.4;">
-                Thank you, ${customerName}. Your <strong>${vehicle}</strong> booking is confirmed and payment has been processed.
-              </p>
-            </td>
-          </tr>
-
-          <!-- SERVICE GRID CARD -->
-          <tr>
-            <td style="padding: 0 32px;">
-              <table border="0" cellpadding="0" cellspacing="0" width="100%" style="background-color: rgba(21, 4, 2, 0.015); border: 1px solid rgba(21,4,2,0.05); border-radius: 16px; padding: 20px;">
-                <tr>
-                  <td>
-                    <table border="0" cellpadding="0" cellspacing="0" width="100%">
-                      <tr>
-                        <td style="padding-bottom: 12px; border-bottom: 1px solid rgba(21, 4, 2, 0.06);">
-                          <p style="margin: 0; font-family: -apple-system, Arial, sans-serif; font-size: 9.5px; font-weight: bold; color: rgba(21,4,2,0.4); letter-spacing: 1px; text-transform: uppercase;">VEHICLE REGISTERED</p>
-                          <p style="margin: 4px 0 0 0; font-family: -apple-system, Arial, sans-serif; font-size: 14.5px; font-weight: bold; color: #150402; text-transform: uppercase;">
-                            ${vehicle} <span style="font-family: monospace; font-size: 12.5px; font-weight: bold; color: #FF1800; background-color: rgba(255,24,0,0.08); padding: 1.5px 5px; border-radius: 4px; margin-left: 6px; display: inline-block; vertical-align: middle;">${plate}</span>
-                          </p>
-                        </td>
-                      </tr>
-                      <tr>
-                        <td style="padding-top: 12px;">
-                          <p style="margin: 0; font-family: -apple-system, Arial, sans-serif; font-size: 9.5px; font-weight: bold; color: rgba(21,4,2,0.4); letter-spacing: 1px; text-transform: uppercase;">ASSIGNED SPECIALIST</p>
-                          <p style="margin: 4px 0 0 0; font-family: -apple-system, Arial, sans-serif; font-size: 14.5px; font-weight: bold; color: #150402; text-transform: uppercase;">
-                            ${mechanicName}
-                          </p>
-                          <p style="margin: 2px 0 0 0; font-family: -apple-system, Arial, sans-serif; font-size: 12px; color: rgba(21,4,2,0.5); font-weight: 500;">
-                            📍 ${mechanicAddress}
-                          </p>
-                        </td>
-                      </tr>
-                    </table>
-                  </td>
-                </tr>
-              </table>
-            </td>
-          </tr>
-
-          <!-- TIMELINE LOGISTICS -->
-          <tr>
-            <td style="padding: 16px 32px 0 32px;">
-              <table border="0" cellpadding="0" cellspacing="0" width="100%">
-                <tr>
-                  <td width="48%" style="vertical-align: top; background-color: rgba(21, 4, 2, 0.015); border: 1px solid rgba(21,4,2,0.05); border-radius: 16px; padding: 16px;">
-                    <p style="margin: 0; font-family: -apple-system, Arial, sans-serif; font-size: 9px; font-weight: bold; color: rgba(21,4,2,0.4); letter-spacing: 1px; text-transform: uppercase;">Drop-Off Date</p>
-                    <p style="margin: 6px 0 0 0; font-family: -apple-system, Arial, sans-serif; font-size: 12.5px; font-weight: bold; color: #150402; text-transform: uppercase;">
-                      ${date}
-                    </p>
-                    <p style="margin: 2px 0 0 0; font-family: -apple-system, Arial, sans-serif; font-size: 16px; font-weight: 900; color: #FF1800;">
-                      @ ${time}
-                    </p>
-                  </td>
-                  <td width="4%"></td>
-                  <td width="48%" style="vertical-align: top; background-color: rgba(21, 4, 2, 0.015); border: 1px solid rgba(21,4,2,0.05); border-radius: 16px; padding: 16px;">
-                    <p style="margin: 0; font-family: -apple-system, Arial, sans-serif; font-size: 9px; font-weight: bold; color: rgba(21,4,2,0.4); letter-spacing: 1px; text-transform: uppercase;">Estimated Pick-up</p>
-                    <p style="margin: 6px 0 0 0; font-family: -apple-system, Arial, sans-serif; font-size: 12.5px; font-weight: bold; color: #150402; text-transform: uppercase;">
-                      Same-Day Service
-                    </p>
-                    <p style="margin: 2px 0 0 0; font-family: -apple-system, Arial, sans-serif; font-size: 16px; font-weight: 900; color: #150402;">
-                      ${readyTime}
-                    </p>
-                  </td>
-                </tr>
-              </table>
-            </td>
-          </tr>
-
-          <!-- INVOICE LINE ITEMS -->
-          <tr>
-            <td style="padding: 24px 32px 0 32px;">
-              <h3 style="margin: 0 0 8px 0; font-family: -apple-system, Arial, sans-serif; font-size: 11px; font-weight: bold; color: #150402; letter-spacing: 1px; text-transform: uppercase;">Selected Coverages & Services</h3>
-              <table border="0" cellpadding="0" cellspacing="0" width="100%">
-                ${servicesListHtml}
-                ${discountHtml}
-                <tr>
-                  <td style="padding: 16px 0; font-family: -apple-system, Arial, sans-serif; font-size: 13.5px; font-weight: bold; color: #150402; text-transform: uppercase;">
-                    Payment
-                  </td>
-                  <td style="padding: 16px 0; text-align: right; font-family: -apple-system, Arial, sans-serif; font-size: 13.5px; font-weight: 900; color: #150402; text-transform: uppercase;">
-                    ${paymentOption === 'deposit' ? 'Deposit paid' : 'Paid in full'}
-                  </td>
-                </tr>
-                <tr>
-                  <td colspan="2" style="padding-top: 4px;">
-                    <div style="background-color: #150402; color: #ffffff; padding: 6px 12px; border-radius: 8px; font-family: -apple-system, Arial, sans-serif; font-size: 9px; font-weight: bold; text-transform: uppercase; letter-spacing: 1px; display: inline-block; vertical-align: middle;">
-                      GATEWAY: ${paymentMethod}
-                    </div>
-                    <span style="display:inline-block; margin-left:8px; font-size:11px; color:rgba(21,4,2,0.5); vertical-align: middle;">Full breakdown in your portal &amp; invoice.</span>
-                  </td>
-                </tr>
-              </table>
-            </td>
-          </tr>
-
-          <!-- DROP-OFF CHECKLIST -->
-          <tr>
-            <td style="padding: 30px 32px 10px 32px;">
-              <div style="border-top: 1px solid rgba(21, 4, 2, 0.06); padding-top: 24px;">
-                <h4 style="margin: 0 0 8px 0; font-family: -apple-system, Arial, sans-serif; font-size: 11px; font-weight: bold; color: #150402; letter-spacing: 1px; text-transform: uppercase;">📌 Drop-Off Checklist</h4>
-                <ul style="margin: 0; padding-left: 16px; font-family: -apple-system, Arial, sans-serif; font-size: 12px; color: rgba(21,4,2,0.65); line-height: 1.5; font-weight: 500;">
-                  <li style="margin-bottom: 5px;">Drive directly to <strong>${mechanicName}</strong> located at <em>${mechanicAddress}</em>.</li>
-                  <li style="margin-bottom: 5px;">Leave lock keys and anti-theft nut adapters in the vehicle console.</li>
-                  <li style="margin-bottom: 5px;">If you have specialized instructions, let your assigned service technician know at the reception desk.</li>
-                </ul>
-              </div>
-            </td>
-          </tr>
-
-          <!-- FOOTER DETAILS -->
-          <tr>
-            <td style="padding: 24px 32px 32px 32px; text-align: center; border-top: 1px solid rgba(21,4,2,0.04); background-color: rgba(21, 4, 2, 0.005);">
-              <p style="margin: 0; font-family: -apple-system, Arial, sans-serif; font-size: 10px; font-weight: bold; color: rgba(21,4,2,0.4); letter-spacing: 1px; text-transform: uppercase;">
-                Need help or modifications?
-              </p>
-              <p style="margin: 3px 0 12px 0; font-family: -apple-system, Arial, sans-serif; font-size: 11px; font-weight: bold; color: #FF1800;">
-                torquedapp.nz@gmail.com • 022 389 5249
-              </p>
-              <p style="margin: 0; font-family: -apple-system, Arial, sans-serif; font-size: 9.5px; color: rgba(21,4,2,0.45); font-weight: 500; line-height: 1.4;">
-                This automated booking is generated through Torqued. All transactions are secure and PCI-DSS compliant. All fees include 15% NZ GST. 
-              </p>
-            </td>
-          </tr>
-        </table>
-      </td>
-    </tr>
-  </table>
-</body>
-</html>
-  `;
+</td></tr>`);
 }
 
 // Generates a beautiful HTML booking notice for partner workshops
@@ -4948,129 +6284,52 @@ function generateMechanicEmailHtml(data: any): string {
     promoDiscount
   } = data;
 
-  const servicesListHtml = (services || []).map((s: string) => `
-    <tr style="border-bottom: 1px solid rgba(255, 255, 255, 0.08);">
-      <td style="padding: 12px 0; font-family: -apple-system, BlinkMacSystemFont, Arial, sans-serif; font-size: 13px; font-weight: bold; color: rgba(255, 255, 255, 0.9); text-transform: uppercase;">
-        🛠️ ${s}
-      </td>
-      <td style="padding: 12px 0; text-align: right; font-family: monospace; font-size: 12px; font-weight: bold; color: #FF1800;">
-        REQUIRED
-      </td>
-    </tr>
-  `).join('');
+  const serviceRows = (services || []).map((s: string) => `
+    <tr><td style="padding:10px 0;font-family:${EMAIL_BODY_FONT};font-size:13px;font-weight:700;color:#374151;border-bottom:1px solid #f0ede8;text-transform:uppercase;">🛠 ${s}</td>
+    <td style="padding:10px 0;text-align:right;font-family:monospace;font-size:12px;font-weight:700;color:${EMAIL_RED};border-bottom:1px solid #f0ede8;">REQUIRED</td></tr>`).join('');
 
   const finalPrice = promoApplied ? Math.max(0, parseFloat(price) - parseFloat(promoDiscount)) : parseFloat(price);
 
-  return `
-<!DOCTYPE html>
-<html>
-<head>
-  <meta charset="utf-8">
-  <title>New Job Dispatched - Torqued Mechanic Portal</title>
-</head>
-<body style="margin: 0; padding: 0; background-color: #0b0201; -webkit-font-smoothing: antialiased; font-family: -apple-system, BlinkMacSystemFont, Arial, sans-serif;">
-  <table border="0" cellpadding="0" cellspacing="0" width="100%" style="table-layout: fixed; background-color: #0b0201;">
-    <tr>
-      <td align="center" style="padding: 24px 8px;">
-        <table border="0" cellpadding="0" cellspacing="0" width="100%" style="max-width: 580px; background-color: #150402; border-radius: 24px; overflow: hidden; box-shadow: 0 20px 50px rgba(0,0,0,0.5); border: 1px solid rgba(255, 24, 0, 0.15);">
-          
-          <!-- BRAND HEADER -->
-          <tr>
-            <td style="background-color: #050100; padding: 28px 32px; border-bottom: 3px solid #FF1800; text-align: left;">
-              <table border="0" cellpadding="0" cellspacing="0" width="100%">
-                <tr>
-                  <td>
-                    <img src="${LOGO_URL}" alt="Torqued" width="180" height="60" style="display:inline-block;width:180px;height:60px;border:0;vertical-align:middle;" />
-                    <span style="font-family: -apple-system, Arial, sans-serif; font-size: 14px; font-weight: normal; color: rgba(255,255,255,0.6); margin-left: 10px; vertical-align:middle;">PARTNER HUB</span>
-                  </td>
-                </tr>
-              </table>
-            </td>
-          </tr>
+  return emailWrap(`<tr><td style="padding:36px 32px;">
+${emailTitle(`New Job: #${bookingId}`)}
+${emailGreeting(mechanicName)}
+${emailPara(`A new booking has been assigned to your workshop. Payment is confirmed — please prepare for the drop-off below.`)}
 
-          <!-- COVER HERO -->
-          <tr>
-            <td style="padding: 36px 32px 24px 32px;">
-              <span style="display: inline-block; background-color: rgba(255, 24, 0, 0.15); color: #FF1800; font-family: -apple-system, Arial, sans-serif; font-size: 9.5px; font-weight: 900; letter-spacing: 2px; text-transform: uppercase; padding: 6px 12px; border-radius: 6px; margin-bottom: 14px;">
-                HIGH-VALUE MECHANICAL LEAD STATUS: SECURED
-              </span>
-              <h1 style="margin: 0; font-family: -apple-system, Arial, sans-serif; font-size: 22px; font-weight: 950; color: #ffffff; text-transform: uppercase; letter-spacing: -0.5px;">
-                NEW JOB DISPATCH: #${bookingId}
-              </h1>
-              <p style="margin: 10px 0 0 0; font-family: -apple-system, Arial, sans-serif; font-size: 13.5px; color: rgba(255,255,255,0.7); line-height: 1.5;">
-                G'day Team, a new client booking has been scheduled for your workshop, <strong>${mechanicName}</strong>. Client detail validation and payment processing are fully settled on client confirmation.
-              </p>
-            </td>
-          </tr>
-
-          <!-- LOGISTICS / STATS -->
-          <tr>
-            <td style="padding: 0 32px;">
-              <table border="0" cellpadding="0" cellspacing="0" width="100%" style="background-color: rgba(255, 255, 255, 0.02); border: 1px solid rgba(255,255,255,0.06); border-radius: 16px; padding: 22px;">
-                <tr>
-                  <td>
-                    <h3 style="margin: 0 0 12px 0; font-family: -apple-system, Arial, sans-serif; font-size: 11px; font-weight: bold; color: #FF1800; letter-spacing: 1px; text-transform: uppercase;">VEHICLE & OWNER ENROLLED</h3>
-                    <p style="margin: 0; font-family: -apple-system, Arial, sans-serif; font-size: 15px; font-weight: bold; color: #ffffff;">
-                      ${vehicle}
-                    </p>
-                    <p style="margin: 4px 0 14px 0;">
-                      <span style="font-family: monospace; font-size: 14.5px; font-weight: bold; color: #ffffff; background-color: #FF1800; padding: 3px 8px; border-radius: 6px;">${plate}</span>
-                    </p>
-                    
-                    <table border="0" cellpadding="0" cellspacing="0" width="100%" style="border-top: 1px solid rgba(255,255,255,0.08); padding-top: 12px; margin-top: 6px;">
-                      <tr>
-                        <td width="50%">
-                          <span style="font-family: -apple-system, Arial, sans-serif; font-size: 9px; color: rgba(255,255,255,0.4); text-transform: uppercase; font-weight: bold;">Drop-Off Window</span>
-                          <p style="margin: 4px 0 0 0; font-family: -apple-system, Arial, sans-serif; font-size: 13px; font-weight: bold; color: #ffffff; text-transform: uppercase;">${date}</p>
-                          <p style="margin: 1px 0 0 0; font-family: -apple-system, Arial, sans-serif; font-size: 15px; font-weight: 900; color: #FF1800;">@ ${time}</p>
-                        </td>
-                        <td width="50%">
-                          <span style="font-family: -apple-system, Arial, sans-serif; font-size: 9px; color: rgba(255,255,255,0.4); text-transform: uppercase; font-weight: bold;">Client Owner</span>
-                          <p style="margin: 4px 0 0 0; font-family: -apple-system, Arial, sans-serif; font-size: 13px; font-weight: bold; color: #ffffff;">${customerName}</p>
-                          <p style="margin: 1.5px 0 0 0; font-family: -apple-system, Arial, sans-serif; font-size: 11px; color: rgba(255,255,255,0.5);">${data.email || 'customer@torqued.nz'}</p>
-                        </td>
-                      </tr>
-                    </table>
-                  </td>
-                </tr>
-              </table>
-            </td>
-          </tr>
-
-          <!-- WORK REQUIREMENTS -->
-          <tr>
-            <td style="padding: 24px 32px 0 32px;">
-              <h3 style="margin: 0 0 8px 0; font-family: -apple-system, Arial, sans-serif; font-size: 11px; font-weight: bold; color: rgba(255,255,255,0.5); letter-spacing: 1px; text-transform: uppercase;">LABOUR / SPECIALIST INSTRUCTIONS</h3>
-              <table border="0" cellpadding="0" cellspacing="0" width="100%">
-                ${servicesListHtml}
-                <tr>
-                  <td style="padding: 16px 0 10px 0; font-family: -apple-system, Arial, sans-serif; font-size: 13px; font-weight: bold; color: #ffffff;">
-                    Dismantle / Install Target Code Workscope Price:
-                  </td>
-                  <td style="padding: 16px 0 10px 0; text-align: right; font-family: monospace; font-size: 18px; font-weight: 900; color: #FF1800;">
-                    $${parseFloat(price).toFixed(2)}
-                  </td>
-                </tr>
-              </table>
-            </td>
-          </tr>
-
-
-          <!-- CONTACT FOOTER -->
-          <tr>
-            <td style="background-color: #050100; padding: 20px 32px; text-align: center;">
-              <p style="margin: 0; font-family: -apple-system, Arial, sans-serif; font-size: 10px; color: rgba(255,255,255,0.45); font-weight: 500;">
-                Questions? torquedapp.nz@gmail.com or 022 389 5249
-              </p>
-            </td>
-          </tr>
-        </table>
+<table width="100%" cellpadding="0" cellspacing="0" style="margin:20px 0;border-radius:12px;overflow:hidden;border:1px solid #e8e4df;">
+  <tr><td style="background:#f7f4f0;padding:14px 18px;">
+    <p style="margin:0;font-family:${EMAIL_BODY_FONT};font-size:10px;font-weight:700;color:${EMAIL_MUTED};text-transform:uppercase;letter-spacing:1px;">Vehicle</p>
+    <p style="margin:4px 0 0;font-family:${EMAIL_BODY_FONT};font-size:14px;font-weight:700;color:${EMAIL_DARK};">${vehicle} <span style="font-family:monospace;font-size:12px;background:${EMAIL_RED};color:#fff;padding:2px 7px;border-radius:4px;margin-left:6px;">${plate}</span></p>
+  </td></tr>
+  <tr><td style="background:#fff;padding:14px 18px;border-top:1px solid #e8e4df;">
+    <table width="100%"><tr>
+      <td width="50%" style="vertical-align:top;">
+        <p style="margin:0;font-family:${EMAIL_BODY_FONT};font-size:10px;font-weight:700;color:${EMAIL_MUTED};text-transform:uppercase;letter-spacing:1px;">Drop-off</p>
+        <p style="margin:4px 0 0;font-family:${EMAIL_BODY_FONT};font-size:13px;font-weight:700;color:${EMAIL_DARK};">${date}</p>
+        <p style="margin:2px 0 0;font-family:${EMAIL_BODY_FONT};font-size:16px;font-weight:900;color:${EMAIL_RED};">@ ${time}</p>
       </td>
-    </tr>
-  </table>
-</body>
-</html>
-  `;
+      <td width="50%" style="vertical-align:top;">
+        <p style="margin:0;font-family:${EMAIL_BODY_FONT};font-size:10px;font-weight:700;color:${EMAIL_MUTED};text-transform:uppercase;letter-spacing:1px;">Ready by</p>
+        <p style="margin:4px 0 0;font-family:${EMAIL_BODY_FONT};font-size:13px;font-weight:700;color:${EMAIL_DARK};">${readyTime}</p>
+      </td>
+    </tr></table>
+  </td></tr>
+  <tr><td style="background:#f7f4f0;padding:14px 18px;border-top:1px solid #e8e4df;">
+    <p style="margin:0;font-family:${EMAIL_BODY_FONT};font-size:10px;font-weight:700;color:${EMAIL_MUTED};text-transform:uppercase;letter-spacing:1px;">Client</p>
+    <p style="margin:4px 0 0;font-family:${EMAIL_BODY_FONT};font-size:14px;font-weight:700;color:${EMAIL_DARK};">${customerName}</p>
+    <p style="margin:2px 0 0;font-family:${EMAIL_BODY_FONT};font-size:12px;color:${EMAIL_MUTED};">${data.email || ''}</p>
+  </td></tr>
+</table>
+
+<p style="margin:0 0 8px;font-family:${EMAIL_BODY_FONT};font-size:10px;font-weight:700;color:${EMAIL_MUTED};text-transform:uppercase;letter-spacing:1px;">Work required</p>
+<table width="100%" cellpadding="0" cellspacing="0" style="margin-bottom:16px;">
+  ${serviceRows}
+  <tr>
+    <td style="padding:12px 0 6px;font-family:${EMAIL_BODY_FONT};font-size:13px;font-weight:700;color:${EMAIL_DARK};">Job value (incl. GST)</td>
+    <td style="padding:12px 0 6px;text-align:right;font-family:monospace;font-size:18px;font-weight:900;color:${EMAIL_RED};">$${finalPrice.toFixed(2)}</td>
+  </tr>
+  <tr><td colspan="2"><span style="background:${EMAIL_DARK};color:#fff;padding:4px 10px;border-radius:6px;font-family:${EMAIL_BODY_FONT};font-size:9px;font-weight:700;text-transform:uppercase;letter-spacing:1px;">${paymentOption === 'deposit' ? 'Deposit paid' : 'Paid in full'} via ${paymentMethod}</span></td></tr>
+</table>
+</td></tr>`);
 }
 
 // Generates a beautiful HTML drop-off reminder sent 12 hours before schedule
@@ -5086,87 +6345,32 @@ function generateDropoffReminderEmailHtml(data: any): string {
     mechanicAddress
   } = data;
 
-  return `
-<!DOCTYPE html>
-<html>
-<head>
-  <meta charset="utf-8">
-  <title>Your Dropoff is in 12 Hours - Torqued NZ</title>
-</head>
-<body style="margin: 0; padding: 0; background-color: #f7f7f9; font-family: -apple-system, BlinkMacSystemFont, Arial, sans-serif;">
-  <table border="0" cellpadding="0" cellspacing="0" width="100%" style="background-color: #f7f7f9; padding: 24px 8px;">
-    <tr>
-      <td align="center">
-        <table border="0" cellpadding="0" cellspacing="0" width="100%" style="max-width: 580px; background-color: #ffffff; border-radius: 20px; overflow: hidden; box-shadow: 0 12px 40px rgba(0,0,0,0.06); border: 1px solid rgba(21,4,2,0.05);">
-          
-          <!-- BRAND HEADER -->
-          <tr>
-            <td style="background-color: #150402; padding: 28px; text-align: center;">
-              <img src="${LOGO_URL}" alt="Torqued" width="200" height="67" style="display:inline-block;width:200px;height:67px;border:0;" />
-            </td>
-          </tr>
+  return emailWrap(`<tr><td style="padding:36px 32px;">
+${emailTitle('Drop-off in 12 Hours')}
+${emailGreeting(customerName)}
+${emailPara(`This is your 12-hour reminder for <strong>${vehicle}</strong> (Ref: <strong style="color:${EMAIL_RED};">#${bookingId}</strong>). You're all set — here's what you need to know.`)}
 
-          <!-- HERO BANNER -->
-          <tr>
-            <td style="padding: 32px; text-align: center;">
-              <span style="background-color: #FF1800; color: #ffffff; font-family: -apple-system, Arial, sans-serif; font-size: 9.5px; font-weight: 900; letter-spacing: 2.5px; text-transform: uppercase; padding: 6px 14px; border-radius: 6px;">
-                ⏰ 12 HOURS UNTIL DROPOFF
-              </span>
-              <h1 style="margin: 16px 0 0 0; font-family: -apple-system, Arial, sans-serif; font-size: 22px; font-weight: 900; color: #150402;">
-                PREPARE YOUR VEHICLE DROP
-              </h1>
-              <p style="margin: 8px 0 0 0; font-family: -apple-system, Arial, sans-serif; font-size: 13.5px; color: rgba(21,4,2,0.65); line-height: 1.4;">
-                Hi ${customerName}, this is our automated 12-hour dropoff reminder for vehicle <strong>${vehicle}</strong> (Ref: <strong>#${bookingId}</strong>).
-              </p>
-            </td>
-          </tr>
+<table width="100%" cellpadding="0" cellspacing="0" style="margin:20px 0;border-radius:12px;overflow:hidden;border:1px solid #e8e4df;">
+  <tr><td style="background:#f7f4f0;padding:16px 18px;text-align:center;">
+    <p style="margin:0;font-family:${EMAIL_BODY_FONT};font-size:10px;font-weight:700;color:${EMAIL_MUTED};text-transform:uppercase;letter-spacing:1px;">Drop-off time</p>
+    <p style="margin:6px 0 2px;font-family:${EMAIL_BODY_FONT};font-size:16px;font-weight:700;color:${EMAIL_DARK};">${date}</p>
+    <p style="margin:0;font-family:${EMAIL_BODY_FONT};font-size:24px;font-weight:900;color:${EMAIL_RED};">@ ${time}</p>
+  </td></tr>
+  <tr><td style="background:#fff;padding:14px 18px;border-top:1px solid #e8e4df;">
+    <p style="margin:0;font-family:${EMAIL_BODY_FONT};font-size:10px;font-weight:700;color:${EMAIL_MUTED};text-transform:uppercase;letter-spacing:1px;">Workshop</p>
+    <p style="margin:4px 0 0;font-family:${EMAIL_BODY_FONT};font-size:14px;font-weight:700;color:${EMAIL_DARK};">${mechanicName}</p>
+    <p style="margin:2px 0 0;font-family:${EMAIL_BODY_FONT};font-size:12px;color:${EMAIL_MUTED};">📍 ${mechanicAddress}</p>
+  </td></tr>
+</table>
 
-          <!-- TIMING CARD -->
-          <tr>
-            <td style="padding: 0 32px 24px 32px;">
-              <table border="0" cellpadding="0" cellspacing="0" width="100%" style="background-color: rgba(255, 24, 0, 0.03); border: 1px solid rgba(255, 24, 0, 0.1); border-radius: 16px; padding: 20px; text-align: center;">
-                <tr>
-                  <td>
-                    <span style="display: block; font-family: -apple-system, Arial, sans-serif; font-size: 10px; font-weight: bold; color: rgba(21,4,2,0.4); letter-spacing: 1px; text-transform: uppercase;">SCHEDULED APPOINTMENT TIME</span>
-                    <p style="margin: 8px 0 4px 0; font-family: -apple-system, Arial, sans-serif; font-size: 18px; font-weight: 950; color: #150402; text-transform: uppercase;">${date}</p>
-                    <p style="margin: 0; font-family: -apple-system, Arial, sans-serif; font-size: 24px; font-weight: 950; color: #FF1800;">@ ${time}</p>
-                  </td>
-                </tr>
-              </table>
-            </td>
-          </tr>
-
-          <!-- ADDRESS & CHECKLIST -->
-          <tr>
-            <td style="padding: 0 32px 32px 32px; font-family: -apple-system, Arial, sans-serif; font-size: 13px; color: #150402;">
-              <h3 style="margin: 0 0 8px 0; font-size: 11px; font-weight: bold; color: #150402; letter-spacing: 1px; text-transform: uppercase;">📍 Workshop Location</h3>
-              <p style="margin: 0 0 20px 0; font-size: 14px; font-weight: bold; color: #150402;">
-                ${mechanicName} <br />
-                <span style="font-size: 12.5px; color: rgba(21,4,2,0.6); font-weight: normal;">📍 ${mechanicAddress}</span>
-              </p>
-
-              <h3 style="margin: 0 0 8px 0; font-size: 11px; font-weight: bold; color: #150402; letter-spacing: 1px; text-transform: uppercase;">📌 Drop-Off Checklist</h3>
-              <ul style="margin: 0; padding-left: 20px; line-height: 1.6; color: rgba(21,4,2,0.7); font-weight: 500;">
-                <li style="margin-bottom: 6px;">Arrive at your booked drop-off time.</li>
-                <li style="margin-bottom: 6px;">Leave special wheel lock nuts or service logbooks in your vehicle console.</li>
-              </ul>
-            </td>
-          </tr>
-
-          <!-- CONTACT -->
-          <tr>
-            <td style="padding: 24px 32px 32px 32px; text-align: center; border-top: 1px solid rgba(21,4,2,0.04); background-color: rgba(21, 4, 2, 0.015);">
-              <p style="margin: 0; font-family: -apple-system, Arial, sans-serif; font-size: 10px; font-weight: bold; color: rgba(21,4,2,0.4); letter-spacing: 1px; text-transform: uppercase;">SUPPORT & LOGISTICS</p>
-              <p style="margin: 3px 0 0 0; font-family: -apple-system, Arial, sans-serif; font-size: 11px; font-weight: bold; color: #FF1800;">022 389 5249 • torquedapp.nz@gmail.com</p>
-            </td>
-          </tr>
-        </table>
-      </td>
-    </tr>
-  </table>
-</body>
-</html>
-  `;
+<div style="background:#f7f4f0;border-radius:12px;padding:16px 18px;">
+  <p style="margin:0 0 8px;font-family:${EMAIL_BODY_FONT};font-size:10px;font-weight:700;color:${EMAIL_MUTED};text-transform:uppercase;letter-spacing:1px;">Checklist</p>
+  <ul style="margin:0;padding-left:16px;font-family:${EMAIL_BODY_FONT};font-size:13px;color:#374151;line-height:1.7;">
+    <li>Arrive at your booked drop-off time</li>
+    <li>Leave special wheel lock nuts or service logbooks in your vehicle console</li>
+  </ul>
+</div>
+</td></tr>`);
 }
 
 // Generates an elegant HTML 12-Month Scheduled Service Reminder with an Unsubscribe Button in the footer
@@ -5180,84 +6384,22 @@ function generateServiceReminderEmailHtml(data: any): string {
 
   const emailStr = data.email || 'customer@torqued.nz';
 
-  return `
-<!DOCTYPE html>
-<html>
-<head>
-  <meta charset="utf-8">
-  <title>Service Reminder: scheduled DCT calibration due - Torqued NZ</title>
-</head>
-<body style="margin: 0; padding: 0; background-color: #050100; -webkit-font-smoothing: antialiased; font-family: -apple-system, BlinkMacSystemFont, Arial, sans-serif;">
-  <table border="0" cellpadding="0" cellspacing="0" width="100%" style="background-color: #050100; padding: 24px 8px;">
-    <tr>
-      <td align="center">
-        <table border="0" cellpadding="0" cellspacing="0" width="100%" style="max-width: 580px; background-color: #150402; border-radius: 24px; overflow: hidden; box-shadow: 0 20px 50px rgba(0,0,0,0.6); border: 1px solid rgba(255, 24, 0, 0.1);">
-          
-          <!-- BRAND HEADER -->
-          <tr>
-            <td style="padding: 32px 32px 20px 32px; text-align: center;">
-              <img src="${LOGO_URL}" alt="Torqued" width="200" height="67" style="display:inline-block;width:200px;height:67px;border:0;" />
-            </td>
-          </tr>
+  return emailWrap(`<tr><td style="padding:36px 32px;">
+${emailTitle('12-Month Service Due')}
+${emailGreeting(customerName)}
+${emailPara(`It's time for your annual maintenance. We recommend a <strong>12-month service</strong> for your <strong>${vehicle} <span style="font-family:monospace;font-size:12px;background:${EMAIL_RED};color:#fff;padding:2px 6px;border-radius:4px;">${plate}</span></strong> to keep it running at its best.`)}
 
-          <!-- COVER BANNER -->
-          <tr>
-            <td style="padding: 0 32px 24px 32px; text-align: center;">
-              <span style="background-color: #FF1800; color: #ffffff; font-family: -apple-system, Arial, sans-serif; font-size: 9.5px; font-weight: 900; letter-spacing: 2px; text-transform: uppercase; padding: 6px 14px; border-radius: 6px;">
-                🔧 MAINTENANCE ADVISORY SERVICE
-              </span>
-              <h1 style="margin: 18px 0 0 0; font-family: -apple-system, Arial, sans-serif; font-size: 22px; font-weight: 955; color: #ffffff; uppercase; letter-spacing: -0.5px; line-height: 1.1;">
-                DCT CALIBRATION SCHEDULE REACHED
-              </h1>
-              <p style="margin: 10px 0 0 0; font-family: -apple-system, Arial, sans-serif; font-size: 13.5px; color: rgba(255,255,255,0.7); line-height: 1.5;">
-                G'day ${customerName}, it's time for scheduled maintenance. We recommend a <strong>12-month dual-clutch transmission (DCT) mechatronics calibration</strong> for your <strong>${vehicle} (${plate})</strong> to ensure perfect shift pressures.
-              </p>
-            </td>
-          </tr>
+<table width="100%" cellpadding="0" cellspacing="0" style="margin:20px 0;background:#f7f4f0;border-radius:12px;border:1px solid #e8e4df;">
+  <tr><td style="padding:20px 18px;text-align:center;">
+    <p style="margin:0 0 14px;font-family:${EMAIL_BODY_FONT};font-size:13px;font-weight:700;color:${EMAIL_DARK};">Book your next service with <strong>${mechanicName}</strong></p>
+    <a href="https://torqued-psi.vercel.app" style="display:inline-block;background:${EMAIL_RED};color:#fff;font-family:${EMAIL_BODY_FONT};font-size:12px;font-weight:900;text-transform:uppercase;letter-spacing:1px;text-decoration:none;padding:13px 28px;border-radius:10px;">Schedule Service</a>
+  </td></tr>
+</table>
 
-          <!-- CALL TO ACTION -->
-          <tr>
-            <td style="padding: 0 32px 32px 32px; text-align: center;">
-              <table border="0" cellpadding="0" cellspacing="0" width="100%" style="background-color: rgba(255,255,255,0.015); border: 1px solid rgba(255,255,255,0.06); border-radius: 16px; padding: 24px 20px;">
-                <tr>
-                  <td>
-                    <p style="margin: 0 0 16px 0; font-family: -apple-system, Arial, sans-serif; font-size: 13px; color: #ffffff; font-weight: bold;">
-                      Secure priority booking at <strong>${mechanicName}</strong>
-                    </p>
-                    <a href="https://torqued.nz/booking" style="display: inline-block; background-color: #FF1800; color: #ffffff; font-family: -apple-system, Arial, sans-serif; font-size: 12px; font-weight: bold; text-transform: uppercase; letter-spacing: 1.5px; padding: 12px 28px; border-radius: 10px; text-decoration: none; box-shadow: 0 6px 20px rgba(255, 24, 0, 0.25);">
-                      Schedule 12-Month Service
-                    </a>
-                  </td>
-                </tr>
-              </table>
-            </td>
-          </tr>
-
-
-          <!-- FOOTER WITH SERVICE UN-SUBSCRIBE CONTROL (REQUIRED BY NZ CAN-SPAM COMPLIANCE) -->
-          <tr>
-            <td style="background-color: #050100; padding: 30px 32px; text-align: center; border-top: 1px solid rgba(255,255,255,0.03);">
-              <p style="margin: 0; font-family: -apple-system, Arial, sans-serif; font-size: 10px; color: rgba(255,255,255,0.4); line-weight: 1.4;">
-                This communication is generated through Torqued. All advisory bulletins are aligned with New Zealand manufacturer standards.
-              </p>
-              <table border="0" cellpadding="0" cellspacing="0" width="100%" style="margin-top: 18px;">
-                <tr>
-                  <td align="center">
-                    <a href="https://torqued.nz/unsubscribe?email=${encodeURIComponent(emailStr)}" style="display: inline-block; color: rgba(255,255,255,0.35); font-family: -apple-system, Arial, sans-serif; font-size: 10px; font-weight: 900; text-transform: uppercase; letter-spacing: 1px; outline: none; border: 1px solid rgba(255,255,255,0.08); background-color: rgba(255,255,255,0.01); text-decoration: none; padding: 6px 14px; border-radius: 8px;">
-                      🔕 Unsubscribe from vehicles reminders
-                    </a>
-                  </td>
-                </tr>
-              </table>
-            </td>
-          </tr>
-        </table>
-      </td>
-    </tr>
-  </table>
-</body>
-</html>
-  `;
+<p style="margin:24px 0 0;font-family:${EMAIL_BODY_FONT};font-size:11px;color:${EMAIL_MUTED};text-align:center;">
+  <a href="https://torqued-psi.vercel.app/unsubscribe?email=${encodeURIComponent(emailStr)}" style="color:${EMAIL_MUTED};text-decoration:underline;">Unsubscribe from service reminders</a>
+</p>
+</td></tr>`);
 }
 
 // Helper to identify placeholder/mock emails so we don't lock the Stripe Checkout fields
@@ -5294,12 +6436,13 @@ app.post('/api/stripe/create-payment', async (req, res) => {
     if (bookingData) {
       const supabase = getSupabaseAdmin();
       if (supabase) {
-        const { error } = await supabase.from('bookings').upsert({
-          id: bookingId,
+        const serviceIds: string[] = bookingData.serviceIds || [];
+        const hasDiag = serviceIds.includes('diag_inspection');
+        const hasNonDiag = serviceIds.some((s: string) => s !== 'diag_inspection');
+        const baseFields = {
           customer_id: userId || null,
           mechanic_id: bookingData.mechanicId,
           vehicle_rego: bookingData.vehicleId || null,
-          service_ids: bookingData.serviceIds || [],
           status: 'pending_payment',
           payment_status: 'pending',
           payment_method: bookingData.paymentMethod || null,
@@ -5309,8 +6452,19 @@ app.post('/api/stripe/create-payment', async (req, res) => {
           customer_name: bookingData.customerName || null,
           email: bookingData.email || customerEmail || null,
           description: bookingData.description || null,
-        }, { onConflict: 'id' });
-        if (error) console.error('[create-payment] Failed to persist booking:', error.message);
+        };
+        if (hasDiag && hasNonDiag) {
+          const repairId = crypto.randomUUID();
+          const diagPrice = 99;
+          const repairPrice = Math.max(0, (bookingData.totalPrice || 0) - diagPrice);
+          const { error: e1 } = await supabase.from('bookings').upsert({ ...baseFields, id: bookingId, service_ids: ['diag_inspection'], total_price: diagPrice, transaction_id: bookingId }, { onConflict: 'id' });
+          if (e1) console.error('[create-payment] Failed to persist diag booking:', e1.message);
+          const { error: e2 } = await supabase.from('bookings').upsert({ ...baseFields, id: repairId, service_ids: serviceIds.filter((s: string) => s !== 'diag_inspection'), total_price: repairPrice, transaction_id: bookingId }, { onConflict: 'id' });
+          if (e2) console.error('[create-payment] Failed to persist repair booking:', e2.message);
+        } else {
+          const { error } = await supabase.from('bookings').upsert({ ...baseFields, id: bookingId, service_ids: serviceIds }, { onConflict: 'id' });
+          if (error) console.error('[create-payment] Failed to persist booking:', error.message);
+        }
       }
     }
 
@@ -5344,7 +6498,8 @@ app.post('/api/stripe/create-payment', async (req, res) => {
       metadata: {
         bookingId,
         type: 'repair_payment',
-        source: isIOS ? 'ios' : 'web'
+        source: isIOS ? 'ios' : 'web',
+        userId: userId || ''
       }
     } as any);
 
@@ -5379,11 +6534,38 @@ app.get('/api/stripe/verify-session', async (req, res) => {
     }
 
     const session = await stripe.checkout.sessions.retrieve(session_id as string);
+    // 'no_payment_required' = fully covered by a 100%-off promo code → still a confirmed booking.
+    const paid = session.payment_status === 'paid' || session.payment_status === 'no_payment_required';
+
+    // Webhook fallback: confirm the booking here too, idempotently, so a paid job is
+    // never left stuck on "Pending Payment" if the Stripe webhook is delayed/unconfigured.
+    const bookingId = (session.metadata as any)?.bookingId;
+    if (paid && bookingId) {
+      const supabase = getSupabaseAdmin();
+      if (supabase) {
+        const update: Record<string, any> = { payment_status: 'confirmed', status: 'booked', stripe_session_id: session.id };
+        const stripePhone = session.customer_details?.phone;
+        if (session.customer_details?.email) update.email = session.customer_details.email;
+        if (session.customer_details?.name) update.customer_name = session.customer_details.name;
+        if (stripePhone) update.customer_phone = stripePhone;
+        try { await supabase.from('bookings').update(update).eq('id', bookingId); } catch (e) { console.warn('[verify-session] confirm failed:', (e as Error).message); }
+        // Persist the Stripe-collected phone to the customer profile (system-wide, shareable with mechanics)
+        if (stripePhone) {
+          const uid = (session.metadata as any)?.userId;
+          try {
+            if (uid) await supabase.from('profiles').update({ phone: stripePhone }).eq('id', uid);
+            else if (session.customer_details?.email) await supabase.from('profiles').update({ phone: stripePhone }).ilike('email', session.customer_details.email);
+          } catch (e) { console.warn('[verify-session] phone sync failed:', (e as Error).message); }
+        }
+      }
+    }
+
     res.json({
-      status: session.payment_status === 'paid' ? 'succeeded' : 'pending',
+      status: paid ? 'succeeded' : 'pending',
       email: session.customer_details?.email || session.customer_email || null,
       name: session.customer_details?.name || null,
       phone: session.customer_details?.phone || null,
+      bookingId: bookingId || null,
       metadata: session.metadata
     });
   } catch (err) {
@@ -5396,8 +6578,27 @@ app.get('/api/stripe/verify-session', async (req, res) => {
 app.post('/api/email/confirm-booking', async (req, res) => {
   try {
     const data = req.body;
+
+    // Enrich from the actual booking so the email never shows client placeholders
+    // ("Your Workshop", "your mechanics address", etc.) — always real-world data.
+    if (data.bookingId) {
+      try {
+        const ctx = await getBookingContext(data.bookingId);
+        if (ctx.mechanicName) data.mechanicName = ctx.mechanicName;
+        if (ctx.custName) data.customerName = ctx.custName;
+        if (ctx.email && (!data.email || isPlaceholderEmail(data.email))) data.email = ctx.email;
+        if (ctx.vehicleLabel && (!data.vehicle || /your/i.test(String(data.vehicle)))) data.vehicle = ctx.vehicleLabel;
+        const sa = getSupabaseAdmin();
+        if (sa && data.mechanicId) {
+          const { data: mp } = await sa.from('profiles').select('name, address, phone').eq('id', data.mechanicId).maybeSingle();
+          if (mp?.address) data.mechanicAddress = mp.address;
+          if (mp?.name) data.mechanicName = mp.name;
+          if (mp?.phone) data.mechanicPhone = mp.phone;
+        }
+      } catch (e) { console.warn('[confirm-booking] enrich failed:', (e as Error).message); }
+    }
     const recipientEmail = data.email || 'customer@torqued.nz';
-    
+
     // Generate beautiful racing red themed HTML email confirmations and reminders
     const emailHtmlHtml = generateBookingEmailHtml(data);
     const mechanicHtml = generateMechanicEmailHtml(data);
@@ -5421,29 +6622,42 @@ app.post('/api/email/confirm-booking', async (req, res) => {
           html: emailHtmlHtml
         });
 
-        // Dispatch Mechanic alert
-        const mechanicSafeEmail = data.mechanicName.toLowerCase().replace(/[^a-z0-9]/g, '') + '@torqued-partner.co.nz';
-        await transporter.sendMail({
-          from: fromAddress,
-          to: mechanicSafeEmail,
-          subject: `[New Torqued Booking Received] Ref #${data.bookingId} - ${data.vehicle} (${data.plate})`,
-          html: mechanicHtml
-        });
+        // Dispatch Mechanic alert — only if a real mechanic email is known
+        let mechanicEmailSent = '';
+        const realMechanicEmail = data.mechanicEmail && !String(data.mechanicEmail).includes('@torqued-partner.co.nz')
+          ? String(data.mechanicEmail).trim() : null;
+        if (!realMechanicEmail && data.mechanicId) {
+          // Look up real email from DB
+          const sa = getSupabaseAdmin();
+          if (sa) {
+            const { data: mp } = await sa.from('profiles').select('email').eq('id', data.mechanicId).single();
+            if (mp?.email) {
+              await transporter.sendMail({
+                from: fromAddress, to: mp.email,
+                subject: `[New Torqued Booking] Ref #${data.bookingId} - ${data.vehicle} (${data.plate})`,
+                html: mechanicHtml,
+              });
+              mechanicEmailSent = mp.email;
+            }
+          }
+        } else if (realMechanicEmail) {
+          await transporter.sendMail({
+            from: fromAddress, to: realMechanicEmail,
+            subject: `[New Torqued Booking] Ref #${data.bookingId} - ${data.vehicle} (${data.plate})`,
+            html: mechanicHtml,
+          });
+          mechanicEmailSent = realMechanicEmail;
+        }
 
-        // Dispatch Dropoff 12h Reminder
-        await transporter.sendMail({
-          from: fromAddress,
-          to: recipientEmail,
-          subject: `⏰ Live Reminder: Drop-off In 12 Hours for Booking Ref #${data.bookingId}`,
-          html: dropoffHtml
-        });
+        // NOTE: drop-off 12h reminder is NOT sent here — it fires via a scheduled cron
+        // job when the booking is actually 12h away. Sending it immediately would be wrong.
 
         // NOTE: the 12-month service reminder is intentionally NOT sent here.
         // Scheduled reminders should only fire when actually due (future cron),
         // not on booking/registration.
 
         sentRealEmail = true;
-        console.log(`Live confirmation HTML emails securely delivered to client ${recipientEmail} and partner ${mechanicSafeEmail}`);
+        console.log(`Confirmation email sent to ${recipientEmail}${mechanicEmailSent ? ` + mechanic ${mechanicEmailSent}` : ''}`);
       } catch (smtpErr) {
         console.error('SMTP live booking dispatch failed, falling back to simulated output:', smtpErr);
         return res.json({
@@ -5595,6 +6809,120 @@ app.post('/api/email/send-test-single', async (req, res) => {
 // Cold Quote — Customer Service History Access (OTP flow)
 // ─────────────────────────────────────────────────────────────────────────────
 
+// ── Service-history access via a 12-HOUR LINK (replaces the one-time code) ──────
+// POST /api/mechanic/request-history-link — email the owner a link they tap to grant
+// this workshop 12 hours of access to their vehicle's service history.
+app.post('/api/mechanic/request-history-link', async (req, res) => {
+  try {
+    const { mechanicId, rego, customerEmail } = req.body;
+    if (!mechanicId || !rego) return res.status(400).json({ error: 'mechanicId and rego required' });
+    const formattedRego = String(rego).toUpperCase().trim();
+    const supabase = getSupabaseAdmin();
+    if (!supabase) return res.status(500).json({ error: 'DB not configured' });
+
+    const { data: vehicle } = await supabase.from('vehicles').select('rego, owner_id, year, make, model').eq('rego', formattedRego).maybeSingle();
+
+    // Resolve who to ask: the vehicle's owner, OR — when cold quoting (no prior link) —
+    // the customer email the mechanic entered. Cold quoting IS the first connection.
+    let ownerId: string | null = vehicle?.owner_id ?? null;
+    let ownerEmail: string | null = null;
+    if (!ownerId && customerEmail) {
+      const { data: byEmail } = await supabase.from('profiles').select('id, email').ilike('email', String(customerEmail).trim()).maybeSingle();
+      if (byEmail?.id) { ownerId = byEmail.id; ownerEmail = byEmail.email; }
+      else ownerEmail = String(customerEmail).trim(); // no account yet — still email them the request
+    }
+    if (!ownerId && !ownerEmail) return res.json({ hasAccount: false });
+
+    // Prior completed/active job → already entitled to history.
+    const { data: prior } = await supabase.from('bookings').select('id').eq('mechanic_id', mechanicId).eq('vehicle_rego', formattedRego).in('status', ['completed', 'in_progress']).limit(1);
+    if (prior && prior.length) return res.json({ hasAccount: true, priorBooking: true });
+
+    // Reuse a still-valid pending link rather than spamming the owner.
+    const { data: existing } = await supabase.from('history_access_links').select('token, expires_at').eq('mechanic_id', mechanicId).eq('rego', formattedRego).gt('expires_at', new Date().toISOString()).order('created_at', { ascending: false }).maybeSingle();
+    if (existing) return res.json({ hasAccount: true, linkSent: true, alreadySent: true, expiresAt: existing.expires_at });
+
+    if (!ownerEmail && ownerId) {
+      const { data: profile } = await supabase.from('profiles').select('email').eq('id', ownerId).single();
+      ownerEmail = profile?.email ?? null;
+    }
+    if (!ownerEmail) return res.json({ hasAccount: true, noEmail: true });
+    const { data: mechProfile } = await supabase.from('profiles').select('name').eq('id', mechanicId).single();
+
+    const token = crypto.randomBytes(24).toString('base64url');
+    const expiresAt = new Date(Date.now() + 12 * 60 * 60 * 1000).toISOString();
+    const { error: insErr } = await supabase.from('history_access_links').insert({ token, mechanic_id: mechanicId, rego: formattedRego, owner_id: ownerId, granted: false, expires_at: expiresAt });
+    if (insErr) { console.error('[request-history-link] insert:', insErr.message); return res.status(500).json({ error: 'Could not create access link.' }); }
+
+    const origin = getOrigin(req);
+    const link = `${origin}/customer?grant_history=${encodeURIComponent(token)}`;
+    const vehicleLabel = `${vehicle?.year || ''} ${vehicle?.make || ''} ${vehicle?.model || ''}`.trim() || formattedRego;
+    const mechName = mechProfile?.name || 'A Torqued workshop';
+    const mailer = getMailTransporter();
+    if (mailer) {
+      await mailer.sendMail({
+        from: process.env.SMTP_FROM || '"Torqued" <torquedapp.nz@gmail.com>',
+        to: ownerEmail,
+        subject: 'A workshop is requesting your vehicle service history',
+        html: emailWrap(`<tr><td style="padding:36px 32px;">
+${emailTitle('Share your service history?')}
+${emailPara(`<strong>${mechName}</strong> would like to view the Torqued service history for your <strong>${vehicleLabel}</strong> (e.g. for a quote or pre-purchase inspection).`)}
+<table width="100%" cellpadding="0" cellspacing="0" style="margin:18px 0;"><tr><td>
+  <a href="${link}" style="display:inline-block;background:${EMAIL_RED};color:#fff;font-family:${EMAIL_BODY_FONT};font-size:12px;font-weight:900;text-transform:uppercase;letter-spacing:1px;text-decoration:none;padding:13px 28px;border-radius:10px;">Grant 12-hour access</a>
+</td></tr></table>
+${emailPara('This link is valid for 12 hours. If you did not expect this request, you can ignore this email — no access is granted unless you tap the button.')}
+</td></tr>`),
+      }).catch(e => console.warn('History link email failed:', e?.message));
+    }
+    return res.json({ hasAccount: true, linkSent: true, expiresAt });
+  } catch (err) {
+    console.error('[request-history-link]', err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// POST /api/history/grant — the vehicle owner taps the emailed link to grant access.
+app.post('/api/history/grant', async (req, res) => {
+  try {
+    const { token } = req.body;
+    if (!token) return res.status(400).json({ error: 'token required' });
+    const supabase = getSupabaseAdmin();
+    if (!supabase) return res.status(500).json({ error: 'DB not configured' });
+    const { data: link } = await supabase.from('history_access_links').select('token, rego, expires_at, granted').eq('token', token).maybeSingle();
+    if (!link) return res.status(404).json({ error: 'This link is invalid.' });
+    if (new Date(link.expires_at) < new Date()) return res.status(410).json({ error: 'This link has expired.' });
+    await supabase.from('history_access_links').update({ granted: true }).eq('token', token);
+    res.json({ success: true, rego: link.rego });
+  } catch (err) {
+    console.error('[history/grant]', err);
+    res.status(500).json({ error: 'Could not grant access' });
+  }
+});
+
+// GET /api/mechanic/history-access-status — is access granted? If so, return the history.
+app.get('/api/mechanic/history-access-status', async (req, res) => {
+  try {
+    const mechanicId = req.query.mechanicId as string;
+    const rego = req.query.rego ? String(req.query.rego).toUpperCase().trim() : '';
+    if (!mechanicId || !rego) return res.status(400).json({ error: 'mechanicId and rego required' });
+    const supabase = getSupabaseAdmin();
+    if (!supabase) return res.status(500).json({ error: 'DB not configured' });
+
+    // Granted via a still-valid link, OR an existing prior job with this workshop.
+    const { data: granted } = await supabase.from('history_access_links').select('token').eq('mechanic_id', mechanicId).eq('rego', rego).eq('granted', true).gt('expires_at', new Date().toISOString()).limit(1).maybeSingle();
+    const { data: prior } = await supabase.from('bookings').select('id').eq('mechanic_id', mechanicId).eq('vehicle_rego', rego).in('status', ['completed', 'in_progress']).limit(1);
+    if (!granted && !(prior && prior.length)) return res.json({ granted: false });
+
+    const [{ data: imported }, { data: jobs }] = await Promise.all([
+      supabase.from('vehicle_history').select('service_date, work_done, provider, mileage, price, notes').eq('rego', rego).order('service_date', { ascending: false }),
+      supabase.from('bookings').select('date, completed_at, service_ids, quote_items, description, total_price, mileage_out, status').eq('vehicle_rego', rego).eq('status', 'completed').order('completed_at', { ascending: false }),
+    ]);
+    res.json({ granted: true, imported: imported ?? [], jobs: jobs ?? [] });
+  } catch (err) {
+    console.error('[history-access-status]', err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
 // POST /api/mechanic/request-history-access
 // Called when mechanic enters a rego on cold quote and wants to see history.
 // Returns: { hasAccount, priorBooking, otpSent, alreadySent, expiresAt }
@@ -5646,9 +6974,9 @@ app.post('/api/mechanic/request-history-access', async (req, res) => {
       .maybeSingle();
 
     if (existing) {
-      // Check 15-minute re-request throttle
+      // Check 4-minute re-request throttle (codes expire in 5 minutes)
       const createdAt = new Date(existing.created_at).getTime();
-      const throttleCutoff = Date.now() - 15 * 60 * 1000;
+      const throttleCutoff = Date.now() - 4 * 60 * 1000;
       if (createdAt > throttleCutoff) {
         return res.json({ hasAccount: true, alreadySent: true, expiresAt: existing.expires_at });
       }
@@ -5684,9 +7012,9 @@ app.post('/api/mechanic/request-history-access', async (req, res) => {
       : formattedRego;
 
     // Generate 6-digit OTP, hash before storage
-    const otp = Array.from(crypto.randomBytes(3)).map(b => b % 10).join('');
+    const otp = crypto.randomInt(100000, 999999).toString();
     const otpHash = crypto.createHash('sha256').update(otp).digest('hex');
-    const expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
+    const expiresAt = new Date(Date.now() + 5 * 60 * 1000).toISOString(); // 5-minute window
 
     // Invalidate any previous unused OTPs for this mechanic/vehicle
     await supabase
@@ -5697,13 +7025,17 @@ app.post('/api/mechanic/request-history-access', async (req, res) => {
       .is('used_at', null);
 
     // Store new OTP
-    await supabase.from('history_access_otps').insert({
+    const { error: insertErr } = await supabase.from('history_access_otps').insert({
       mechanic_id: mechanicId,
       customer_id: customerId,
       vehicle_rego: formattedRego,
       otp_hash: otpHash,
       expires_at: expiresAt,
     });
+    if (insertErr) {
+      console.error('[request-history-otp] insert failed:', insertErr.message);
+      return res.status(500).json({ error: 'Could not generate code. Please try again.' });
+    }
 
     // Send email to customer
     const mailer = getMailTransporter();
@@ -5725,7 +7057,7 @@ app.post('/api/mechanic/request-history-access', async (req, res) => {
                 <div style="background:#150402;border-radius:12px;padding:20px 28px;text-align:center;margin:20px 0;">
                   <span style="font-size:36px;font-weight:900;letter-spacing:10px;color:#ff1800;font-family:monospace;">${otp}</span>
                 </div>
-                <p style="font-size:13px;color:#6b7280;margin-top:8px;">This code expires in 24 hours. If you did not expect this request or do not wish to share your history, you can ignore this email — no access will be granted without the code.</p>
+                <p style="font-size:13px;color:#6b7280;margin-top:8px;">This code expires in 5 minutes. If you did not expect this request or do not wish to share your history, you can ignore this email — no access will be granted without the code.</p>
                 <hr style="border:none;border-top:1px solid #e5e7eb;margin:20px 0;" />
                 <p style="font-size:11px;color:#9ca3af;">Torqued NZ · torqued.nz@icloud.com · If you have questions, reply to this email.</p>
               </div>
@@ -5754,7 +7086,7 @@ app.post('/api/mechanic/verify-history-otp', async (req, res) => {
     const supabase = getSupabaseAdmin();
     if (!supabase) return res.status(500).json({ error: 'DB not configured' });
 
-    const { data: record } = await supabase
+    const { data: record, error: lookupErr } = await supabase
       .from('history_access_otps')
       .select('id, customer_id, expires_at, used_at')
       .eq('mechanic_id', mechanicId)
@@ -5762,6 +7094,7 @@ app.post('/api/mechanic/verify-history-otp', async (req, res) => {
       .eq('otp_hash', otpHash)
       .single();
 
+    if (lookupErr) console.error('[verify-history-otp] lookup error:', lookupErr.message);
     if (!record) return res.status(401).json({ error: 'Invalid code. Please check and try again.' });
     if (record.used_at) return res.status(401).json({ error: 'This code has already been used.' });
     if (new Date(record.expires_at) < new Date()) return res.status(401).json({ error: 'This code has expired. Please request a new one.' });
@@ -5890,8 +7223,8 @@ app.get('/api/mechanic/history-direct', async (req, res) => {
 // POST /api/admin/privacy-request — log a privacy act request
 app.post('/api/admin/privacy-request', async (req, res) => {
   try {
-    const { key, customerEmail, requestType, notes } = req.body;
-    if (key !== process.env.ADMIN_KEY) return res.status(403).json({ error: 'Forbidden' });
+    if (!adminOk(req)) return res.status(403).json({ error: 'Forbidden' });
+    const { customerEmail, requestType, notes } = req.body;
     if (!customerEmail || !requestType) return res.status(400).json({ error: 'customerEmail and requestType required' });
 
     const supabase = getSupabaseAdmin();
@@ -5942,8 +7275,7 @@ app.post('/api/admin/privacy-request', async (req, res) => {
 // GET /api/admin/privacy-requests — list all requests
 app.get('/api/admin/privacy-requests', async (req, res) => {
   try {
-    const { key } = req.query as { key: string };
-    if (key !== process.env.ADMIN_KEY) return res.status(403).json({ error: 'Forbidden' });
+    if (!adminOk(req)) return res.status(403).json({ error: 'Forbidden' });
 
     const supabase = getSupabaseAdmin();
     if (!supabase) return res.status(500).json({ error: 'DB not configured' });
@@ -5963,8 +7295,8 @@ app.get('/api/admin/privacy-requests', async (req, res) => {
 // POST /api/admin/resolve-privacy-request
 app.post('/api/admin/resolve-privacy-request', async (req, res) => {
   try {
-    const { key, id, resolvedBy } = req.body;
-    if (key !== process.env.ADMIN_KEY) return res.status(403).json({ error: 'Forbidden' });
+    if (!adminOk(req)) return res.status(403).json({ error: 'Forbidden' });
+    const { id, resolvedBy } = req.body;
 
     const supabase = getSupabaseAdmin();
     if (!supabase) return res.status(500).json({ error: 'DB not configured' });
@@ -5982,10 +7314,12 @@ app.post('/api/admin/resolve-privacy-request', async (req, res) => {
 });
 
 // POST /api/admin/toggle-customer-ai — disable/enable AI features for a customer
+// reason: 'request' (customer asked — email them) | 'ban' (misuse — no email, silent)
 app.post('/api/admin/toggle-customer-ai', async (req, res) => {
   try {
-    const { key, customerEmail, disabled } = req.body;
-    if (key !== process.env.ADMIN_KEY) return res.status(403).json({ error: 'Forbidden' });
+    if (!adminOk(req)) return res.status(403).json({ error: 'Forbidden' });
+    const { customerEmail, disabled, reason } = req.body;
+    const isBan = reason === 'ban';
 
     const supabase = getSupabaseAdmin();
     if (!supabase) return res.status(500).json({ error: 'DB not configured' });
@@ -5996,43 +7330,42 @@ app.post('/api/admin/toggle-customer-ai', async (req, res) => {
       .ilike('email', String(customerEmail).trim())
       .maybeSingle();
 
-    if (!profile) return res.status(404).json({ error: 'Customer not found' });
+    if (!profile) return res.status(404).json({ error: 'Customer not found — check they have a Torqued account.' });
 
-    await supabase.from('profiles').update({ ai_disabled: !!disabled }).eq('id', profile.id);
+    const update: Record<string, any> = { ai_disabled: !!disabled };
+    // Try to persist reason; silently ignore if the column doesn't exist yet
+    if (disabled) update.ai_disable_reason = isBan ? 'ban' : 'request';
+    else update.ai_disable_reason = null;
 
-    // Notify customer by email
+    const { error: updateErr } = await supabase.from('profiles').update(update).eq('id', profile.id);
+    if (updateErr) {
+      // Retry without reason column if it doesn't exist
+      const { error: retryErr } = await supabase.from('profiles').update({ ai_disabled: !!disabled }).eq('id', profile.id);
+      if (retryErr) return res.status(500).json({ error: 'Could not update AI status — the ai_disabled column may not exist yet. Run: ALTER TABLE profiles ADD COLUMN IF NOT EXISTS ai_disabled boolean DEFAULT false;' });
+    }
+
+    // Only email the customer when disabling by request, or when re-enabling
     const mailer = getMailTransporter();
-    if (mailer) {
+    if (mailer && !isBan) {
       await mailer.sendMail({
         from: process.env.SMTP_FROM || '"Torqued" <torquedapp.nz@gmail.com>',
         to: profile.email,
         subject: disabled
           ? 'Your AI features on Torqued have been paused'
           : 'Your AI features on Torqued have been re-enabled',
-        html: `
-          <div style="font-family:Arial,sans-serif;background:#f9f9f9;padding:32px;">
-            <div style="max-width:560px;margin:0 auto;background:#fff;border-radius:16px;overflow:hidden;border:1px solid #e5e7eb;">
-              <div style="background:#150402;padding:24px 28px;">
-                <img src="${LOGO_URL}" alt="Torqued" style="height:36px;" />
-              </div>
-              <div style="padding:28px;">
-                ${disabled
-                  ? `<p style="font-size:15px;color:#111;">Hi${profile.name ? ` ${profile.name.split(' ')[0]}` : ''},</p>
-                     <p style="font-size:15px;color:#111;margin-top:12px;">You have requested that AI-powered features be paused on your Torqued account. This includes AI service recommendations, vehicle health analysis, and AI-assisted receipt scanning.</p>
-                     <p style="font-size:14px;color:#6b7280;margin-top:12px;">To re-enable AI features, please contact us at <a href="mailto:torqued.nz@icloud.com" style="color:#ff1800;">torqued.nz@icloud.com</a>.</p>`
-                  : `<p style="font-size:15px;color:#111;">Hi${profile.name ? ` ${profile.name.split(' ')[0]}` : ''},</p>
-                     <p style="font-size:15px;color:#111;margin-top:12px;">AI-powered features have been re-enabled on your Torqued account.</p>`
-                }
-                <hr style="border:none;border-top:1px solid #e5e7eb;margin:20px 0;" />
-                <p style="font-size:11px;color:#9ca3af;">Torqued NZ · torqued.nz@icloud.com</p>
-              </div>
-            </div>
-          </div>
-        `,
-      });
+        html: emailWrap(`<tr><td style="padding:36px 32px;">
+${emailTitle(disabled ? 'AI features paused' : 'AI features re-enabled')}
+${emailGreeting(profile.name)}
+${disabled
+  ? emailPara(`You have requested that AI-powered features be paused on your Torqued account. This includes AI service recommendations, vehicle health analysis, and AI-assisted receipt scanning.`) +
+    emailPara(`To re-enable AI features, please contact us at <a href="mailto:torqued.nz@icloud.com" style="color:${EMAIL_RED};">torqued.nz@icloud.com</a>.`)
+  : emailPara(`AI-powered features have been re-enabled on your Torqued account. You can now access AI service recommendations, vehicle health analysis, and AI-assisted receipt scanning.`)
+}
+</td></tr>`),
+      }).catch(() => {});
     }
 
-    res.json({ success: true, ai_disabled: !!disabled });
+    res.json({ success: true, ai_disabled: !!disabled, reason: isBan ? 'ban' : 'request' });
   } catch (err) {
     console.error('[toggle-customer-ai]', err);
     res.status(500).json({ error: 'Server error' });
@@ -6042,21 +7375,142 @@ app.post('/api/admin/toggle-customer-ai', async (req, res) => {
 // GET /api/admin/customer-ai-status?key=&email= — check AI status for a customer
 app.get('/api/admin/customer-ai-status', async (req, res) => {
   try {
-    const { key, email } = req.query as { key: string; email: string };
-    if (key !== process.env.ADMIN_KEY) return res.status(403).json({ error: 'Forbidden' });
+    if (!adminOk(req)) return res.status(403).json({ error: 'Forbidden' });
+    const { email } = req.query as { email: string };
 
     const supabase = getSupabaseAdmin();
     if (!supabase) return res.status(500).json({ error: 'DB not configured' });
 
-    const { data } = await supabase
+    // Try with ai_disabled first; fall back if column doesn't exist yet
+    let { data, error } = await supabase
       .from('profiles')
       .select('id, name, email, ai_disabled')
       .ilike('email', String(email).trim())
       .maybeSingle();
 
-    if (!data) return res.status(404).json({ error: 'Not found' });
+    if (error) {
+      const fb = await supabase.from('profiles').select('id, name, email').ilike('email', String(email).trim()).maybeSingle();
+      data = fb.data ? { ...fb.data, ai_disabled: false } : null;
+    }
+
+    if (!data) return res.status(404).json({ error: 'Customer not found — check they have a Torqued account.' });
     res.json({ id: data.id, name: data.name, email: data.email, ai_disabled: data.ai_disabled ?? false });
   } catch (err) {
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// GET /api/customer/mechanic-access?ownerId=&regos= — mechanics derived from actual bookings
+app.get('/api/customer/mechanic-access', async (req, res) => {
+  try {
+    const ownerId = req.query.ownerId as string;
+    const regos = (req.query.regos as string || '').split(',').map(r => r.trim().toUpperCase()).filter(Boolean);
+    const supabase = getSupabaseAdmin();
+    if (!supabase) return res.json({ mechanics: [] });
+
+    // Pull all bookings for this customer (by ownerId or regos)
+    let q = supabase.from('bookings')
+      .select('id, mechanic_id, vehicle_rego, service_ids, created_at, date, description')
+      .not('status', 'in', '(cancelled,declined)')
+      .order('created_at', { ascending: false });
+    if (ownerId) q = q.eq('owner_id', ownerId);
+    else if (regos.length) q = q.in('vehicle_rego', regos);
+    else return res.json({ mechanics: [] });
+
+    const { data: bookings } = await q;
+    if (!bookings?.length) return res.json({ mechanics: [] });
+
+    // Group by mechanic_id
+    const byMechanic: Record<string, any[]> = {};
+    for (const b of bookings) {
+      if (!b.mechanic_id) continue;
+      if (!byMechanic[b.mechanic_id]) byMechanic[b.mechanic_id] = [];
+      byMechanic[b.mechanic_id].push(b);
+    }
+
+    const mechanicIds = Object.keys(byMechanic);
+    if (!mechanicIds.length) return res.json({ mechanics: [] });
+
+    // Active revocations for this customer (by ownerId and/or per-rego refs).
+    const refs: string[] = [];
+    if (ownerId) refs.push(String(ownerId));
+    for (const r of regos) refs.push(`rego:${r}`);
+    let revokedAtByMechanic: Record<string, string> = {};
+    if (refs.length) {
+      const { data: revs } = await supabase.from('mechanic_access_revocations')
+        .select('mechanic_id, revoked_at')
+        .in('customer_ref', refs)
+        .in('mechanic_id', mechanicIds);
+      for (const rv of (revs || [])) {
+        // Keep the most recent revocation per mechanic across refs
+        if (!revokedAtByMechanic[rv.mechanic_id] || rv.revoked_at > revokedAtByMechanic[rv.mechanic_id]) {
+          revokedAtByMechanic[rv.mechanic_id] = rv.revoked_at;
+        }
+      }
+    }
+
+    const { data: profiles } = await supabase.from('mechanic_profiles')
+      .select('id, name, address, phone')
+      .in('id', mechanicIds);
+
+    const result = mechanicIds.map(mid => {
+      const jobs = byMechanic[mid];
+      // jobs are ordered created_at desc — jobs[0] is the most recent.
+      const latestBooking = jobs[0].created_at;
+      const revokedAt = revokedAtByMechanic[mid];
+      // Hidden if revoked AND no new booking happened after the revocation.
+      if (revokedAt && latestBooking <= revokedAt) return null;
+      const profile = profiles?.find((p: any) => p.id === mid);
+      const firstAccess = jobs.reduce((earliest: string, j: any) => j.created_at < earliest ? j.created_at : earliest, jobs[0].created_at);
+      const vehicles = [...new Set(jobs.map((j: any) => j.vehicle_rego).filter(Boolean))];
+      const serviceSet = new Set<string>();
+      for (const j of jobs) (j.service_ids || []).forEach((s: string) => serviceSet.add(s));
+      return {
+        mechanicId: mid,
+        mechanicName: profile?.name || 'Workshop',
+        mechanicAddress: profile?.address || null,
+        mechanicPhone: profile?.phone || null,
+        accessStarted: firstAccess,
+        vehicles,
+        bookingCount: jobs.length,
+        dataTypes: ['Booking history', ...(serviceSet.size > 0 ? ['Service records'] : []), 'Vehicle details'],
+      };
+    }).filter(Boolean);
+
+    res.json({ mechanics: result });
+  } catch (err) {
+    console.error('[mechanic-access]', err);
+    res.json({ mechanics: [] });
+  }
+});
+
+// POST /api/customer/mechanic-access/revoke — revoke a mechanic's access to this customer's data.
+// Identified by ownerId (logged-in) and/or regos (plate-verified). Access is re-granted automatically
+// if the customer books / requests another quote with that mechanic after the revocation.
+app.post('/api/customer/mechanic-access/revoke', async (req, res) => {
+  try {
+    const { mechanicId, ownerId, regos } = req.body as { mechanicId?: string; ownerId?: string; regos?: string | string[] };
+    if (!mechanicId) return res.status(400).json({ error: 'mechanicId required' });
+
+    const supabase = getSupabaseAdmin();
+    if (!supabase) return res.status(500).json({ error: 'DB not configured' });
+
+    // Build the customer reference key(s): owner_id for logged-in users, else one per rego.
+    const refs: string[] = [];
+    if (ownerId) refs.push(String(ownerId));
+    const regoList = Array.isArray(regos) ? regos : String(regos || '').split(',');
+    for (const r of regoList.map(x => x.trim().toUpperCase()).filter(Boolean)) refs.push(`rego:${r}`);
+    if (!refs.length) return res.status(400).json({ error: 'ownerId or regos required' });
+
+    const now = new Date().toISOString();
+    const rows = refs.map(customer_ref => ({ customer_ref, mechanic_id: mechanicId, revoked_at: now }));
+    const { error } = await supabase.from('mechanic_access_revocations')
+      .upsert(rows, { onConflict: 'customer_ref,mechanic_id' });
+
+    if (error) return res.status(500).json({ error: error.message });
+    res.json({ success: true });
+  } catch (err) {
+    console.error('[mechanic-access/revoke]', err);
     res.status(500).json({ error: 'Server error' });
   }
 });

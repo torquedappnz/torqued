@@ -14,7 +14,7 @@ export const supabase = createClient(supabaseUrl, supabaseAnonKey, {
     // client never needs to process the URL hash. Letting it try caused the
     // mechanic-onboarding page to freeze on arrival from a link.
     detectSessionInUrl: false,
-    persistSession: true,
+    persistSession: false,
     autoRefreshToken: true,
   },
 });

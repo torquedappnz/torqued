@@ -1,4 +1,4 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useRef } from 'react';
 import { jsPDF } from 'jspdf';
 import { motion, AnimatePresence } from 'motion/react';
 import {
@@ -20,7 +20,6 @@ import {
   ExternalLink,
   Car,
   Search,
-  Image as ImageIcon,
   Map,
   Award,
   PenSquare,
@@ -37,20 +36,22 @@ import {
   Activity,
   Camera,
   Sparkles,
-  HeartPulse
+  HeartPulse,
+  LogOut
 } from 'lucide-react';
 import { Logo } from '../components/Logo';
 import { Button } from '../components/Button';
 import { Card } from '../components/Card';
 import { Input } from '../components/Input';
 import { VehicleTimelineAnalysis } from '../components/VehicleTimelineAnalysis';
+import { PrePurchaseInspection } from '../components/PrePurchaseInspection';
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, LineChart, Line } from 'recharts';
 import { formatCurrency, calculateGST, cn } from '../utils';
 import { useTheme } from '../context/ThemeContext';
 import { useAuth } from '../context/AuthContext';
 import { useEffect } from 'react';
 import { supabase } from '../lib/supabase';
-import { authPasskey, registerPasskey, passkeysSupported } from '../lib/passkey';
+import { authPasskey, registerPasskey, passkeysSupported, hasPasskey } from '../lib/passkey';
 import { SERVICES } from '../constants';
 import {
   InventoryPart,
@@ -154,6 +155,47 @@ const VehicleHealthLookup: React.FC<{ mechanicId?: string }> = ({ mechanicId }) 
   );
 };
 
+const MECH_DARK = {
+  '--color-background': '#150402',
+  '--color-foreground': '#ffffff',
+  '--color-card': 'rgba(255,255,255,0.06)',
+  '--color-border': 'rgba(255,255,255,0.12)',
+  '--color-muted': 'rgba(255,255,255,0.55)',
+} as React.CSSProperties;
+
+// Short job title from quote parts/notes when there are no standard service ids.
+// Format a Date as YYYY-MM-DD using LOCAL components (avoids UTC shift from toISOString in +12 NZ).
+function localISO(d: Date): string {
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  const dd = String(d.getDate()).padStart(2, '0');
+  return `${y}-${m}-${dd}`;
+}
+
+function jobSummaryTitle(j: any): string {
+  if ((j?.service_ids || []).includes('ppi')) return 'Pre-Purchase Inspection';
+  const qi = j?.quote_items || j?.quoteItems;
+  const parts: string[] = Array.isArray(qi?.parts) ? qi.parts.filter((p: any) => p?.name).map((p: any) => String(p.name)) : [];
+  const text = (parts.join(' ') + ' ' + (qi?.notes || '') + ' ' + (j?.description || '') + ' ' + (j?.services?.join(' ') || '')).toLowerCase();
+  if (/pre.?purchase|ppi/.test(text)) return 'Pre-Purchase Inspection';
+  const cats: [RegExp, string][] = [
+    [/brake|rotor|caliper|pad|disc/, 'Brake Service'],
+    [/control arm|bush|suspension|strut|shock|ball joint|tie rod/, 'Suspension Repair'],
+    [/clutch|flywheel/, 'Clutch Repair'],
+    [/cambelt|timing belt|timing chain/, 'Cambelt Service'],
+    [/spark plug|ignition coil/, 'Spark Plugs & Ignition'],
+    [/oil|filter|service/, 'Vehicle Service'],
+    [/battery|alternator|starter/, 'Electrical Repair'],
+    [/radiator|coolant|water pump|thermostat/, 'Cooling System Repair'],
+    [/transmission|gearbox/, 'Transmission Service'],
+    [/exhaust|muffler|catalytic/, 'Exhaust Repair'],
+  ];
+  for (const [re, label] of cats) if (re.test(text)) return label;
+  if (parts.length === 1) return parts[0];
+  if (parts.length > 1) return `${parts[0]} + ${parts.length - 1} more`;
+  return 'Custom Quote';
+}
+
 export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) => {
   const { theme, setTheme } = useTheme();
   const { user, userProfile, loginMechanic, signUpMechanic, resendMechanicLink, markSubscriptionActive, logout, updateProfile } = useAuth();
@@ -172,12 +214,34 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
   const [justActivated, setJustActivated] = useState(false);
   // Onboarding wizard
   const [onboardingComplete, setOnboardingComplete] = useState<boolean | null>(null);
-  const [obStep, setObStep] = useState(1);
+  const [obStep, setObStep] = useState(0);
   const [obSaving, setObSaving] = useState(false);
-  const [ob, setOb] = useState({
-    name: '', nzbn: '', address: '', phone: '', owner_name: '',
+  const [ob, setOb] = useState<{
+    name: string; legal_name: string; nzbn: string; address: string; phone: string;
+    owner_name: string; owner_phone: string; years_in_trade: string; bio: string;
+    bank_account_name: string; bank_account_number: string; labour_rate: number;
+    technicians: number; parts_lead_days: number; billing_start_date: string;
+    signer_title: string; gst_number: string;
+  }>({
+    name: '', legal_name: '', nzbn: '', address: '', phone: '', owner_name: '', owner_phone: '',
+    years_in_trade: '', bio: '',
     bank_account_name: '', bank_account_number: '', labour_rate: 145, technicians: 1, parts_lead_days: 1,
+    billing_start_date: (() => { const d = new Date(); d.setDate(d.getDate() + 1); return d.toISOString().slice(0, 10); })(),
+    signer_title: '', gst_number: '',
   });
+  // OTP email verification (step 0)
+  const [obEmail, setObEmail] = useState('');
+  const [obOtpSent, setObOtpSent] = useState(false);
+  const [obOtp, setObOtp] = useState('');
+  const [obOtpVerified, setObOtpVerified] = useState(false);
+  const [obOtpError, setObOtpError] = useState('');
+  const [obOtpLoading, setObOtpLoading] = useState(false);
+  // Address autocomplete (onboarding)
+  const [addrSuggestions, setAddrSuggestions] = useState<{ display_name: string }[]>([]);
+  const [addrTimer, setAddrTimer] = useState<ReturnType<typeof setTimeout> | null>(null);
+  // Address autocomplete (profile / Workshop Location card)
+  const [profileAddrSuggestions, setProfileAddrSuggestions] = useState<{ display_name: string }[]>([]);
+  const profileAddrTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
     if (!user) return;
@@ -241,9 +305,33 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
   const [mechAvailability, setMechAvailability] = useState<{ id: string; day_of_week: number; start_time: string; end_time: string }[]>([]);
   const [closedPeriods, setClosedPeriods] = useState<{ id: string; start_date: string; end_date: string; reason: string }[]>([]);
   const [addAvailModal, setAddAvailModal] = useState<{ dayIdx: number; startTime: string; endTime: string } | null>(null);
+  // Staff roster
+  type RosterStaff = { id: string; name: string; role?: string | null };
+  type RosterShift = { id: string; staff_id: string; shift_date: string; start_time: string; end_time: string; break_start?: string | null; break_end?: string | null };
+  const [rosterStaff, setRosterStaff] = useState<RosterStaff[]>([]);
+  const [rosterShifts, setRosterShifts] = useState<RosterShift[]>([]);
+  const [rosterLoaded, setRosterLoaded] = useState(false);
+  const [newStaffName, setNewStaffName] = useState('');
+  const [newStaffRole, setNewStaffRole] = useState('');
+  const [rosterWeekStart, setRosterWeekStart] = useState<string>(() => {
+    const d = new Date(); const day = (d.getDay() + 6) % 7; d.setDate(d.getDate() - day);
+    return localISO(d);
+  });
+  const [shiftModal, setShiftModal] = useState<{ date: string; staffId: string; startTime: string; endTime: string; breakStart: string; breakEnd: string } | null>(null);
   const [newClosedPeriod, setNewClosedPeriod] = useState({ startDate: '', endDate: '', reason: '' });
   const [ohSaving, setOhSaving] = useState(false);
+  const [ohStatus, setOhStatus] = useState<'idle' | 'saved' | 'error'>('idle');
+  const [ohError, setOhError] = useState<string | null>(null);
   const [closedSaving, setClosedSaving] = useState(false);
+  const [closedError, setClosedError] = useState<string | null>(null);
+  const [closedSuccess, setClosedSuccess] = useState(false);
+  const [capSaveStatus, setCapSaveStatus] = useState<'idle' | 'saved' | 'error'>('idle');
+  const [profileSaveStatus, setProfileSaveStatus] = useState<'idle' | 'saved' | 'error'>('idle');
+  const [profileSaveError, setProfileSaveError] = useState<string | null>(null);
+  const [addressUpdateStatus, setAddressUpdateStatus] = useState<'idle' | 'updating' | 'updated' | 'error'>('idle');
+  const [mechLocating, setMechLocating] = useState(false);
+  const [portalLoading, setPortalLoading] = useState(true);
+  const [capSaveError, setCapSaveError] = useState<string | null>(null);
   const [operatingHours, setOperatingHours] = useState([
     { dayOfWeek: 0, label: 'Mon', enabled: true,  startTime: '08:00', endTime: '17:00' },
     { dayOfWeek: 1, label: 'Tue', enabled: true,  startTime: '08:00', endTime: '17:00' },
@@ -268,13 +356,23 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
   const [qLabourRate, setQLabourRate] = useState(145);
   const [qDiscount, setQDiscount] = useState(0);
   const [qOther, setQOther] = useState<{ name: string; amount: number }[]>([]);
+  const [qShopFee, setQShopFee] = useState(0);
+  const [qLeadTimeDays, setQLeadTimeDays] = useState(0);
   const [qNotes, setQNotes] = useState('');
-  const [partsToOrder, setPartsToOrder] = useState<{ id: string; name: string; qty: number; forRego?: string }[]>(() => {
-    try { return JSON.parse(localStorage.getItem('torqued_parts_to_order') || '[]'); } catch { return []; }
-  });
+  // Parts-to-order is cached locally PER MECHANIC so one workshop never sees another's
+  // list on a shared browser. Keyed by the signed-in user's id.
+  const [partsToOrder, setPartsToOrder] = useState<{ id: string; name: string; qty: number; forRego?: string }[]>([]);
+  const partsKey = user?.id ? `torqued_parts_to_order_${user.id}` : null;
+  useEffect(() => {
+    // Drop any legacy global cache so it can't leak between accounts.
+    try { localStorage.removeItem('torqued_parts_to_order'); } catch {}
+    if (!partsKey) { setPartsToOrder([]); return; }
+    try { setPartsToOrder(JSON.parse(localStorage.getItem(partsKey) || '[]')); } catch { setPartsToOrder([]); }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [user?.id]);
   const savePartsToOrder = (list: typeof partsToOrder) => {
     setPartsToOrder(list);
-    try { localStorage.setItem('torqued_parts_to_order', JSON.stringify(list)); } catch {}
+    if (partsKey) { try { localStorage.setItem(partsKey, JSON.stringify(list)); } catch {} }
   };
   // Match a needed part name against current inventory; returns stock qty (or 0)
   const stockFor = (name: string) => {
@@ -310,6 +408,8 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
       setQParts(Array.isArray(qi.parts) && qi.parts.length ? qi.parts : [{ name: '', qty: 1, unitPrice: 0 }]);
       setQLabourHours(qi.labourHours ?? 1);
       setQLabourRate(qi.labourRate ?? (profileData.labourRate || 145));
+      setQShopFee(qi.shopFee ?? profileData.shopFee ?? 25);
+      setQLeadTimeDays(qi.leadTimeDays ?? 0);
       setQDiscount(qi.discount ?? 0);
       setQOther(Array.isArray(qi.other) ? qi.other : []);
       setQNotes(qi.notes ?? '');
@@ -317,6 +417,8 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
       setQParts([{ name: '', qty: 1, unitPrice: 0 }]);
       setQLabourHours(1);
       setQLabourRate(profileData.labourRate || 145);
+      setQShopFee(profileData.shopFee ?? 25);
+      setQLeadTimeDays(0);
       setQDiscount(0);
       setQOther([]);
       setQNotes('');
@@ -325,7 +427,7 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
   const qPartsTotal = qParts.reduce((s, p) => s + (p.qty || 0) * (p.unitPrice || 0), 0);
   const qLabourTotal = (qLabourHours || 0) * (qLabourRate || 0);
   const qOtherTotal = qOther.reduce((s, o) => s + (o.amount || 0), 0);
-  const qTotal = Math.max(0, qPartsTotal + qLabourTotal + qOtherTotal - (qDiscount || 0));
+  const qTotal = Math.max(0, qPartsTotal + qLabourTotal + qOtherTotal + (qShopFee || 0) - (qDiscount || 0));
 
   const fetchDataUrl = (src: string): Promise<string | null> => new Promise(resolve => {
     fetch(src).then(r => r.blob()).then(b => { const fr = new FileReader(); fr.onloadend = () => resolve(fr.result as string); fr.onerror = () => resolve(null); fr.readAsDataURL(b); }).catch(() => resolve(null));
@@ -353,13 +455,13 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
     const commission = gross * 0.04, payout = gross - commission;
     const doc = new jsPDF({ unit: 'mm', format: 'a4' });
     const logo = await fetchDataUrl('/torqued-logo.png');
-    doc.setFillColor(21, 4, 2); doc.rect(0, 0, 210, 40, 'F'); doc.setFillColor(255, 24, 0); doc.rect(0, 40, 210, 2, 'F');
-    if (logo) doc.addImage(logo, 'PNG', 15, 11, 52, 17.4);
-    doc.setTextColor(255, 255, 255); doc.setFont('Helvetica', 'bold'); doc.setFontSize(11); doc.text('WEEKLY REVENUE REPORT', 195, 18, { align: 'right' });
-    doc.setFont('Helvetica', 'normal'); doc.setFontSize(8.5); doc.setTextColor(180, 180, 180);
-    doc.text(`${start.toLocaleDateString('en-NZ')} – ${end.toLocaleDateString('en-NZ')}`, 195, 24, { align: 'right' });
-    doc.text(profileData.name || 'Workshop', 195, 29, { align: 'right' });
-    let y = 54; doc.setTextColor(21, 4, 2); doc.setFontSize(9);
+    if (logo) doc.addImage(logo, 'PNG', 15, 8, 52, 17.4);
+    doc.setFillColor(255, 24, 0); doc.rect(0, 30, 210, 2, 'F');
+    doc.setTextColor(21, 4, 2); doc.setFont('Helvetica', 'bold'); doc.setFontSize(11); doc.text('WEEKLY REVENUE REPORT', 195, 16, { align: 'right' });
+    doc.setFont('Helvetica', 'normal'); doc.setFontSize(8.5); doc.setTextColor(80, 80, 80);
+    doc.text(`${start.toLocaleDateString('en-NZ')} – ${end.toLocaleDateString('en-NZ')}`, 195, 22, { align: 'right' });
+    doc.text(profileData.name || 'Workshop', 195, 27, { align: 'right' });
+    let y = 44; doc.setTextColor(21, 4, 2); doc.setFontSize(9);
     const row = (a: string, b: string, c: string, d: string, bold = false) => { doc.setFont('Helvetica', bold ? 'bold' : 'normal'); doc.text(a, 15, y); doc.text(b, 110, y); doc.text(c, 150, y); doc.text(d, 195, y, { align: 'right' }); y += 6.5; };
     row('Date', 'Vehicle', 'Customer', 'Amount', true); y += 1; doc.setDrawColor(226, 232, 240); doc.line(15, y - 4, 195, y - 4);
     if (jobs.length === 0) { doc.setFont('Helvetica', 'italic'); doc.text('No paid jobs in this period.', 15, y); y += 8; }
@@ -379,34 +481,77 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
     const labourTotal = (qi.labourHours || 0) * (qi.labourRate || 0);
     const otherList = Array.isArray(qi.other) ? qi.other.filter((o: any) => o.name) : [];
     const total = parseFloat(job.quoted_price ?? job.total_price) || 0;
+    const isPaid = job.payment_status === 'confirmed';
     const doc = new jsPDF({ unit: 'mm', format: 'a4' });
     const logo = await fetchDataUrl('/torqued-logo.png');
-    doc.setFillColor(21, 4, 2); doc.rect(0, 0, 210, 40, 'F');
-    doc.setFillColor(255, 24, 0); doc.rect(0, 40, 210, 2, 'F');
-    if (logo) doc.addImage(logo, 'PNG', 15, 11, 52, 17.4);
-    const isPaid = job.payment_status === 'confirmed';
-    doc.setTextColor(255, 255, 255); doc.setFont('Helvetica', 'bold'); doc.setFontSize(11);
-    doc.text(isPaid ? 'TAX INVOICE' : 'QUOTE', 195, 20, { align: 'right' });
-    doc.setFont('Helvetica', 'normal'); doc.setFontSize(8.5); doc.setTextColor(180, 180, 180);
-    doc.text(`Invoice #${job.id}`, 195, 26, { align: 'right' });
-    doc.text(new Date(job.completed_at || job.date || Date.now()).toLocaleDateString('en-NZ'), 195, 31, { align: 'right' });
+    if (logo) doc.addImage(logo, 'PNG', 15, 8, 52, 17.4);
+    doc.setFillColor(255, 24, 0); doc.rect(0, 30, 210, 2, 'F');
+    doc.setTextColor(21, 4, 2); doc.setFont('Helvetica', 'bold'); doc.setFontSize(11);
+    doc.text(isPaid ? 'TAX INVOICE' : 'QUOTE', 195, 16, { align: 'right' });
+    doc.setFont('Helvetica', 'normal'); doc.setFontSize(8.5); doc.setTextColor(80, 80, 80);
+    doc.text(`Ref #${(job.id || '').toUpperCase()}`, 195, 22, { align: 'right' });
+    doc.text(new Date(job.completed_at || job.date || Date.now()).toLocaleDateString('en-NZ', { day: 'numeric', month: 'short', year: 'numeric' }), 195, 27, { align: 'right' });
 
-    let y = 54; doc.setTextColor(21, 4, 2); doc.setFontSize(10); doc.setFont('Helvetica', 'bold');
-    doc.text(`${profileData.name || 'Workshop'}`, 15, y);
-    doc.setFont('Helvetica', 'normal'); doc.setFontSize(9); y += 6;
-    doc.text(`Billed to: ${job.customer_name || 'Customer'}${job.vehicle_rego ? `  ·  ${job.vehicle_rego}` : ''}`, 15, y);
-    y += 10; doc.setFontSize(9);
-    const row = (label: string, amt: string, bold = false) => { doc.setFont('Helvetica', bold ? 'bold' : 'normal'); doc.text(label, 15, y); doc.text(amt, 195, y, { align: 'right' }); y += 6.5; };
-    parts.forEach((p: any) => row(`${p.name}  x${p.qty}`, `$${(p.qty * p.unitPrice).toFixed(2)}`));
-    if (labourTotal > 0) row(`Labour (${qi.labourHours}h @ $${qi.labourRate}/hr)`, `$${labourTotal.toFixed(2)}`);
-    otherList.forEach((o: any) => row(o.name, `$${o.amount.toFixed(2)}`));
-    if (qi.discount > 0) row('Discount', `-$${Number(qi.discount).toFixed(2)}`);
+    // Three-column header: WORKSHOP | CUSTOMER | VEHICLE
+    doc.setTextColor(21, 4, 2); doc.setFontSize(9.5);
+    doc.setFont('Helvetica', 'bold'); doc.text('WORKSHOP', 15, 44);
+    doc.setFont('Helvetica', 'normal');
+    const wLines = [profileData.name || 'Workshop', ...(profileData.address || '').split(',').slice(0, 3)].filter(Boolean);
+    wLines.forEach((l, i) => { doc.text(l.trim(), 15, 50 + i * 5); });
+
+    doc.setFont('Helvetica', 'bold'); doc.text('CUSTOMER', 85, 44);
+    doc.setFont('Helvetica', 'normal');
+    const custName = job.customer_name && job.customer_name !== job.vehicle_rego ? job.customer_name : '';
+    const custEmail = job.email || job.customer_email || '';
+    const custPhone = job.customer_phone || '';
+    let cy = 50;
+    if (custName) { doc.text(custName, 85, cy); cy += 5; }
+    if (custEmail) { doc.text(custEmail, 85, cy); cy += 5; }
+    if (custPhone) { doc.text(custPhone, 85, cy); }
+
+    doc.setFont('Helvetica', 'bold'); doc.text('VEHICLE', 155, 44);
+    doc.setFont('Helvetica', 'normal');
+    const rego = job.vehicle_rego || '';
+    const vehicleDesc = job.vehicle_label || (job.vehicle_make ? `${job.vehicle_year ? job.vehicle_year + ' ' : ''}${job.vehicle_make}${job.vehicle_model ? ' ' + job.vehicle_model : ''}`.trim() : '');
+    if (vehicleDesc) { doc.text(vehicleDesc, 155, 50); doc.text(rego, 155, 55); }
+    else if (rego) { doc.text(rego, 155, 50); }
+    if (job.mileage_in) doc.text(`${Number(job.mileage_in).toLocaleString()} km`, 155, vehicleDesc ? 60 : 55);
+
+    let y = 75;
+    doc.setFont('Helvetica', 'bold'); doc.setFontSize(10); doc.setTextColor(255, 24, 0);
+    doc.text('ITEMISED INVOICE', 15, y); doc.setDrawColor(226, 232, 240); doc.line(15, y + 2, 195, y + 2);
+    y += 9; doc.setFontSize(9); doc.setTextColor(21, 4, 2);
+    const row = (label: string, amt: string, bold = false) => { doc.setFont('Helvetica', bold ? 'bold' : 'normal'); doc.text(label, 15, y); if (amt) doc.text(amt, 195, y, { align: 'right' }); y += 6.5; };
+
+    if (parts.length > 0 || labourTotal > 0) {
+      parts.forEach((p: any) => row(`${p.name}${p.qty > 1 ? '  x' + p.qty : ''}`, `$${((p.qty || 1) * (p.unitPrice || 0)).toFixed(2)}`));
+      if (labourTotal > 0) row(`Labour (${qi.labourHours}h @ $${qi.labourRate}/hr)`, `$${labourTotal.toFixed(2)}`);
+      otherList.forEach((o: any) => row(o.name, `$${Number(o.amount || 0).toFixed(2)}`));
+      if (qi.shopFee > 0) row('Workshop fee (freight, sundries & consumables)', `$${Number(qi.shopFee).toFixed(2)}`);
+      if (qi.discount > 0) row('Discount', `-$${Number(qi.discount).toFixed(2)}`);
+    } else {
+      const svcNames = (job.service_ids || []).map((id: string) => SERVICES.find(s => s.id === id)?.name || id);
+      svcNames.forEach((name: string) => row(name, ''));
+    }
+
     y += 2; doc.setDrawColor(226, 232, 240); doc.line(15, y, 195, y); y += 7;
     doc.setFontSize(12); doc.setTextColor(255, 24, 0); row(isPaid ? 'TOTAL PAID (GST incl.)' : 'TOTAL (GST incl.)', `$${total.toFixed(2)}`, true);
-    if (isPaid) { doc.setTextColor(16, 185, 129); doc.setFont('Helvetica', 'bold'); doc.setFontSize(10); doc.text('PAID IN FULL', 15, y + 2); }
+    if (isPaid) { y += 1; doc.setTextColor(16, 185, 129); doc.setFont('Helvetica', 'bold'); doc.setFontSize(10); doc.text('PAID IN FULL', 15, y); y += 8; }
+
+    // Booking & payment
+    y += 4;
+    doc.setFont('Helvetica', 'bold'); doc.setFontSize(10); doc.setTextColor(255, 24, 0);
+    doc.text('BOOKING & PAYMENT', 15, y); doc.setDrawColor(226, 232, 240); doc.line(15, y + 2, 195, y + 2); y += 9;
+    doc.setFontSize(9);
+    const bRow = (label: string, val: string) => { doc.setFont('Helvetica', 'normal'); doc.setTextColor(120, 120, 120); doc.text(label, 15, y); doc.setTextColor(21, 4, 2); doc.text(val, 195, y, { align: 'right' }); y += 6; };
+    if (job.date) bRow('Drop-off', new Date(job.date).toLocaleDateString('en-NZ', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' }));
+    if (job.payment_method) bRow('Payment method', job.payment_method);
+    bRow('Payment status', isPaid ? 'PAID IN FULL' : (job.payment_status || 'Pending'));
+    if (qi.notes) { y += 4; doc.setFont('Helvetica', 'bold'); doc.setFontSize(9); doc.setTextColor(21, 4, 2); doc.text('Notes', 15, y); y += 5; doc.setFont('Helvetica', 'normal'); doc.setFontSize(8.5); doc.setTextColor(80, 80, 80); doc.splitTextToSize(String(qi.notes), 180).forEach((line: string) => { doc.text(line, 15, y); y += 4.5; }); }
+
     doc.setFontSize(7.5); doc.setTextColor(150, 150, 150);
-    doc.text(`${isPaid ? 'Invoice' : 'Quote'} issued via Torqued — NZ's smarter way to get your car sorted. Prices include 15% GST.`, 15, 285);
-    doc.save(`Torqued-${isPaid ? 'Invoice' : 'Quote'}-${job.id}.pdf`);
+    doc.text("Tax invoice provided via Torqued - NZ's smarter way to get your car sorted. Prices include 15% GST.", 15, 285);
+    doc.save(`Torqued-Invoice-${(job.id || '').toUpperCase()}.pdf`);
   };
 
   // Build a branded, itemised quote PDF (logo + QR) and return base64
@@ -414,28 +559,40 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
     const doc = new jsPDF({ unit: 'mm', format: 'a4' });
     const logo = await fetchDataUrl('/torqued-logo.png');
     // QR deep-links straight to this quote's review-and-pay screen (quote pre-loaded)
-    const quoteUrl = `https://torquednz.vercel.app/customer?quote=${encodeURIComponent(job.id)}`;
+    const quoteUrl = `https://torqued-psi.vercel.app/customer?quote=${encodeURIComponent(job.id)}`;
     const qr = await fetchDataUrl('https://api.qrserver.com/v1/create-qr-code/?size=240x240&data=' + encodeURIComponent(quoteUrl));
 
-    doc.setFillColor(21, 4, 2); doc.rect(0, 0, 210, 40, 'F');
-    doc.setFillColor(255, 24, 0); doc.rect(0, 40, 210, 2, 'F');
-    if (logo) doc.addImage(logo, 'PNG', 15, 11, 52, 17.4);
-    doc.setTextColor(255, 255, 255); doc.setFont('Helvetica', 'bold'); doc.setFontSize(11);
-    doc.text('SERVICE QUOTE', 195, 20, { align: 'right' });
-    doc.setFont('Helvetica', 'normal'); doc.setFontSize(8.5); doc.setTextColor(180, 180, 180);
-    doc.text(`Ref #${(job.id || '').toUpperCase()}`, 195, 27, { align: 'right' });
-    doc.text(new Date().toLocaleDateString('en-NZ', { day: 'numeric', month: 'short', year: 'numeric' }), 195, 32, { align: 'right' });
+    if (logo) doc.addImage(logo, 'PNG', 15, 8, 52, 17.4);
+    doc.setFillColor(255, 24, 0); doc.rect(0, 30, 210, 2, 'F');
+    doc.setTextColor(21, 4, 2); doc.setFont('Helvetica', 'bold'); doc.setFontSize(11);
+    doc.text('SERVICE QUOTE', 195, 16, { align: 'right' });
+    doc.setFont('Helvetica', 'normal'); doc.setFontSize(8.5); doc.setTextColor(80, 80, 80);
+    doc.text(`Ref #${(job.id || '').toUpperCase()}`, 195, 22, { align: 'right' });
+    doc.text(new Date().toLocaleDateString('en-NZ', { day: 'numeric', month: 'short', year: 'numeric' }), 195, 27, { align: 'right' });
 
     doc.setTextColor(21, 4, 2); doc.setFontSize(9.5);
-    doc.setFont('Helvetica', 'bold'); doc.text('WORKSHOP', 15, 54);
-    doc.setFont('Helvetica', 'normal'); doc.text(profileData.name || 'Torqued Workshop', 15, 60);
-    doc.text(profileData.address || '', 15, 65);
-    doc.setFont('Helvetica', 'bold'); doc.text('CUSTOMER / VEHICLE', 115, 54);
+    doc.setFont('Helvetica', 'bold'); doc.text('WORKSHOP', 15, 44);
+    doc.setFont('Helvetica', 'normal'); doc.text(profileData.name || 'Torqued Workshop', 15, 50);
+    doc.text(profileData.address || '', 15, 55);
+    doc.setFont('Helvetica', 'bold'); doc.text('CUSTOMER', 115, 44);
     doc.setFont('Helvetica', 'normal');
-    doc.text(job.customerName || job.model || 'Customer', 115, 60);
-    doc.text(`${job.reg || ''}`, 115, 65);
+    const custName = job.customerName || job.customer_name || '';
+    const custEmail = job.email || job.customer_email || '';
+    const custPhone = job.phone || job.customer_phone || '';
+    if (custName) { doc.text(custName, 115, 50); }
+    if (custEmail) { doc.text(custEmail, 115, custName ? 55 : 50); }
+    if (custPhone) { doc.text(custPhone, 115, custName ? (custEmail ? 60 : 55) : 50); }
 
-    let y = 80;
+    doc.setFont('Helvetica', 'bold'); doc.text('VEHICLE', 155, 44);
+    doc.setFont('Helvetica', 'normal');
+    const rego = job.vehicleRego || job.rego || job.vehicleId || job.reg || '';
+    const vehicleDesc = job.vehicleLabel || (job.year && job.make ? `${job.year} ${job.make} ${job.vehicleModel || ''}`.trim() : '');
+    const mileage = job.mileage || job.odometer || null;
+    if (vehicleDesc) doc.text(vehicleDesc, 155, 50);
+    doc.text(rego, 155, vehicleDesc ? 55 : 50);
+    if (mileage) doc.text(`${Number(mileage).toLocaleString()} km`, 155, vehicleDesc ? 60 : 55);
+
+    let y = 68;
     doc.setFont('Helvetica', 'bold'); doc.setFontSize(10); doc.setTextColor(255, 24, 0);
     doc.text('ITEMISED QUOTE', 15, y); doc.setDrawColor(226, 232, 240); doc.line(15, y + 2, 195, y + 2);
     y += 9; doc.setFontSize(9); doc.setTextColor(21, 4, 2);
@@ -443,6 +600,7 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
     qParts.filter(p => p.name).forEach(p => row(`${p.name}  x${p.qty}`, `$${(p.qty * p.unitPrice).toFixed(2)}`));
     if (qLabourTotal > 0) row(`Labour (${qLabourHours}h @ $${qLabourRate}/hr)`, `$${qLabourTotal.toFixed(2)}`);
     qOther.filter(o => o.name).forEach(o => row(o.name, `$${o.amount.toFixed(2)}`));
+    if (qShopFee > 0) row('Workshop fee (freight, sundries & consumables)', `$${qShopFee.toFixed(2)}`);
     if (qDiscount > 0) row('Discount', `-$${qDiscount.toFixed(2)}`);
     y += 2; doc.setDrawColor(226, 232, 240); doc.line(15, y, 195, y); y += 7;
     doc.setFontSize(12); doc.setTextColor(255, 24, 0); row('TOTAL (GST incl.)', `$${qTotal.toFixed(2)}`, true);
@@ -490,6 +648,11 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ mechanicId: user.id }),
         });
+        await fetch('/api/mechanic/save-onboarding', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ mechanicId: user.id, fields: {}, complete: true }),
+        });
+        setOnboardingComplete(true);
         setJustActivated(true); markSubscriptionActive(); // unlock now
       } catch (err) {
         console.error('Subscription activation failed:', err);
@@ -508,40 +671,58 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
       .catch(() => {});
   }, [user]);
 
+  // Reset profile to empty defaults when the logged-in user changes (prevents stale data leaking between accounts)
+  useEffect(() => {
+    setProfileData({
+      name: '', phone: '', address: '', nzbn: '',
+      serviceAreas: [], diagnosticTools: [], certifications: [],
+      labourRate: 145, shopFee: 25, offersPpi: false,
+      bannerImage: 'https://images.unsplash.com/photo-1486006920555-c77dcf18193c?auto=format&fit=crop&q=80&w=1920',
+    });
+  }, [user?.id]);
+
   // Load mechanic data from Supabase on mount
   useEffect(() => {
     if (!user) return;
 
-    // Profile
-    supabase
-      .from('profiles')
-      .select('name, phone, address, nzbn, service_areas, diagnostic_tools, certifications, labour_rate, shop_fee, banner_image, technicians, parts_lead_days')
-      .eq('id', user.id)
-      .single()
-      .then(({ data }) => {
+    // Profile — use admin-backed endpoint to bypass any RLS restrictions
+    fetch(`/api/mechanic/profile?mechanicId=${user.id}`)
+      .then(r => r.json())
+      .then(({ profile: data }) => {
         if (!data) return;
-        setCap(prev => ({ ...prev, technicians: data.technicians ?? 1, parts_lead_days: data.parts_lead_days ?? 1, labour_rate: data.labour_rate ?? 145 }));
-        setQLabourRate(data.labour_rate ?? 145);
-        // Cancellation policy is read separately so a not-yet-run migration can't break the profile load.
-        supabase.from('profiles').select('cancellation_notice_hours, cancellation_partial_refund_pct').eq('id', user.id).single()
-          .then(({ data: cd }: any) => { if (cd) setCap(prev => ({ ...prev, cancellation_notice_hours: cd.cancellation_notice_hours ?? 72, cancellation_partial_refund_pct: cd.cancellation_partial_refund_pct ?? 80 })); });
-        setProfileData(prev => ({
+        setCap(prev => ({
           ...prev,
-          name: data.name || prev.name,
-          phone: data.phone || prev.phone,
-          address: data.address || prev.address,
-          nzbn: data.nzbn || prev.nzbn,
-          serviceAreas: data.service_areas?.length ? data.service_areas : prev.serviceAreas,
-          diagnosticTools: data.diagnostic_tools?.length ? data.diagnostic_tools : prev.diagnosticTools,
-          certifications: data.certifications?.length ? data.certifications : prev.certifications,
-          labourRate: data.labour_rate ?? prev.labourRate,
-          shopFee: data.shop_fee ?? prev.shopFee,
-          bannerImage: data.banner_image || prev.bannerImage,
+          technicians: data.technicians ?? prev.technicians,
+          parts_lead_days: data.parts_lead_days ?? prev.parts_lead_days,
+          labour_rate: data.labour_rate ?? prev.labour_rate,
+          cancellation_notice_hours: data.cancellation_notice_hours ?? prev.cancellation_notice_hours,
+          cancellation_partial_refund_pct: data.cancellation_partial_refund_pct ?? prev.cancellation_partial_refund_pct,
         }));
-      });
+        if (data.labour_rate != null) setQLabourRate(data.labour_rate);
+        if (data.billing_start_date) setBillingStartDate(data.billing_start_date);
+        setProfileData({
+          name: data.name || '',
+          phone: data.phone || '',
+          address: data.address || '',
+          nzbn: data.nzbn || '',
+          serviceAreas: data.service_areas || [],
+          diagnosticTools: data.diagnostic_tools || [],
+          certifications: data.certifications || [],
+          labourRate: data.labour_rate ?? 145,
+          shopFee: data.shop_fee ?? 25,
+          offersPpi: !!data.offers_ppi,
+          bannerImage: data.banner_image || 'https://images.unsplash.com/photo-1486006920555-c77dcf18193c?auto=format&fit=crop&q=80&w=1920',
+        });
+      })
+      .catch(err => console.error('[mechanic profile load]', err));
 
     // Subscription status + payment history
     fetch(`/api/mechanic/billing?mechanicId=${user.id}`).then(r => r.json()).then(setBilling).catch(() => {});
+    // Staff roster (team members + shifts)
+    fetch(`/api/mechanic/roster?mechanicId=${user.id}`)
+      .then(r => r.json())
+      .then(d => { setRosterStaff(d.staff || []); setRosterShifts(d.shifts || []); setRosterLoaded(true); })
+      .catch(() => setRosterLoaded(true));
     // Customers who've interacted with this workshop
     fetch(`/api/mechanic/customers?mechanicId=${user.id}`).then(r => r.json()).then(d => setCustomers(d.customers || [])).catch(() => {});
     // Mechanic availability slots + closed periods
@@ -571,19 +752,31 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
         const paidThisWeek = all.filter((r: any) => r.payment_status === 'confirmed' && new Date(r.completed_at || r.created_at).getTime() >= weekAgo);
         setWeekRevenue(Math.round(paidThisWeek.reduce((s: number, r: any) => s + (parseFloat(r.total_price) || 0) * 0.96, 0)));
         // Job History = accepted/in-progress/completed jobs + all cold quotes (mechanic-created)
-        setPastJobs(all.filter((r: any) => ['completed', 'in_progress'].includes(r.status) || r.is_cold_quote));
+        setPastJobs(all.filter((r: any) => ['completed', 'in_progress', 'accepted'].includes(r.status) || r.is_cold_quote));
         // Incoming queue = real customer jobs still needing action + quoted jobs (show in SENT filter)
         const data = all.filter((r: any) => ['booked', 'pending_payment', 'pending', 'quoted'].includes(r.status) && !r.is_cold_quote);
-        if (!data || data.length === 0) { setIncomingJobs([]); return; }
+        if (!data || data.length === 0) { setIncomingJobs([]); setPortalLoading(false); return; }
         const jobs = data.map((row: any) => ({
           id: row.id,
           reg: row.vehicle_rego || '',
-          model: row.customer_name ? `${row.vehicle_rego} — ${row.customer_name}` : row.vehicle_rego || 'Unknown Vehicle',
+          customerName: row.customer_name || '',
+          customerEmail: row.email || '',
+          vehicleLabel: row.vehicle_label || '',
+          vehicleMake: row.vehicle_make || '',
+          vehicleModel: row.vehicle_model || '',
+          vehicleYear: row.vehicle_year || null,
+          model: row.vehicle_rego || (row.customer_name || 'Unknown Vehicle'),
           details: [row.date, row.payment_method].filter(Boolean).join(' • '),
           suggestedQuote: parseFloat(row.total_price) || 0,
-          services: (row.service_ids || []).map((id: string) => SERVICES.find(s => s.id === id)?.name || id),
+          services: (row.description || '').startsWith('[EV Quote Request]')
+            ? ['EV Quote Request']
+            : (row.service_ids || []).map((id: string) => SERVICES.find(s => s.id === id)?.name || id),
           description: row.description || row.fault_code || '',
-          status: row.status === 'booked' ? 'Booked via Torqued' : row.status === 'quoted' ? 'Quote Sent' : 'Awaiting Payment',
+          status: row.status === 'booked' ? 'Booked via Torqued' : row.status === 'quoted' ? 'Quote Sent'
+            : (row.status === 'pending' && (parseFloat(row.total_price) || 0) === 0) ? 'Quote Requested'
+            : 'Awaiting Payment',
+          rawStatus: row.status,
+          payment_status: row.payment_status,
           partsMatch: 0,
           profit: Math.round((parseFloat(row.total_price) || 0) * 0.65),
           requiredParts: [],
@@ -594,7 +787,8 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
           const localOnly = prev.filter(j => !dbIds.has(j.id));
           return [...jobs, ...localOnly];
         });
-      });
+        setPortalLoading(false);
+      }).catch(() => { setPortalLoading(false); });
 
     // Parts inventory — routed through Express (service role) to bypass RLS issues
     fetch(`/api/mechanic/parts?mechanicId=${user.id}`)
@@ -630,11 +824,13 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
   const [cardError, setCardError] = useState('');
   const [searchQuery, setSearchQuery] = useState('');
   const [isSubscriptionLoading, setIsSubscriptionLoading] = useState(false);
+  const [billingStartDate, setBillingStartDate] = useState<string | null>(null);
   const [activeTab, setActiveTab ] = useState('dashboard');
   const [jobsSubtab, setJobsSubtab] = useState<'accept' | 'today' | 'upcoming' | 'history' | 'cold'>('accept');
   const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
   const [selectedJobId, setSelectedJobId] = useState<string | null>(null);
   const [calendarView, setCalendarView] = useState<'day' | 'week' | 'month'>('week');
+  const [calendarMonth, setCalendarMonth] = useState(() => { const d = new Date(); return { year: d.getFullYear(), month: d.getMonth() }; });
   const [parts, setParts] = useState<InventoryPart[]>([]);
   const [appointments, setAppointments] = useState<any[]>([]);
   const [incomingJobs, setIncomingJobs] = useState<any[]>([]);
@@ -644,6 +840,40 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
   const [billing, setBilling] = useState<any>(null);
   const [customers, setCustomers] = useState<any[]>([]);
   const [custSearch, setCustSearch] = useState('');
+  const [healthSubtab, setHealthSubtab] = useState<'health' | 'ppi'>('health');
+  const [ppiPreloadRego, setPpiPreloadRego] = useState('');
+  const [ppiPreloadName, setPpiPreloadName] = useState('');
+  const [ppiPreloadEmail, setPpiPreloadEmail] = useState('');
+  const [ppiPreloadMileage, setPpiPreloadMileage] = useState('');
+  // Editing a customer's contact details from the Customers tab
+  const [editCustomer, setEditCustomer] = useState<any | null>(null);
+  const [editCustForm, setEditCustForm] = useState({ name: '', email: '', phone: '' });
+  const [editCustBusy, setEditCustBusy] = useState(false);
+
+  const openEditCustomer = (c: any) => {
+    setEditCustomer(c);
+    setEditCustForm({ name: c.name || '', email: c.email || '', phone: c.phone || '' });
+  };
+  const saveEditCustomer = async () => {
+    if (!editCustomer || !user) return;
+    setEditCustBusy(true);
+    try {
+      const r = await fetch('/api/mechanic/update-customer', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          mechanicId: user.id,
+          regos: editCustomer.regos || [],
+          oldEmail: editCustomer.email || undefined,
+          oldPhone: editCustomer.phone || undefined,
+          name: editCustForm.name, email: editCustForm.email, phone: editCustForm.phone,
+        }),
+      });
+      if (!r.ok) { const d = await r.json().catch(() => ({})); alert(d.error || 'Could not save customer.'); return; }
+      setCustomers(prev => prev.map(c => c === editCustomer ? { ...c, ...editCustForm } : c));
+      setEditCustomer(null);
+    } catch { alert('Could not save customer.'); }
+    finally { setEditCustBusy(false); }
+  };
   const [chatMessages, setChatMessages] = useState<{ role: 'user' | 'assistant'; content: string }[]>([]);
   const [chatInput, setChatInput] = useState('');
   const [chatBusy, setChatBusy] = useState(false);
@@ -766,31 +996,23 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
     setHistAccessMsg(null);
     setUnlockedHistory(null);
     try {
-      const r = await fetch('/api/mechanic/request-history-access', {
+      // Now emails the owner a 12-hour ACCESS LINK (no code to relay).
+      const r = await fetch('/api/mechanic/request-history-link', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ mechanicId: user.id, rego: plateRego }),
+        body: JSON.stringify({ mechanicId: user.id, rego: plateRego, customerEmail: coldForm.email || undefined }),
       });
       const d = await r.json();
       if (!d.hasAccount) { setHistAccessState('no_account'); return; }
       if (d.priorBooking) {
+        const sr = await fetch(`/api/mechanic/history-access-status?mechanicId=${encodeURIComponent(user.id)}&rego=${encodeURIComponent(plateRego)}`);
+        if (sr.ok) { const sd = await sr.json(); if (sd.granted) { setUnlockedHistory({ imported: sd.imported || [], torquedJobs: sd.jobs || [] }); setHistAccessState('granted'); return; } }
         setHistAccessState('prior_booking');
-        // Load history directly
-        const hr = await fetch(`/api/mechanic/history-direct?mechanicId=${encodeURIComponent(user.id)}&rego=${encodeURIComponent(plateRego)}`);
-        if (hr.ok) { const hd = await hr.json(); setUnlockedHistory(hd.history); setHistAccessState('granted'); }
         return;
       }
       if (d.noEmail) { setHistAccessState('no_email'); return; }
-      if (d.alreadySent) {
-        setHistOtpExpiry(d.expiresAt);
-        setHistAccessState('already_sent');
-        return;
-      }
-      if (d.otpSent) {
-        setHistOtpExpiry(d.expiresAt);
-        setHistAccessState('otp_sent');
-        return;
-      }
+      if (d.alreadySent) { setHistOtpExpiry(d.expiresAt); setHistAccessState('already_sent'); return; }
+      if (d.linkSent) { setHistOtpExpiry(d.expiresAt); setHistAccessState('otp_sent'); return; }
       setHistAccessState('needs_otp');
     } catch {
       setHistAccessState('error');
@@ -798,22 +1020,19 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
     }
   };
 
+  // Poll whether the customer has tapped their access link yet.
   const verifyHistOtp = async () => {
-    if (!user?.id || !coldForm.rego || !histOtpInput.trim()) return;
+    if (!user?.id || !coldForm.rego) return;
     setHistAccessState('verifying');
     try {
-      const r = await fetch('/api/mechanic/verify-history-otp', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ mechanicId: user.id, rego: coldForm.rego, otp: histOtpInput.trim() }),
-      });
+      const r = await fetch(`/api/mechanic/history-access-status?mechanicId=${encodeURIComponent(user.id)}&rego=${encodeURIComponent(coldForm.rego)}`);
       const d = await r.json();
-      if (!r.ok) { setHistAccessState('entering_code'); setHistAccessMsg(d.error || 'Invalid code.'); return; }
-      setUnlockedHistory(d.history);
+      if (!r.ok || !d.granted) { setHistAccessState('otp_sent'); setHistAccessMsg('Not granted yet — ask the customer to tap the link in their email, then check again.'); return; }
+      setUnlockedHistory({ imported: d.imported || [], torquedJobs: d.jobs || [] });
       setHistAccessState('granted');
       setHistAccessMsg(null);
     } catch {
-      setHistAccessState('entering_code');
+      setHistAccessState('otp_sent');
       setHistAccessMsg('Could not connect. Please try again.');
     }
   };
@@ -828,15 +1047,16 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
   const [selectedJobForProcurement, setSelectedJobForProcurement] = useState<string | null>(null);
   const [procurementSelections, setProcurementSelections] = useState<Record<string, string>>({});
   const [profileData, setProfileData] = useState({
-    name: 'Precision Mechanical (Demo)',
-    nzbn: '9429045612345',
-    phone: '03 455 1234',
-    address: '123 Anderson Bay Road',
-    serviceAreas: ['South Dunedin', 'Central Dunedin', 'St Kilda', 'Mosgiel', 'Green Island'],
-    diagnosticTools: ['Autel MaxiSys Ultra', 'VCDS (Ross-Tech)', 'Snap-on Apollo-D9', 'Odis (VW Factory)'],
-    certifications: ['MTA Assured', 'I-Car Certified', 'Level 4 Automotive Engineering', 'High Voltage Certified (EV)'],
+    name: '',
+    nzbn: '',
+    phone: '',
+    address: '',
+    serviceAreas: [] as string[],
+    diagnosticTools: [] as string[],
+    certifications: [] as string[],
     labourRate: 145,
     shopFee: 25,
+    offersPpi: false,
     bannerImage: 'https://images.unsplash.com/photo-1486006920555-c77dcf18193c?auto=format&fit=crop&q=80&w=1920'
   });
 
@@ -864,6 +1084,14 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
 
   // Check-out modal state
   const [checkoutModal, setCheckoutModal] = useState<{ job: any } | null>(null);
+  const [rescheduleModal, setRescheduleModal] = useState<{ job: any } | null>(null);
+  const [refundModal, setRefundModal] = useState<{ job: any } | null>(null);
+  const [refundAmount, setRefundAmount] = useState('');
+  const [refundReason, setRefundReason] = useState('');
+  const [refundBusy, setRefundBusy] = useState(false);
+  const [rescheduleDate, setRescheduleDate] = useState('');
+  const [rescheduleComment, setRescheduleComment] = useState('');
+  const [rescheduleSending, setRescheduleSending] = useState(false);
   const [checkoutKm, setCheckoutKm] = useState('');
   const [checkoutNotes, setCheckoutNotes] = useState('');
   const [checkoutBusy, setCheckoutBusy] = useState(false);
@@ -922,14 +1150,27 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
     } catch { alert('Could not send message.'); }
   };
 
-  const handleAcceptJob = (jobId: string) => {
+  const handleAcceptJob = async (jobId: string) => {
     const job = incomingJobs.find(j => j.id === jobId);
     if (!job) return;
 
     // Remove from incoming + persist accepted status (service role — survives refresh)
+    const customerName = (job as any).customerName || (job.model.includes(' — ') ? job.model.split(' — ').slice(1).join(' — ') : '');
+    // Check billing_start_date before accepting
+    const acceptResp = await fetch('/api/mechanic/update-job-status', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ bookingId: jobId, status: 'accepted' }) });
+    if (acceptResp.status === 403) {
+      const d = await acceptResp.json();
+      alert(d.error || 'Your subscription has not yet started. You cannot accept jobs yet.');
+      return;
+    }
     setIncomingJobs(incomingJobs.filter(j => j.id !== jobId));
-    fetch('/api/mechanic/update-job-status', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ bookingId: jobId, status: 'in_progress' }) })
-      .catch(e => console.error('Failed to accept job:', e));
+    // Add to pastJobs so it appears immediately in Today / Upcoming tabs
+    setPastJobs(prev => [{
+      id: job.id, vehicle_rego: job.reg, customer_name: customerName || job.model,
+      service_ids: [], total_price: String(job.suggestedQuote), quote_items: job.quoteItems,
+      status: 'accepted', date: job.details?.split(' • ')?.[0] || null,
+      payment_status: 'confirmed', description: job.description, is_cold_quote: false,
+    }, ...prev]);
 
     // Auto-order parts if they are not in stock
     if (job.partsMatch < 100 && job.requiredParts) {
@@ -971,19 +1212,37 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
 
   const handleSaveProfile = async () => {
     if (!user) return;
-    const { error } = await supabase.from('profiles').update({
-      name: profileData.name,
-      phone: profileData.phone,
-      address: profileData.address,
-      nzbn: profileData.nzbn,
-      service_areas: profileData.serviceAreas,
-      diagnostic_tools: profileData.diagnosticTools,
-      certifications: profileData.certifications,
-      labour_rate: profileData.labourRate,
-      shop_fee: profileData.shopFee,
-      banner_image: profileData.bannerImage,
-    }).eq('id', user.id);
-    if (error) console.error('Failed to save profile:', error.message);
+    setProfileSaveStatus('idle'); setProfileSaveError(null);
+    try {
+      const r = await fetch('/api/mechanic/save-onboarding', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ mechanicId: user.id, fields: {
+          name: profileData.name, phone: profileData.phone, address: profileData.address,
+          nzbn: profileData.nzbn, service_areas: profileData.serviceAreas,
+          diagnostic_tools: profileData.diagnosticTools, certifications: profileData.certifications,
+          labour_rate: profileData.labourRate, shop_fee: profileData.shopFee,
+          offers_ppi: profileData.offersPpi,
+        }}),
+      });
+      const d = await r.json();
+      if (!r.ok) { setProfileSaveStatus('error'); setProfileSaveError(d.error || 'Could not save profile.'); return; }
+      // Keep cap in sync with the saved labour rate
+      setCap(prev => ({ ...prev, labour_rate: profileData.labourRate }));
+      setProfileSaveStatus('saved');
+      setTimeout(() => setProfileSaveStatus('idle'), 3000);
+      // Trigger server-side geocode for updated address
+      if (profileData.address) {
+        setAddressUpdateStatus('updating');
+        try {
+          await fetch('/api/mechanic/update-address', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ mechanicId: user.id, address: profileData.address }),
+          });
+          setAddressUpdateStatus('updated');
+          setTimeout(() => setAddressUpdateStatus('idle'), 3000);
+        } catch { setAddressUpdateStatus('error'); }
+      }
+    } catch { setProfileSaveStatus('error'); setProfileSaveError('Connection error. Please try again.'); }
   };
 
   const isDiagnosticJob = (j: any) => j.services?.includes('Diagnostic Inspection');
@@ -1436,9 +1695,10 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
     const allDiagnosticJobs = incomingJobs.filter(isDiagnosticJob);
     const queueJobs = allDiagnosticJobs.filter(j => !j.quoteItems);
     // sentJobs = jobs with status 'Quote Sent' (with or without structured quoteItems),
-    // plus cold-quotes that have quoteItems built in the builder
-    const sentDiagJobs  = incomingJobs.filter(j => j.status === 'Quote Sent' || !!j.quoteItems);
-    const sentColdJobs  = pastJobs.filter((j: any) => j.is_cold_quote && !!j.quoteItems);
+    // plus cold-quotes that have quoteItems built in the builder.
+    // Once a quote is PAID it's a real job — drop it out of "Quoted" into My Jobs.
+    const sentDiagJobs  = incomingJobs.filter(j => (j.status === 'Quote Sent' || !!j.quoteItems) && j.payment_status !== 'confirmed');
+    const sentColdJobs  = pastJobs.filter((j: any) => j.is_cold_quote && !!j.quoteItems && j.payment_status !== 'confirmed');
     const sentJobs = [...sentDiagJobs, ...sentColdJobs];
 
     const displayJobs = showOnlyDiagnostics
@@ -1508,13 +1768,14 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                 </div>
                 <div>
                   <div className="flex items-center gap-2 mb-1">
-                    <div className="torqued-badge text-[10px]">{job.reg}</div>
+                    {job.reg && <div className="torqued-badge text-[10px]">{job.reg}</div>}
                     {job.quoteItems && (
                       <span className="text-[10px] font-black uppercase tracking-wider px-2 py-0.5 rounded bg-emerald-500/15 text-emerald-500 border border-emerald-500/30">Quote Sent</span>
                     )}
                   </div>
-                  <h3 className="text-2xl text-foreground font-bold">{job.model}</h3>
-                  <p className="text-sm text-muted font-medium">{job.details}</p>
+                  <h3 className="text-2xl text-foreground font-bold">{(job as any).customerName || (job.reg ? job.reg : 'Unknown Vehicle')}</h3>
+                  {(() => { const vd = (job as any).vehicleLabel || ((job as any).vehicleMake ? `${(job as any).vehicleYear ? (job as any).vehicleYear + ' ' : ''}${(job as any).vehicleMake}${(job as any).vehicleModel ? ' ' + (job as any).vehicleModel : ''}`.trim() : null); return vd ? <p className="text-sm text-muted font-medium">{vd}</p> : null; })()}
+                  <p className="text-xs text-muted">{job.details}</p>
                 </div>
               </div>
               <div className="text-right">
@@ -1534,9 +1795,53 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                   </div>
                 </div>
                 <div className="space-y-2">
-                  <h4 className="text-xs font-bold uppercase tracking-wider text-muted font-accent">Customer Description</h4>
-                  <p className="text-sm italic text-foreground/80">{job.description}</p>
+                  <h4 className="text-xs font-bold uppercase tracking-wider text-muted font-accent">Customer</h4>
+                  {(job as any).customerName && (job as any).customerName !== job.reg ? (
+                    <div className="space-y-1">
+                      <p className="text-sm font-bold text-foreground">{(job as any).customerName}</p>
+                      {(job as any).customerEmail && <p className="text-xs text-muted">{(job as any).customerEmail}</p>}
+                      <button onClick={() => { setActiveTab('customers'); setCustSearch((job as any).customerName || ''); }}
+                        className="text-[10px] text-torqued-red hover:underline">View customer profile →</button>
+                    </div>
+                  ) : (
+                    <p className="text-sm italic text-muted">No customer details recorded</p>
+                  )}
+                  {job.description && (
+                    <div className="mt-2">
+                      <p className="text-[10px] font-bold uppercase tracking-wider text-muted mb-1">Description</p>
+                      <p className="text-sm italic text-foreground/80">{job.description}</p>
+                    </div>
+                  )}
                 </div>
+                {job.quoteItems && (
+                  <div className="space-y-2">
+                    <h4 className="text-xs font-bold uppercase tracking-wider text-muted font-accent">What You Quoted</h4>
+                    <div className="rounded-xl border border-border bg-background p-3 space-y-1.5">
+                      {(job.quoteItems.parts || []).filter((p: any) => p.name).map((p: any, i: number) => (
+                        <div key={`p${i}`} className="flex justify-between text-xs">
+                          <span className="text-foreground">{p.name}{p.qty > 1 ? ` ×${p.qty}` : ''}</span>
+                          <span className="text-muted font-mono">{formatCurrency((p.qty || 0) * (p.unitPrice || 0))}</span>
+                        </div>
+                      ))}
+                      {(job.quoteItems.labourHours > 0) && (
+                        <div className="flex justify-between text-xs">
+                          <span className="text-foreground">Labour ({job.quoteItems.labourHours}h @ {formatCurrency(job.quoteItems.labourRate || 0)})</span>
+                          <span className="text-muted font-mono">{formatCurrency((job.quoteItems.labourHours || 0) * (job.quoteItems.labourRate || 0))}</span>
+                        </div>
+                      )}
+                      {(job.quoteItems.shopFee > 0) && (
+                        <div className="flex justify-between text-xs"><span className="text-foreground">Workshop fee</span><span className="text-muted font-mono">{formatCurrency(job.quoteItems.shopFee)}</span></div>
+                      )}
+                      {(job.quoteItems.other || []).filter((o: any) => o.label || o.amount).map((o: any, i: number) => (
+                        <div key={`o${i}`} className="flex justify-between text-xs"><span className="text-foreground">{o.label || 'Other'}</span><span className="text-muted font-mono">{formatCurrency(o.amount || 0)}</span></div>
+                      ))}
+                      {(job.quoteItems.discount > 0) && (
+                        <div className="flex justify-between text-xs"><span className="text-emerald-600">Discount</span><span className="text-emerald-600 font-mono">−{formatCurrency(job.quoteItems.discount)}</span></div>
+                      )}
+                      {job.quoteItems.notes && <p className="text-[11px] italic text-muted pt-1 border-t border-border">{job.quoteItems.notes}</p>}
+                    </div>
+                  </div>
+                )}
                 <div className="space-y-2">
                   <div className="flex items-center gap-2">
                      <h4 className="text-xs font-bold uppercase tracking-wider text-muted font-accent">Status Check</h4>
@@ -1639,20 +1944,8 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                 <>
                   <Button className="flex-1 bg-emerald-600 hover:bg-emerald-700 text-white font-bold" onClick={() => handleAcceptJob(job.id)}>Accept Job</Button>
                   <Button variant="outline" className="text-foreground border-border hover:bg-card" onClick={() => recordMileage(job, 'in')}>Check-in km</Button>
-                  <Button variant="outline" className="text-foreground border-border hover:bg-card" onClick={() => recordMileage(job, 'out')}>Check-out km</Button>
-                  <Button variant="outline" className="flex-1 border-border text-foreground hover:bg-card" onClick={async () => {
-                    try {
-                      const r = await fetch('/api/reviews/request', {
-                        method: 'POST', headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ bookingId: job.id }),
-                      });
-                      if (r.ok) {
-                        await fetch('/api/mechanic/update-job-status', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ bookingId: job.id, status: 'completed' }) });
-                        setIncomingJobs(incomingJobs.filter(j => j.id !== job.id));
-                        alert('Job marked complete. A review request has been emailed to the customer.');
-                      }
-                    } catch { alert('Could not mark complete. Try again.'); }
-                  }}>Mark Complete</Button>
+                  {/* Check-out records the odometer, marks the job complete, emails the customer their car is ready + a review link, and files it to history. One step. */}
+                  <Button variant="outline" className="flex-1 text-emerald-600 border-border hover:bg-card font-bold" onClick={() => recordMileage(job, 'out')}>Check-out km & Complete</Button>
                   <Button variant="outline" className="text-foreground border-border hover:bg-card" onClick={() => openQuoteEditor(job)}>Build Quote</Button>
                   <Button variant="outline" className="text-amber-500 border-border hover:bg-card" onClick={async () => {
                     const amt = prompt('Refund amount (NZD). Leave blank for FULL refund:');
@@ -1668,6 +1961,7 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                     }
                     alert(d.success ? `Refunded $${d.refunded}. Booking cancelled.` : (d.error || 'Refund failed.'));
                   }}>Refund</Button>
+                  <Button variant="outline" className="text-blue-500 border-border hover:bg-card" onClick={() => { setRescheduleModal({ job }); setRescheduleDate(''); setRescheduleComment(''); }}>Request Reschedule</Button>
                   <Button variant="outline" className="text-muted border-border hover:bg-card" onClick={async () => {
                     if (!confirm('Decline this job? It will be removed from your queue.')) return;
                     await fetch('/api/mechanic/update-job-status', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ bookingId: job.id, status: 'declined' }) });
@@ -1692,30 +1986,21 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
       
       <div className="space-y-6">
         <Card className="p-0 overflow-hidden border-border bg-card shadow-sm">
-          <div className="h-48 bg-background relative group">
-            <img 
-              src={profileData.bannerImage} 
-              alt="Workshop Banner" 
-              className="w-full h-full object-cover opacity-60"
-            />
-            <div className="absolute inset-0 bg-background/40 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center backdrop-blur-sm">
-              <Button variant="ghost" className="text-foreground border-border flex items-center gap-2">
-                <PenSquare size={16} /> Change Banner Image
-              </Button>
-            </div>
+          <div className="h-48 bg-gradient-to-br from-torqued-red/10 to-background relative">
             <div className="absolute -bottom-12 left-8 w-24 h-24 bg-background p-1 rounded-2xl shadow-2xl border border-border">
-              <div className="w-full h-full bg-card rounded-xl flex items-center justify-center relative group overflow-hidden">
-                <span className="text-2xl font-black italic text-muted/20">PM</span>
-                <div className="absolute inset-0 bg-background/10 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center">
-                  <ImageIcon size={16} className="text-foreground" />
-                </div>
+              <div className="w-full h-full bg-card rounded-xl flex items-center justify-center overflow-hidden">
+                <span className="text-2xl font-black italic text-torqued-red/40">
+                  {(profileData.name || user?.email || 'W').split(' ').map((w: string) => w[0]).slice(0, 2).join('').toUpperCase()}
+                </span>
               </div>
             </div>
           </div>
           <div className="pt-16 pb-6 px-8 flex flex-col sm:flex-row justify-between items-start sm:items-end gap-4">
-            <div className="space-y-1">
-              <h3 className="text-2xl font-bold text-foreground">{profileData.name}</h3>
-              <p className="text-muted text-sm font-medium">{profileData.address}</p>
+            <div className="space-y-2">
+              <h3 className="text-2xl font-bold text-foreground">{profileData.name || user?.email || 'My Workshop'}</h3>
+              {profileData.address && (
+                <p className="text-sm text-muted font-medium">{profileData.address}</p>
+              )}
             </div>
             <div className="flex gap-2 w-full sm:w-auto">
               <div className="text-left sm:text-right mr-4">
@@ -1724,8 +2009,34 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                   <span className="w-2 h-2 bg-emerald-500 rounded-full animate-pulse shadow-[0_0_8px_rgba(16,185,129,0.5)]" /> Live & Accepting Jobs
                 </div>
               </div>
-              <Button size="sm" className="bg-torqued-red flex-1 sm:flex-none">Preview Public Profile</Button>
             </div>
+          </div>
+        </Card>
+
+        <Card className="p-6 space-y-4 bg-card border-border">
+          <div className="flex items-center gap-2 border-b border-border pb-4">
+            <Award size={20} className="text-torqued-red" />
+            <h3 className="text-xl text-foreground">Workshop Details</h3>
+          </div>
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <Input label="Trading / Workshop Name" value={profileData.name} placeholder="e.g. North Mechanical" onChange={(e) => setProfileData({ ...profileData, name: e.target.value })} />
+            <Input label="Contact Phone" value={profileData.phone} placeholder="e.g. 021 234 5678" onChange={(e) => setProfileData({ ...profileData, phone: e.target.value })} />
+          </div>
+          {/* Pre-Purchase Inspection opt-in */}
+          <div className="border-t border-border pt-4 flex items-start justify-between gap-4">
+            <div className="min-w-0">
+              <p className="text-sm font-bold text-foreground">Offer Pre-Purchase Inspections</p>
+              <p className="text-xs text-muted mt-0.5">Customers can book a $199 flat-fee PPI with your workshop. Excludes high-voltage (hybrid/EV) battery testing. You can also start one any time under Vehicle Health.</p>
+            </div>
+            <button
+              type="button"
+              role="switch"
+              aria-checked={profileData.offersPpi}
+              onClick={() => setProfileData({ ...profileData, offersPpi: !profileData.offersPpi })}
+              className={cn('shrink-0 w-12 h-7 rounded-full transition-all relative', profileData.offersPpi ? 'bg-torqued-red' : 'bg-border')}
+            >
+              <span className={cn('absolute top-1 w-5 h-5 bg-white rounded-full transition-all', profileData.offersPpi ? 'left-6' : 'left-1')} />
+            </button>
           </div>
         </Card>
 
@@ -1783,7 +2094,7 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
             </div>
             <div className="p-4 bg-background border border-border rounded-2xl space-y-2">
               <h4 className="text-sm font-bold text-foreground">Billing card</h4>
-              <p className="text-xs text-muted">Your $99/month subscription is billed to your card. Update it securely via Stripe.</p>
+              <p className="text-xs text-muted">Manage your payment method securely via Stripe.</p>
               <div className="pt-1">
                 <Button variant="outline" size="sm" className="text-foreground border-border h-8 text-[10px]" onClick={async () => {
                   try {
@@ -1802,7 +2113,7 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                 <CreditCard size={20} className="text-torqued-red" />
                 <h3 className="text-xl text-foreground">Security · Passkey</h3>
               </div>
-              <p className="text-sm text-muted">Sign in with Face ID / Touch ID instead of your password. Your password still works as a fallback.</p>
+              <p className="text-sm text-muted">Sign in with passkey instead of your password. Your password still works as a fallback.</p>
               <Button variant="outline" className="text-foreground border-border" onClick={async () => {
                 try { await registerPasskey('mechanic', user!.email!); alert('Passkey added. Next time, tap "Sign in with passkey".'); }
                 catch (e: any) { alert(e?.message || 'Could not add passkey.'); }
@@ -1810,85 +2121,272 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
             </Card>
           )}
 
-          <Card className="p-6 space-y-6 md:col-span-2 bg-card border-border">
-            <div className="flex items-center gap-2 border-b border-border pb-4 mb-4">
+          <Card className="p-6 space-y-4 md:col-span-2 bg-card border-border">
+            <div className="flex items-center gap-2 border-b border-border pb-4">
               <Map size={20} className="text-torqued-red" />
               <h3 className="text-xl text-foreground">Workshop Location</h3>
             </div>
-            <div className="relative h-[300px] bg-black/5 rounded-2xl overflow-hidden group">
-              <img 
-                src="https://picsum.photos/seed/dunedin-map/1200/600?blur=1" 
-                alt="Workshop Location Map" 
-                className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-700"
-                referrerPolicy="no-referrer"
-              />
-              <div className="absolute inset-0 bg-black/10 transition-opacity group-hover:bg-black/5" />
-              <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2">
-                <div className="relative">
-                  <div className="absolute inset-0 bg-torqued-red animate-ping rounded-full opacity-20" />
-                  <div className="relative bg-white p-3 rounded-2xl shadow-2xl flex items-center gap-3 border border-black/5">
-                    <div className="w-10 h-10 bg-torqued-red rounded-lg flex items-center justify-center font-bold text-white">PM</div>
-                    <div className="pr-4">
-                      <p className="text-xs font-bold leading-tight">Precision Mechanical</p>
-                      <p className="text-[10px] text-black/40">123 Anderson Bay Road</p>
-                    </div>
+            <p className="text-xs text-muted">Your address is used to match you with nearby customers. Geocoded automatically on save — updates your pin on the customer map.</p>
+            <div className="flex items-start gap-3">
+              <div className="relative flex-1">
+                <input
+                  type="text"
+                  value={profileData.address}
+                  onChange={e => {
+                    const val = e.target.value;
+                    setProfileData({ ...profileData, address: val });
+                    if (profileAddrTimer.current) clearTimeout(profileAddrTimer.current);
+                    if (val.length < 3) { setProfileAddrSuggestions([]); return; }
+                    profileAddrTimer.current = setTimeout(async () => {
+                      try {
+                        const res = await fetch(
+                          `https://nominatim.openstreetmap.org/search?format=json&countrycodes=nz&limit=5&q=${encodeURIComponent(val)}`,
+                          { headers: { 'User-Agent': 'TorquedNZ/1.0 (torquedapp.nz@gmail.com)' } }
+                        );
+                        setProfileAddrSuggestions(await res.json() || []);
+                      } catch { setProfileAddrSuggestions([]); }
+                    }, 380);
+                  }}
+                  placeholder="Start typing your workshop address…"
+                  className="w-full bg-background border border-border rounded-xl px-4 py-3 text-sm text-foreground placeholder:text-muted outline-none focus:border-torqued-red transition-colors"
+                />
+                {profileAddrSuggestions.length > 0 && (
+                  <div className="absolute z-50 left-0 right-0 top-full mt-1 bg-card border border-border rounded-xl overflow-hidden shadow-2xl">
+                    {profileAddrSuggestions.map((s, i) => (
+                      <button key={i} type="button"
+                        className="w-full text-left px-4 py-2.5 text-sm text-foreground hover:bg-torqued-red/10 border-b border-border last:border-0"
+                        onClick={() => { setProfileData(p => ({ ...p, address: s.display_name })); setProfileAddrSuggestions([]); }}>
+                        {s.display_name}
+                      </button>
+                    ))}
                   </div>
-                </div>
+                )}
               </div>
-              <button className="absolute bottom-4 right-4 bg-white px-4 py-2 rounded-xl text-xs font-bold shadow-lg flex items-center gap-2 hover:bg-black hover:text-white transition-all">
-                <ExternalLink size={14} /> Open in Google Maps
+              <button
+                type="button"
+                disabled={addressUpdateStatus === 'updating' || !profileData.address}
+                className="shrink-0 mt-1 px-4 py-3 rounded-xl bg-torqued-red text-white text-xs font-bold disabled:opacity-40 hover:bg-torqued-red/90 transition-colors"
+                onClick={async () => {
+                  if (!user || !profileData.address) return;
+                  setAddressUpdateStatus('updating');
+                  setProfileAddrSuggestions([]);
+                  try {
+                    const r = await fetch('/api/mechanic/update-address', {
+                      method: 'POST', headers: { 'Content-Type': 'application/json' },
+                      body: JSON.stringify({ mechanicId: user.id, address: profileData.address }),
+                    });
+                    if (r.ok) { setAddressUpdateStatus('updated'); setTimeout(() => setAddressUpdateStatus('idle'), 3000); }
+                    else { setAddressUpdateStatus('error'); }
+                  } catch { setAddressUpdateStatus('error'); }
+                }}
+              >
+                {addressUpdateStatus === 'updating' ? 'Saving…' : 'Save'}
               </button>
             </div>
+            <button
+              type="button"
+              disabled={mechLocating}
+              className="inline-flex items-center gap-1.5 text-xs font-bold text-torqued-red hover:opacity-70 disabled:opacity-40 transition-opacity"
+              onClick={() => {
+                if (!navigator.geolocation) { alert('Geolocation is not supported on this device.'); return; }
+                setMechLocating(true);
+                navigator.geolocation.getCurrentPosition(async (pos) => {
+                  try {
+                    const { latitude, longitude } = pos.coords;
+                    const r = await fetch(`https://nominatim.openstreetmap.org/reverse?format=json&lat=${latitude}&lon=${longitude}`, { headers: { 'User-Agent': 'TorquedNZ/1.0 (torquedapp.nz@gmail.com)' } });
+                    const d = await r.json();
+                    if (d.display_name) setProfileData(p => ({ ...p, address: d.display_name }));
+                  } catch { alert('Could not resolve your location.'); }
+                  finally { setMechLocating(false); }
+                }, () => { setMechLocating(false); alert('Location permission denied.'); }, { enableHighAccuracy: true, timeout: 10000 });
+              }}
+            >
+              <Map size={14} /> {mechLocating ? 'Locating…' : 'Use my current GPS location'}
+            </button>
+            {addressUpdateStatus === 'updated' && <p className="text-xs text-emerald-500 font-bold">Location updated — pin moved on customer map ✓</p>}
+            {addressUpdateStatus === 'error' && <p className="text-xs text-torqued-red font-bold">Geocode failed — check the address and try again.</p>}
           </Card>
         </div>
 
-        <Button fullWidth size="lg" className="h-16 text-lg" onClick={handleSaveProfile}>Save Profile Updates</Button>
+        {/* Capacity & Cancellation Policy (moved here from Calendar) */}
+        <Card className="p-6 space-y-4">
+          <div className="flex items-center gap-2 border-b border-black/5 pb-4">
+            <CalendarIcon size={20} className="text-torqued-red" />
+            <h3 className="text-xl text-foreground">Capacity & Cancellation Policy</h3>
+            <span className="text-[10px] text-muted ml-auto">Sets realistic drop-off / ready times for customers</span>
+          </div>
+          <div className="grid grid-cols-2 gap-3">
+            <div><label className="text-[10px] font-black uppercase tracking-widest text-muted block mb-1">Parts lead (days)</label><Input type="number" value={String(cap.parts_lead_days)} onChange={e => setCap({ ...cap, parts_lead_days: parseInt(e.target.value) || 0 })} className="bg-background text-foreground" /></div>
+          </div>
+          <div className="pt-3 mt-1 border-t border-border">
+            <p className="text-[11px] font-black uppercase tracking-widest text-torqued-red mb-2">Cancellation Policy</p>
+            <div className="grid grid-cols-2 gap-3">
+              <div><label className="text-[10px] font-black uppercase tracking-widest text-muted block mb-1">Free-cancel notice (hrs)</label><Input type="number" value={String(cap.cancellation_notice_hours)} onChange={e => setCap({ ...cap, cancellation_notice_hours: parseInt(e.target.value) || 0 })} className="bg-background text-foreground" /></div>
+              <div><label className="text-[10px] font-black uppercase tracking-widest text-muted block mb-1">Late-cancel refund (%)</label><Input type="number" value={String(cap.cancellation_partial_refund_pct)} onChange={e => setCap({ ...cap, cancellation_partial_refund_pct: Math.max(0, Math.min(100, parseInt(e.target.value) || 0)) })} className="bg-background text-foreground" /></div>
+            </div>
+            <p className="text-xs text-muted mt-2">Cancel with at least this many hours of <strong>open</strong> notice (weekends &amp; public holidays don't count) → full refund. Less notice → the customer is refunded this percentage.</p>
+          </div>
+          <p className="text-xs text-muted">Quick jobs (oil, WOF) → next business day. Jobs needing parts (cambelt, rotors) → drop-off after your parts lead time. Daily capacity is driven by your <strong>Staff Roster</strong> in the Calendar.</p>
+          <div className="flex items-center gap-3">
+            <Button className="bg-torqued-red text-white" disabled={capSaving} onClick={async () => {
+              if (!user) return;
+              setCapSaving(true); setCapSaveStatus('idle'); setCapSaveError(null);
+              try {
+                const r = await fetch('/api/mechanic/save-onboarding', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ mechanicId: user.id, fields: cap }) });
+                const d = await r.json();
+                if (!r.ok) { setCapSaveStatus('error'); setCapSaveError(d.error || 'Could not save. Please try again.'); return; }
+                setCapSaveStatus('saved');
+                setTimeout(() => setCapSaveStatus('idle'), 3000);
+              } catch { setCapSaveStatus('error'); setCapSaveError('Connection error. Please try again.'); }
+              finally { setCapSaving(false); }
+            }}>{capSaving ? 'Saving…' : 'Save Capacity'}</Button>
+            {capSaveStatus === 'saved' && <span className="text-xs text-emerald-600 dark:text-emerald-400 font-bold">✓ Saved</span>}
+            {capSaveStatus === 'error' && <span className="text-xs text-torqued-red font-bold">{capSaveError}</span>}
+          </div>
+        </Card>
+
+        <div className="space-y-2">
+          <Button fullWidth size="lg" className="h-16 text-lg bg-torqued-red text-white" onClick={handleSaveProfile}>Save Profile Updates</Button>
+          {profileSaveStatus === 'saved' && <p className="text-xs text-emerald-600 font-bold text-center">✓ Profile saved</p>}
+          {profileSaveStatus === 'error' && <p className="text-xs text-torqued-red font-bold text-center">{profileSaveError}</p>}
+        </div>
       </div>
     </div>
   );
 
   const renderCalendar = () => (
     <div className="space-y-6">
-      {/* Capacity settings — drive customer turnaround estimates */}
-      <Card className="p-6 space-y-4">
-        <div className="flex items-center gap-2 border-b border-black/5 pb-4">
-          <CalendarIcon size={20} className="text-torqued-red" />
-          <h3 className="text-xl">Availability & Capacity</h3>
-          <span className="text-[10px] text-muted ml-auto">Sets realistic drop-off / ready times for customers</span>
-        </div>
-        <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
-          <div><label className="text-[10px] font-black uppercase tracking-widest text-muted block mb-1">Technicians</label><Input type="number" value={String(cap.technicians)} onChange={e => setCap({ ...cap, technicians: parseInt(e.target.value) || 1 })} className="bg-background text-foreground" /></div>
-          <div><label className="text-[10px] font-black uppercase tracking-widest text-muted block mb-1">Parts lead (days)</label><Input type="number" value={String(cap.parts_lead_days)} onChange={e => setCap({ ...cap, parts_lead_days: parseInt(e.target.value) || 0 })} className="bg-background text-foreground" /></div>
-          <div><label className="text-[10px] font-black uppercase tracking-widest text-muted block mb-1">Labour $/hr</label><Input type="number" value={String(cap.labour_rate)} onChange={e => setCap({ ...cap, labour_rate: parseFloat(e.target.value) || 0 })} className="bg-background text-foreground" /></div>
-        </div>
-        <div className="pt-3 mt-1 border-t border-border">
-          <p className="text-[11px] font-black uppercase tracking-widest text-torqued-red mb-2">Cancellation Policy</p>
-          <div className="grid grid-cols-2 gap-3">
-            <div><label className="text-[10px] font-black uppercase tracking-widest text-muted block mb-1">Free-cancel notice (hrs)</label><Input type="number" value={String(cap.cancellation_notice_hours)} onChange={e => setCap({ ...cap, cancellation_notice_hours: parseInt(e.target.value) || 0 })} className="bg-background text-foreground" /></div>
-            <div><label className="text-[10px] font-black uppercase tracking-widest text-muted block mb-1">Late-cancel refund (%)</label><Input type="number" value={String(cap.cancellation_partial_refund_pct)} onChange={e => setCap({ ...cap, cancellation_partial_refund_pct: Math.max(0, Math.min(100, parseInt(e.target.value) || 0)) })} className="bg-background text-foreground" /></div>
-          </div>
-          <p className="text-xs text-muted mt-2">Cancel with at least this many hours of <strong>open</strong> notice (weekends &amp; public holidays don't count) → full refund. Less notice → the customer is refunded this percentage.</p>
-        </div>
-        <p className="text-xs text-muted">Quick jobs (oil, WOF) → next business day. Jobs needing parts (cambelt, rotors) → drop-off after your parts lead time. More technicians = faster turnaround on big jobs.</p>
-        <Button className="bg-torqued-red text-white" disabled={capSaving} onClick={async () => {
-          if (!user) return;
-          setCapSaving(true);
-          try {
-            await fetch('/api/mechanic/save-onboarding', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ mechanicId: user.id, fields: cap }) });
-          } finally { setCapSaving(false); }
-        }}>{capSaving ? 'Saving…' : 'Save Capacity'}</Button>
-      </Card>
+      {/* Staff Roster */}
+      {(() => {
+        const weekDates = [...Array(7)].map((_, i) => {
+          const d = new Date(rosterWeekStart + 'T00:00:00'); d.setDate(d.getDate() + i);
+          return localISO(d);
+        });
+        const dayLabel = (iso: string) => new Date(iso + 'T00:00:00').toLocaleDateString('en-NZ', { weekday: 'short', day: 'numeric', month: 'short' });
+        const shiftsFor = (staffId: string, date: string) => rosterShifts.filter(s => s.staff_id === staffId && s.shift_date === date);
+        const onCountFor = (date: string) => new Set(rosterShifts.filter(s => s.shift_date === date).map(s => s.staff_id)).size;
+        const shiftWeek = (s: RosterShift) => weekDates.includes(s.shift_date);
+
+        const printRoster = () => {
+          const rows = rosterStaff.map(st => {
+            const cells = weekDates.map(d => {
+              const sh = shiftsFor(st.id, d);
+              return `<td style="border:1px solid #ccc;padding:6px;font-size:11px;vertical-align:top">${sh.map(x => `${x.start_time.slice(0,5)}–${x.end_time.slice(0,5)}${x.break_start ? `<br><span style="color:#999">break ${x.break_start.slice(0,5)}–${(x.break_end||'').slice(0,5)}</span>` : ''}`).join('<br>') || '—'}</td>`;
+            }).join('');
+            return `<tr><td style="border:1px solid #ccc;padding:6px;font-weight:bold;font-size:11px">${st.name}${st.role ? `<br><span style="color:#999;font-weight:normal">${st.role}</span>` : ''}</td>${cells}</tr>`;
+          }).join('');
+          const head = weekDates.map(d => `<th style="border:1px solid #ccc;padding:6px;font-size:11px;background:#f5f5f5">${dayLabel(d)}<br><span style="color:#777;font-weight:normal">${onCountFor(d)} on</span></th>`).join('');
+          const w = window.open('', '_blank');
+          if (!w) return;
+          w.document.write(`<html><head><title>Roster — week of ${dayLabel(weekDates[0])}</title></head><body style="font-family:Arial,sans-serif"><h2>${profileData.name || 'Workshop'} — Staff Roster</h2><p>Week of ${dayLabel(weekDates[0])}</p><table style="border-collapse:collapse;width:100%"><thead><tr><th style="border:1px solid #ccc;padding:6px;font-size:11px;background:#f5f5f5">Staff</th>${head}</tr></thead><tbody>${rows}</tbody></table></body></html>`);
+          w.document.close(); w.print();
+        };
+
+        return (
+          <Card className="p-6 space-y-4">
+            <div className="flex items-center gap-2 border-b border-black/5 pb-4">
+              <CalendarIcon size={20} className="text-torqued-red" />
+              <h3 className="text-xl">Staff Roster</h3>
+              <span className="text-[10px] text-muted ml-auto">Schedule who's working each day — drives daily capacity</span>
+            </div>
+
+            {/* Team members */}
+            <div className="space-y-2">
+              <p className="text-[11px] font-black uppercase tracking-widest text-muted">Team Members</p>
+              <div className="flex flex-wrap gap-2">
+                {rosterStaff.map(st => (
+                  <span key={st.id} className="inline-flex items-center gap-1.5 bg-background border border-border rounded-full pl-3 pr-1.5 py-1 text-xs font-bold">
+                    {st.name}{st.role ? <span className="text-muted font-normal">· {st.role}</span> : null}
+                    <button onClick={async () => {
+                      if (!confirm(`Remove ${st.name} and their shifts?`)) return;
+                      await fetch(`/api/mechanic/staff/${st.id}`, { method: 'DELETE' });
+                      setRosterStaff(prev => prev.filter(s => s.id !== st.id));
+                      setRosterShifts(prev => prev.filter(s => s.staff_id !== st.id));
+                    }} className="text-muted hover:text-torqued-red"><X size={12} /></button>
+                  </span>
+                ))}
+                {rosterStaff.length === 0 && <span className="text-xs text-muted">No team members yet — add your technicians below.</span>}
+              </div>
+              <div className="flex flex-wrap gap-2 pt-1">
+                <Input value={newStaffName} onChange={e => setNewStaffName(e.target.value)} placeholder="Name (e.g. Jordan)" className="bg-background text-foreground flex-1 min-w-[140px]" />
+                <Input value={newStaffRole} onChange={e => setNewStaffRole(e.target.value)} placeholder="Role (optional)" className="bg-background text-foreground flex-1 min-w-[140px]" />
+                <Button className="bg-torqued-red text-white" disabled={!user || !newStaffName.trim()} onClick={async () => {
+                  if (!user || !newStaffName.trim()) return;
+                  const r = await fetch('/api/mechanic/staff', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ mechanicId: user.id, name: newStaffName, role: newStaffRole }) });
+                  const d = await r.json();
+                  if (d.staff) { setRosterStaff(prev => [...prev, d.staff]); setNewStaffName(''); setNewStaffRole(''); }
+                  else alert(d.error || 'Could not add team member. Have you run roster-schema.sql in Supabase?');
+                }}>Add</Button>
+              </div>
+            </div>
+
+            {/* Week navigation */}
+            <div className="flex items-center justify-between pt-2 border-t border-border">
+              <div className="flex items-center gap-2">
+                <button onClick={() => setRosterWeekStart(prev => { const d = new Date(prev + 'T00:00:00'); d.setDate(d.getDate() - 7); return localISO(d); })} className="p-2 hover:bg-background rounded-full"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><polyline points="15 18 9 12 15 6"/></svg></button>
+                <span className="text-sm font-bold">Week of {dayLabel(weekDates[0])}</span>
+                <button onClick={() => setRosterWeekStart(prev => { const d = new Date(prev + 'T00:00:00'); d.setDate(d.getDate() + 7); return localISO(d); })} className="p-2 hover:bg-background rounded-full"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><polyline points="9 18 15 12 9 6"/></svg></button>
+              </div>
+              <Button variant="outline" size="sm" className="border-border text-foreground" disabled={rosterStaff.length === 0} onClick={printRoster}>🖨 Print Roster</Button>
+            </div>
+
+            {/* Roster grid */}
+            {rosterStaff.length > 0 && (
+              <div className="overflow-x-auto">
+                <table className="w-full border-collapse min-w-[640px]">
+                  <thead>
+                    <tr>
+                      <th className="border border-border p-2 text-[10px] font-black uppercase tracking-widest text-muted text-left">Staff</th>
+                      {weekDates.map(d => (
+                        <th key={d} className="border border-border p-2 text-center">
+                          <p className="text-[10px] font-bold text-foreground">{dayLabel(d)}</p>
+                          <p className="text-[9px] text-torqued-red font-black">{onCountFor(d)} on</p>
+                        </th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {rosterStaff.map(st => (
+                      <tr key={st.id}>
+                        <td className="border border-border p-2 text-xs font-bold align-top">{st.name}{st.role ? <span className="block text-[10px] text-muted font-normal">{st.role}</span> : null}</td>
+                        {weekDates.map(d => {
+                          const sh = shiftsFor(st.id, d);
+                          return (
+                            <td key={d} className="border border-border p-1 align-top cursor-pointer hover:bg-background transition-colors"
+                              onClick={() => setShiftModal({ date: d, staffId: st.id, startTime: '08:00', endTime: '17:00', breakStart: '', breakEnd: '' })}>
+                              {sh.map(x => (
+                                <div key={x.id} className="group/sh bg-emerald-400/15 border-l-2 border-emerald-500 rounded px-1.5 py-1 mb-1 text-[10px]">
+                                  <div className="flex items-center justify-between">
+                                    <span className="font-bold text-emerald-700 dark:text-emerald-400">{x.start_time.slice(0,5)}–{x.end_time.slice(0,5)}</span>
+                                    <button onClick={async (e) => { e.stopPropagation(); await fetch(`/api/mechanic/roster/shift/${x.id}`, { method: 'DELETE' }); setRosterShifts(prev => prev.filter(s => s.id !== x.id)); }} className="opacity-0 group-hover/sh:opacity-100 text-red-400 hover:text-red-600"><X size={10} /></button>
+                                  </div>
+                                  {x.break_start && <span className="text-muted">break {x.break_start.slice(0,5)}–{(x.break_end||'').slice(0,5)}</span>}
+                                </div>
+                              ))}
+                              {sh.length === 0 && <span className="text-[10px] text-muted/40 block text-center py-1">+</span>}
+                            </td>
+                          );
+                        })}
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </Card>
+        );
+      })()}
 
       <div className="flex justify-between items-center">
         <h2 className="text-3xl">Workshop Calendar</h2>
-        <div className="flex bg-white p-1 rounded-xl border border-black/5">
+        <div className="flex bg-card p-1 rounded-xl border border-border">
           {(['day', 'week', 'month'] as const).map(v => (
             <button
               key={v}
               onClick={() => setCalendarView(v)}
               className={cn(
                 "px-6 py-2 rounded-lg text-xs font-bold uppercase transition-all",
-                calendarView === v ? "bg-torqued-red text-white" : "text-black/40 hover:bg-black/5"
+                calendarView === v ? "bg-torqued-red text-white" : "text-muted hover:bg-background"
               )}
             >
               {v}
@@ -1899,20 +2397,26 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
       
       {calendarView === 'week' ? (
         <Card className="p-0 overflow-hidden border-none shadow-sm">
-          <div className="grid grid-cols-8 border-b border-black/5 bg-black/5">
-            <div className="p-4 border-r border-black/10" />
-            {['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'].map(day => (
-              <div key={day} className="px-4 py-3 text-center border-r border-black/10 last:border-0">
-                <p className="text-[10px] font-bold uppercase text-black/40">{day}</p>
-                <p className="text-lg font-bold">0{9 + ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'].indexOf(day)}</p>
-              </div>
-            ))}
+          <div className="grid grid-cols-8 border-b border-border bg-foreground/5">
+            <div className="p-4 border-r border-border" />
+            {['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'].map((day, i) => {
+              const d = new Date(rosterWeekStart + 'T00:00:00'); d.setDate(d.getDate() + i);
+              const iso = localISO(d);
+              const rosteredCount = new Set(rosterShifts.filter(s => s.shift_date === iso).map(s => s.staff_id)).size;
+              return (
+                <div key={day} className="px-4 py-3 text-center border-r border-border last:border-0">
+                  <p className="text-[10px] font-bold uppercase text-muted">{day}</p>
+                  <p className="text-lg font-bold text-foreground">{String(d.getDate()).padStart(2, '0')}</p>
+                  <p className="text-[9px] font-black text-torqued-red mt-0.5">{rosteredCount} on</p>
+                </div>
+              );
+            })}
           </div>
           <div className="grid grid-cols-8 relative h-[600px] overflow-y-auto">
             {/* Time labels column */}
-            <div className="border-r border-black/5 bg-black/5">
+            <div className="border-r border-border bg-foreground/5">
               {[8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18].map(h => (
-                <div key={h} className="h-24 px-2 py-1 text-[10px] font-bold text-black/20 text-right">
+                <div key={h} className="h-24 px-2 py-1 text-[10px] font-bold text-muted/50 text-right">
                   {h}:00
                 </div>
               ))}
@@ -1923,7 +2427,7 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
               return (
                 <div
                   key={dayIdx}
-                  className="border-r border-black/5 relative min-h-[1000px] cursor-crosshair"
+                  className="border-r border-border relative min-h-[1000px] cursor-crosshair"
                   onClick={(e) => {
                     if ((e.target as HTMLElement).closest('[data-appt]') || (e.target as HTMLElement).closest('[data-avail]')) return;
                     const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
@@ -1970,7 +2474,7 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
 
                   {/* Grid lines */}
                   {[...Array(11)].map((_, i) => (
-                    <div key={i} className="absolute w-full h-px bg-black/5" style={{ top: `${i * 96}px` }} />
+                    <div key={i} className="absolute w-full h-px bg-border" style={{ top: `${i * 96}px` }} />
                   ))}
 
                   {/* Appointments */}
@@ -2008,44 +2512,80 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
         </Card>
       ) : calendarView === 'month' ? (
         <Card className="p-0 overflow-hidden border-none shadow-sm">
-          <div className="grid grid-cols-7 border-b border-black/5 bg-black/5">
+          {/* Month navigation header */}
+          <div className="flex items-center justify-between px-6 py-4 border-b border-border bg-foreground/5">
+            <button onClick={() => setCalendarMonth(m => { const d = new Date(m.year, m.month - 1); return { year: d.getFullYear(), month: d.getMonth() }; })} className="p-2 hover:bg-card rounded-full transition-colors">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><polyline points="15 18 9 12 15 6"/></svg>
+            </button>
+            <h3 className="text-base font-black uppercase tracking-tight">
+              {new Date(calendarMonth.year, calendarMonth.month).toLocaleDateString('en-NZ', { month: 'long', year: 'numeric' })}
+            </h3>
+            <button onClick={() => setCalendarMonth(m => { const d = new Date(m.year, m.month + 1); return { year: d.getFullYear(), month: d.getMonth() }; })} className="p-2 hover:bg-card rounded-full transition-colors">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><polyline points="9 18 15 12 9 6"/></svg>
+            </button>
+          </div>
+          <div className="grid grid-cols-7 border-b border-border">
             {['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'].map(day => (
-              <div key={day} className="px-4 py-3 text-center text-[10px] font-bold uppercase text-black/40 border-r border-black/10 last:border-0">
+              <div key={day} className="px-2 py-3 text-center text-[10px] font-bold uppercase text-muted border-r border-border last:border-0">
                 {day}
               </div>
             ))}
           </div>
-          <div className="grid grid-cols-7 h-[600px]">
-            {[...Array(35)].map((_, i) => (
-              <div key={i} className="border-r border-b border-black/5 p-2 relative group hover:bg-black/5 transition-colors">
-                <span className="text-[10px] font-bold text-black/20">{i + 1}</span>
-                {appointments.filter(a => {
-                  const dayIdx = ['Mon','Tue','Wed','Thu','Fri','Sat','Sun'].indexOf(a.day);
-                  return dayIdx >= 0 && (i % 7) === dayIdx;
-                }).map(a => (
-                  <div key={a.id} className={cn("mt-1 p-1 text-white text-[8px] font-bold rounded uppercase leading-tight truncate",
-                    a.type === 'maintenance' ? 'bg-blue-500' : a.type === 'repair' ? 'bg-torqued-red' : 'bg-emerald-500')}>
-                    {a.car.split('(')[0].trim()} - {a.service.split(' ')[0]}
+          <div className="grid grid-cols-7">
+            {(() => {
+              const firstDay = new Date(calendarMonth.year, calendarMonth.month, 1);
+              const lastDay = new Date(calendarMonth.year, calendarMonth.month + 1, 0);
+              const startOffset = (firstDay.getDay() + 6) % 7; // Mon=0
+              const totalDays = lastDay.getDate();
+              const cells = startOffset + totalDays;
+              const rows = Math.ceil(cells / 7);
+              const today = new Date();
+              return [...Array(rows * 7)].map((_, i) => {
+                const dayNum = i - startOffset + 1;
+                const isValid = dayNum >= 1 && dayNum <= totalDays;
+                const cellDate = isValid ? new Date(calendarMonth.year, calendarMonth.month, dayNum) : null;
+                const isToday = cellDate && cellDate.toDateString() === today.toDateString();
+                const dayName = cellDate ? ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'][cellDate.getDay()] : null;
+                return (
+                  <div key={i} className={cn("border-r border-b border-border p-2 min-h-[80px] relative", isValid ? 'hover:bg-foreground/[0.03] transition-colors' : 'bg-foreground/[0.02]')}>
+                    {isValid && (
+                      <>
+                        <div className="flex items-center justify-between">
+                          <span className={cn("text-xs font-bold", isToday ? 'w-6 h-6 rounded-full bg-torqued-red text-white flex items-center justify-center text-[10px]' : 'text-muted')}>{dayNum}</span>
+                          {(() => {
+                            const iso = cellDate ? localISO(cellDate) : '';
+                            const n = new Set(rosterShifts.filter(s => s.shift_date === iso).map(s => s.staff_id)).size;
+                            return n > 0 ? <span className="text-[8px] font-black text-torqued-red">{n} on</span> : null;
+                          })()}
+                        </div>
+                        {appointments.filter(a => a.day === dayName).map(a => (
+                          <div key={a.id} className={cn("mt-1 p-1 text-white text-[8px] font-bold rounded uppercase leading-tight truncate",
+                            a.type === 'maintenance' ? 'bg-blue-500' : a.type === 'repair' ? 'bg-torqued-red' : 'bg-emerald-500')}>
+                            {a.car.split('(')[0].trim()}
+                          </div>
+                        ))}
+                      </>
+                    )}
                   </div>
-                ))}
-              </div>
-            ))}
+                );
+              });
+            })()}
           </div>
         </Card>
       ) : (
         <Card className="p-6 space-y-6">
-          <div className="flex gap-4 items-center justify-between border-b border-black/5 pb-4">
+          <div className="flex gap-4 items-center justify-between border-b border-border pb-4">
              <div className="flex items-center gap-4">
-                <button className="p-2 hover:bg-black/5 rounded-full"><ChevronLeft size={20} /></button>
-                <h3 className="text-xl font-bold uppercase tracking-tight">{new Date().toLocaleDateString('en-NZ', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' })}</h3>
-                <button className="p-2 hover:bg-black/5 rounded-full"><ChevronRight size={20} /></button>
+                <button className="p-2 hover:bg-card rounded-full text-foreground"><ChevronLeft size={20} /></button>
+                <h3 className="text-xl font-bold uppercase tracking-tight text-foreground">{new Date().toLocaleDateString('en-NZ', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' })}</h3>
+                <button className="p-2 hover:bg-card rounded-full text-foreground"><ChevronRight size={20} /></button>
              </div>
              <Button variant="outline" size="sm">Today</Button>
           </div>
           <div className="space-y-4">
             {appointments.filter(a => a.day === 'Mon').map(appt => (
-              <div key={appt.id} className="flex gap-6 items-start p-4 hover:bg-black/5 rounded-2xl transition-all group">
-                <div className="w-16 text-sm font-bold text-black/40 pt-1">{appt.time}</div>
+              <div key={appt.id} className="flex gap-6 items-start p-4 hover:bg-foreground/[0.03] rounded-2xl transition-all group">
+                <div className="w-16 text-sm font-bold text-muted pt-1">{appt.time}</div>
                 <div className={cn(
                   "w-1 h-12 rounded-full",
                   appt.type === 'maintenance' ? "bg-blue-500" : appt.type === 'repair' ? "bg-torqued-red" : "bg-emerald-500"
@@ -2053,12 +2593,12 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                 <div className="flex-1">
                   <div className="flex justify-between items-start">
                     <div>
-                      <h4 className="text-lg font-bold">{appt.car}</h4>
-                      <p className="text-sm text-black/60">{appt.service}</p>
+                      <h4 className="text-lg font-bold text-foreground">{appt.car}</h4>
+                      <p className="text-sm text-muted">{appt.service}</p>
                     </div>
                     <span className={cn(
                       "text-[10px] font-bold uppercase px-2 py-0.5 rounded",
-                      appt.status === 'In Progress' ? "bg-torqued-red text-white" : "bg-black/5 text-black/40"
+                      appt.status === 'In Progress' ? "bg-torqued-red text-white" : "bg-foreground/5 text-muted"
                     )}>
                       {appt.status}
                     </span>
@@ -2120,22 +2660,30 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
               </div>
             ))}
           </div>
-          <Button
-            disabled={ohSaving || !user}
-            className="bg-torqued-red text-white"
-            onClick={async () => {
-              if (!user) return;
-              setOhSaving(true);
-              try {
-                const r = await fetch('/api/mechanic/availability/replace', {
-                  method: 'POST', headers: { 'Content-Type': 'application/json' },
-                  body: JSON.stringify({ mechanicId: user.id, slots: operatingHours.filter(o => o.enabled).map(o => ({ day_of_week: o.dayOfWeek, start_time: o.startTime, end_time: o.endTime })) }),
-                });
-                const d = await r.json();
-                if (d.slots) setMechAvailability(d.slots);
-              } finally { setOhSaving(false); }
-            }}
-          >{ohSaving ? 'Saving…' : 'Save Operating Hours'}</Button>
+          <div className="flex items-center gap-3">
+            <Button
+              disabled={ohSaving || !user}
+              className="bg-torqued-red text-white"
+              onClick={async () => {
+                if (!user) return;
+                setOhSaving(true); setOhStatus('idle'); setOhError(null);
+                try {
+                  const r = await fetch('/api/mechanic/availability/replace', {
+                    method: 'POST', headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ mechanicId: user.id, slots: operatingHours.filter(o => o.enabled).map(o => ({ day_of_week: o.dayOfWeek, start_time: o.startTime, end_time: o.endTime })) }),
+                  });
+                  const d = await r.json();
+                  if (!r.ok) { setOhStatus('error'); setOhError(d.error || 'Could not save hours. Please try again.'); return; }
+                  if (d.slots) setMechAvailability(d.slots);
+                  setOhStatus('saved');
+                  setTimeout(() => setOhStatus('idle'), 3000);
+                } catch { setOhStatus('error'); setOhError('Connection error. Please try again.'); }
+                finally { setOhSaving(false); }
+              }}
+            >{ohSaving ? 'Saving…' : 'Save Operating Hours'}</Button>
+            {ohStatus === 'saved' && <span className="text-xs text-emerald-600 dark:text-emerald-400 font-bold">✓ Saved</span>}
+            {ohStatus === 'error' && <span className="text-xs text-torqued-red font-bold">{ohError}</span>}
+          </div>
         </Card>
       )}
 
@@ -2191,22 +2739,85 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                   className="bg-amber-500 text-white shrink-0 flex items-center gap-1"
                   onClick={async () => {
                     if (!user || !newClosedPeriod.startDate) return;
-                    setClosedSaving(true);
+                    setClosedSaving(true); setClosedError(null); setClosedSuccess(false);
                     try {
                       const r = await fetch('/api/mechanic/closed-periods', {
                         method: 'POST', headers: { 'Content-Type': 'application/json' },
                         body: JSON.stringify({ mechanicId: user.id, startDate: newClosedPeriod.startDate, endDate: newClosedPeriod.endDate || newClosedPeriod.startDate, reason: newClosedPeriod.reason }),
                       });
                       const d = await r.json();
-                      if (d.period) { setClosedPeriods(prev => [...prev, d.period]); setNewClosedPeriod({ startDate: '', endDate: '', reason: '' }); }
-                    } finally { setClosedSaving(false); }
+                      if (!r.ok) { setClosedError(d.error || 'Could not save. Please try again.'); return; }
+                      if (d.period) {
+                        setClosedPeriods(prev => [...prev, d.period]);
+                        setNewClosedPeriod({ startDate: '', endDate: '', reason: '' });
+                        setClosedSuccess(true);
+                        setTimeout(() => setClosedSuccess(false), 3000);
+                      } else {
+                        setClosedError('Unexpected response from server.');
+                      }
+                    } catch { setClosedError('Connection error. Please try again.'); }
+                    finally { setClosedSaving(false); }
                   }}
                 >{closedSaving ? '…' : <><Plus size={12} className="mr-1 inline" />Block</>}</Button>
               </div>
             </div>
           </div>
+          {closedError && <p className="text-xs text-torqued-red font-bold">{closedError}</p>}
+          {closedSuccess && <p className="text-xs text-emerald-600 dark:text-emerald-400 font-bold">✓ Period blocked — customers won't be able to book these dates.</p>}
           <p className="text-xs text-muted">Customers won't be able to book drop-offs during blocked periods. NZ public holidays are automatically excluded from the cancellation notice window.</p>
         </Card>
+      )}
+
+      {/* Roster Shift Modal */}
+      {shiftModal && (
+        <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-50 flex items-center justify-center p-4" onClick={() => setShiftModal(null)}>
+          <div className="bg-background border border-border rounded-2xl p-6 shadow-2xl w-full max-w-sm space-y-4" onClick={e => e.stopPropagation()}>
+            <div className="flex items-center justify-between">
+              <h3 className="text-base font-black text-foreground">Roster Shift</h3>
+              <button onClick={() => setShiftModal(null)} className="text-muted hover:text-foreground"><X size={16} /></button>
+            </div>
+            <div>
+              <label className="text-[10px] font-black uppercase tracking-widest text-muted block mb-1">Staff Member</label>
+              <select value={shiftModal.staffId} onChange={e => setShiftModal(m => m ? { ...m, staffId: e.target.value } : m)} className="w-full bg-background border border-border rounded-xl px-3 py-2 text-sm text-foreground focus:outline-none focus:border-torqued-red">
+                {rosterStaff.map(st => <option key={st.id} value={st.id}>{st.name}{st.role ? ` · ${st.role}` : ''}</option>)}
+              </select>
+            </div>
+            <p className="text-xs text-muted">{new Date(shiftModal.date + 'T00:00:00').toLocaleDateString('en-NZ', { weekday: 'long', day: 'numeric', month: 'long' })}</p>
+            <div className="grid grid-cols-2 gap-3">
+              <div>
+                <label className="text-[10px] font-black uppercase tracking-widest text-muted block mb-1">Start</label>
+                <input type="time" value={shiftModal.startTime} onChange={e => setShiftModal(m => m ? { ...m, startTime: e.target.value } : m)} className="w-full bg-background border border-border rounded-xl px-3 py-2 text-sm text-foreground focus:outline-none focus:border-torqued-red" />
+              </div>
+              <div>
+                <label className="text-[10px] font-black uppercase tracking-widest text-muted block mb-1">End</label>
+                <input type="time" value={shiftModal.endTime} onChange={e => setShiftModal(m => m ? { ...m, endTime: e.target.value } : m)} className="w-full bg-background border border-border rounded-xl px-3 py-2 text-sm text-foreground focus:outline-none focus:border-torqued-red" />
+              </div>
+            </div>
+            <div className="grid grid-cols-2 gap-3">
+              <div>
+                <label className="text-[10px] font-black uppercase tracking-widest text-muted block mb-1">Break from <span className="text-muted/50 normal-case">(opt)</span></label>
+                <input type="time" value={shiftModal.breakStart} onChange={e => setShiftModal(m => m ? { ...m, breakStart: e.target.value } : m)} className="w-full bg-background border border-border rounded-xl px-3 py-2 text-sm text-foreground focus:outline-none focus:border-torqued-red" />
+              </div>
+              <div>
+                <label className="text-[10px] font-black uppercase tracking-widest text-muted block mb-1">Break to <span className="text-muted/50 normal-case">(opt)</span></label>
+                <input type="time" value={shiftModal.breakEnd} onChange={e => setShiftModal(m => m ? { ...m, breakEnd: e.target.value } : m)} className="w-full bg-background border border-border rounded-xl px-3 py-2 text-sm text-foreground focus:outline-none focus:border-torqued-red" />
+              </div>
+            </div>
+            <div className="flex gap-2 justify-end">
+              <Button variant="ghost" onClick={() => setShiftModal(null)}>Cancel</Button>
+              <Button className="bg-emerald-500 text-white" disabled={!user || !shiftModal.staffId} onClick={async () => {
+                if (!user || !shiftModal) return;
+                const r = await fetch('/api/mechanic/roster/shift', {
+                  method: 'POST', headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify({ mechanicId: user.id, staffId: shiftModal.staffId, shiftDate: shiftModal.date, startTime: shiftModal.startTime, endTime: shiftModal.endTime, breakStart: shiftModal.breakStart || null, breakEnd: shiftModal.breakEnd || null }),
+                });
+                const d = await r.json();
+                if (d.shift) { setRosterShifts(prev => [...prev, d.shift]); setShiftModal(null); }
+                else alert(d.error || 'Could not save shift.');
+              }}>Roster On</Button>
+            </div>
+          </div>
+        </div>
       )}
 
       {/* Add Availability Block Modal (week view click) */}
@@ -2638,7 +3249,14 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
       {list.map((j: any) => {
         const jobShape = {
           id: j.id, reg: j.vehicle_rego || '', customerName: j.customer_name,
+          email: j.email || j.customer_email || '',
+          phone: j.customer_phone || '',
           model: j.customer_name ? `${j.vehicle_rego} — ${j.customer_name}` : j.vehicle_rego || 'Vehicle',
+          vehicleLabel: j.vehicle_label || j.vehicle_rego || '',
+          mileage: j.vehicle_mileage || null,
+          year: j.vehicle_year || null,
+          make: j.vehicle_make || '',
+          vehicleModel: j.vehicle_model || '',
           services: (j.service_ids || []).map((id: string) => SERVICES.find(s => s.id === id)?.name || id),
           suggestedQuote: parseFloat(j.total_price) || 0,
           quoteItems: j.quote_items || null,
@@ -2646,23 +3264,69 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
         return (
           <Card key={j.id} className="p-4 sm:p-5 bg-card border-border space-y-3">
             <div className="flex items-start justify-between gap-3">
-              <div>
-                <p className="font-black text-foreground flex items-center gap-2">{j.vehicle_rego || '—'} {j.customer_name ? <span className="text-muted font-medium">· {j.customer_name}</span> : null}
-                  {j.is_cold_quote && <span className="text-[9px] uppercase font-black tracking-widest bg-torqued-red/10 text-torqued-red px-1.5 py-0.5 rounded">Cold quote</span>}</p>
-                <p className="text-xs text-muted">{jobShape.services.join(', ') || '—'}</p>
-                <p className="text-[11px] text-muted mt-1">
-                  {j.date || '—'} · <span className="uppercase font-bold">{j.status}</span> · {j.payment_status === 'confirmed' ? 'Paid' : (j.payment_status || 'unpaid')}
+              <div className="space-y-1 min-w-0">
+                <div className="flex items-center gap-2 flex-wrap">
+                  {j.vehicle_rego && <span className="torqued-badge text-[10px]">{j.vehicle_rego}</span>}
+                  {j.is_cold_quote && <span className="text-[9px] uppercase font-black tracking-widest bg-torqued-red/10 text-torqued-red px-1.5 py-0.5 rounded">Cold quote</span>}
+                  {j.transaction_id && <span className="text-[9px] uppercase font-black tracking-widest bg-amber-500/10 text-amber-500 px-1.5 py-0.5 rounded">Linked job</span>}
+                </div>
+                {(() => {
+                  const custName = j.customer_name && j.customer_name !== j.vehicle_rego ? j.customer_name : null;
+                  const carDesc = j.vehicle_label || (j.vehicle_make ? `${j.vehicle_year ? j.vehicle_year + ' ' : ''}${j.vehicle_make}${j.vehicle_model ? ' ' + j.vehicle_model : ''}`.trim() : null);
+                  return (
+                    <div>
+                      <p className="font-black text-foreground">{custName || j.vehicle_rego || 'Unknown Vehicle'}</p>
+                      {carDesc && <p className="text-xs text-muted">{carDesc}</p>}
+                      {custName && (j.email || j.customer_email || j.customer_phone) && (
+                        <p className="text-[11px] text-muted">{j.email || j.customer_email || ''}{j.customer_phone ? ` · ${j.customer_phone}` : ''}</p>
+                      )}
+                    </div>
+                  );
+                })()}
+                <p className="text-xs text-muted">{j.quote_items ? jobSummaryTitle(j) : (jobShape.services.join(', ') || jobSummaryTitle(j))}</p>
+                <p className="text-[11px] text-muted flex items-center gap-1">
+                  {j.date || '—'} {j.status === 'completed' && <span className="text-emerald-600 font-bold">✓</span>} · <span className="uppercase font-bold">{j.status}</span> · {j.payment_status === 'confirmed' ? 'Paid' : (j.payment_status || 'unpaid')}
                   {j.mileage_in ? ` · in ${Number(j.mileage_in).toLocaleString()}km` : ''}{j.mileage_out ? ` · out ${Number(j.mileage_out).toLocaleString()}km` : ''}
                 </p>
-                {j.description && <p className="text-xs text-muted italic mt-1">“{j.description}”</p>}
+                {j.description && j.description !== j.customer_name && <p className="text-xs text-muted italic mt-0.5">&ldquo;{j.description}&rdquo;</p>}
               </div>
-              <span className="font-black text-torqued-red shrink-0">{formatCurrency(parseFloat(j.quoted_price ?? j.total_price) || 0)}</span>
+              <div className="text-right shrink-0 space-y-1">
+                <span className="font-black text-torqued-red block">{formatCurrency(parseFloat(j.quoted_price ?? j.total_price) || 0)}</span>
+                {(j.customer_name || j.email) && (
+                  <button onClick={() => { setActiveTab('customers'); setCustSearch(j.customer_name || j.email || ''); }}
+                    className="text-[10px] text-torqued-red/70 hover:text-torqued-red underline underline-offset-2">View profile →</button>
+                )}
+              </div>
             </div>
             <div className="flex flex-wrap gap-2">
+              {(j.service_ids || []).includes('ppi') && j.status !== 'completed' && (
+                <Button size="sm" className="bg-torqued-red text-white" onClick={() => {
+                  setPpiPreloadRego(j.vehicle_rego || '');
+                  setPpiPreloadName(j.customer_name && j.customer_name !== j.vehicle_rego ? j.customer_name : '');
+                  setPpiPreloadEmail(j.email || j.customer_email || '');
+                  setPpiPreloadMileage(j.mileage_in ? String(j.mileage_in) : '');
+                  setActiveTab('health'); setHealthSubtab('ppi');
+                }}>Start PPI</Button>
+              )}
+              {(j.service_ids || []).includes('ppi') && j.status === 'completed' && (
+                <Button size="sm" variant="outline" className="text-foreground border-border hover:bg-background" onClick={() => {
+                  setPpiPreloadRego(j.vehicle_rego || '');
+                  setPpiPreloadName(j.customer_name && j.customer_name !== j.vehicle_rego ? j.customer_name : '');
+                  setPpiPreloadEmail(j.email || j.customer_email || '');
+                  setPpiPreloadMileage(j.mileage_out ? String(j.mileage_out) : j.mileage_in ? String(j.mileage_in) : '');
+                  setActiveTab('health'); setHealthSubtab('ppi');
+                }}>Download PPI Report</Button>
+              )}
               <Button size="sm" variant="outline" className="text-foreground border-border hover:bg-background" onClick={() => openQuoteEditor(jobShape)}>Edit / Build Quote</Button>
               <Button size="sm" variant="outline" className="text-foreground border-border hover:bg-background" onClick={() => messageCustomer(jobShape)}>Message Customer</Button>
+              {j.status === 'in_progress' && (
+                <Button size="sm" variant="outline" className="text-blue-500 border-border hover:bg-background" onClick={() => { setRescheduleModal({ job: jobShape }); setRescheduleDate(''); setRescheduleComment(''); }}>Request Reschedule</Button>
+              )}
               <Button size="sm" variant="outline" className="text-foreground border-border hover:bg-background" onClick={() => recordMileage(jobShape, 'out')}>Check-out km</Button>
               <Button size="sm" variant="outline" className="text-emerald-600 border-border hover:bg-background" onClick={() => exportInvoice(j)}>{j.payment_status === 'confirmed' ? 'Export invoice' : 'Download PDF'}</Button>
+              {j.status === 'completed' && j.payment_status === 'confirmed' && (
+                <Button size="sm" variant="outline" className="text-amber-500 border-border hover:bg-background" onClick={() => { setRefundModal({ job: j }); setRefundAmount(''); setRefundReason(''); }}>Refund</Button>
+              )}
               <Button size="sm" variant="outline" className="text-foreground border-border hover:bg-background" onClick={() => jobNotes[j.id]?.open ? setJobNotes(p => ({...p, [j.id]: {...p[j.id], open: false}})) : openJobNotes(j.id)}>
                 📝 Notes {(jobNotes[j.id]?.notes?.length ?? 0) > 0 ? `(${jobNotes[j.id]!.notes.length})` : ''}
               </Button>
@@ -2733,10 +3397,13 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
 
   const renderMyJobs = () => {
     const isToday = (d?: string) => d && new Date(d).toDateString() === new Date().toDateString();
-    const accepted = pastJobs.filter((j: any) => j.status === 'in_progress');
+    // A job is "active" once it's accepted OR paid (incl. paid cold quotes) — but not completed.
+    const isActiveJob = (j: any) => j.status !== 'completed' && (j.status === 'in_progress' || j.status === 'booked' || j.payment_status === 'confirmed');
+    const accepted = pastJobs.filter(isActiveJob);
     const todayJobs = accepted.filter((j: any) => isToday(j.date));
     const upcoming = accepted.filter((j: any) => j.date && new Date(j.date).getTime() > Date.now() && !isToday(j.date));
-    const coldQuotes = pastJobs.filter((j: any) => j.is_cold_quote);
+    // Cold quotes still awaiting payment/acceptance only — paid ones move into the active lists above.
+    const coldQuotes = pastJobs.filter((j: any) => j.is_cold_quote && !isActiveJob(j) && j.status !== 'completed');
     const history = pastJobs.filter((j: any) => j.status === 'completed');
     const subtabs = [
       { id: 'accept' as const, label: 'To accept', n: incomingJobs.length },
@@ -2786,12 +3453,48 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
             <p className="font-bold text-foreground">{c.name || '—'}</p>
             <p className="text-xs text-muted">{c.email || ''}{c.phone ? ` · ${c.phone}` : ''}{c.regos?.length ? ` · ${c.regos.join(', ')}` : ''}</p>
           </div>
-          <Button size="sm" variant="outline" className="text-foreground border-border" onClick={() => {
-            setColdForm({ customerName: c.name || '', email: c.email || '', phone: c.phone || '', rego: c.regos?.[0] || '', make: '', model: '', description: '', date: '' });
-            setShowColdQuote(true);
-          }}>New quote</Button>
+          <div className="flex gap-2 shrink-0">
+            <Button size="sm" variant="outline" className="text-foreground border-border" onClick={() => openEditCustomer(c)}>Edit</Button>
+            <Button size="sm" variant="outline" className="text-foreground border-border" onClick={() => {
+              setColdForm({ customerName: c.name || '', email: c.email || '', phone: c.phone || '', rego: c.regos?.[0] || '', make: '', model: '', description: '', date: '' });
+              setShowColdQuote(true);
+            }}>New quote</Button>
+          </div>
         </Card>
       ))}
+
+      {editCustomer && (
+        <div className="fixed inset-0 z-[200] flex items-center justify-center p-4 bg-foreground/30 backdrop-blur-sm" onClick={() => !editCustBusy && setEditCustomer(null)}>
+          <div onClick={e => e.stopPropagation()} className="bg-background border border-border rounded-2xl p-6 w-full max-w-md space-y-5 shadow-2xl">
+            <div className="flex justify-between items-center">
+              <h3 className="text-lg font-black text-foreground">Edit customer</h3>
+              <button onClick={() => setEditCustomer(null)} className="text-muted hover:text-foreground text-xl">✕</button>
+            </div>
+            {editCustomer.regos?.length ? <p className="text-xs text-muted">Vehicles: {editCustomer.regos.join(', ')}</p> : null}
+            <div className="space-y-3">
+              <div>
+                <label className="text-[10px] font-black uppercase tracking-widest text-muted block mb-1">Name</label>
+                <input value={editCustForm.name} onChange={e => setEditCustForm(f => ({ ...f, name: e.target.value }))} placeholder="Customer name"
+                  className="w-full bg-card border border-border rounded-xl px-3 py-2.5 text-sm text-foreground focus:outline-none focus:border-torqued-red" />
+              </div>
+              <div>
+                <label className="text-[10px] font-black uppercase tracking-widest text-muted block mb-1">Email</label>
+                <input type="email" value={editCustForm.email} onChange={e => setEditCustForm(f => ({ ...f, email: e.target.value }))} placeholder="email@example.com"
+                  className="w-full bg-card border border-border rounded-xl px-3 py-2.5 text-sm text-foreground focus:outline-none focus:border-torqued-red" />
+              </div>
+              <div>
+                <label className="text-[10px] font-black uppercase tracking-widest text-muted block mb-1">Phone</label>
+                <input value={editCustForm.phone} onChange={e => setEditCustForm(f => ({ ...f, phone: e.target.value }))} placeholder="021 234 5678"
+                  className="w-full bg-card border border-border rounded-xl px-3 py-2.5 text-sm text-foreground focus:outline-none focus:border-torqued-red" />
+              </div>
+            </div>
+            <div className="flex gap-3">
+              <Button variant="outline" className="flex-1 border-border text-foreground" disabled={editCustBusy} onClick={() => setEditCustomer(null)}>Cancel</Button>
+              <Button className="flex-1 bg-torqued-red text-white" disabled={editCustBusy || !editCustForm.name.trim()} onClick={saveEditCustomer}>{editCustBusy ? 'Saving…' : 'Save changes'}</Button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 
@@ -2920,7 +3623,215 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
     );
   };
 
-  const renderVehicleHealth = () => <VehicleHealthLookup mechanicId={user?.id} />;
+  const renderVehicleHealth = () => (
+    <div className="space-y-5">
+      <div className="flex gap-2">
+        <button onClick={() => setHealthSubtab('health')}
+          className={cn('px-4 h-9 rounded-xl text-xs font-black uppercase tracking-wider transition-all', healthSubtab === 'health' ? 'bg-torqued-red text-white' : 'bg-card border border-border text-muted hover:text-foreground')}>Health Lookup</button>
+        <button onClick={() => setHealthSubtab('ppi')}
+          className={cn('px-4 h-9 rounded-xl text-xs font-black uppercase tracking-wider transition-all', healthSubtab === 'ppi' ? 'bg-torqued-red text-white' : 'bg-card border border-border text-muted hover:text-foreground')}>Pre-Purchase Inspection</button>
+      </div>
+      {healthSubtab === 'health'
+        ? <VehicleHealthLookup mechanicId={user?.id} />
+        : <PrePurchaseInspection key={ppiPreloadRego || 'ppi'} mechanicId={user?.id} workshopName={profileData.name} workshopAddress={profileData.address} initialRego={ppiPreloadRego || undefined} initialCustomerName={ppiPreloadName || undefined} initialCustomerEmail={ppiPreloadEmail || undefined} initialMileage={ppiPreloadMileage || undefined} />}
+    </div>
+  );
+
+  // ── Contract PDF generation ───────────────────────────────────────────────────
+  const generateContractPdf = (signerTitle: string): string => {
+    const doc = new jsPDF({ unit: 'mm', format: 'a4' });
+    const pageW = 210;
+    const margin = 15;
+    const contentW = pageW - margin * 2;
+    let y = 20;
+
+    const addPage = () => { doc.addPage(); y = 20; };
+    const checkY = (needed = 10) => { if (y + needed > 277) addPage(); };
+
+    const writeText = (text: string, size: number, bold = false, color: [number, number, number] = [0, 0, 0]) => {
+      doc.setFontSize(size);
+      doc.setFont('helvetica', bold ? 'bold' : 'normal');
+      doc.setTextColor(...color);
+      const lines = doc.splitTextToSize(text, contentW);
+      checkY(lines.length * (size * 0.4));
+      doc.text(lines, margin, y);
+      y += lines.length * (size * 0.4) + 2;
+    };
+
+    const writePara = (text: string) => {
+      doc.setFontSize(9);
+      doc.setFont('helvetica', 'normal');
+      doc.setTextColor(30, 30, 30);
+      const lines = doc.splitTextToSize(text, contentW);
+      checkY(lines.length * 4);
+      doc.text(lines, margin, y);
+      y += lines.length * 4 + 3;
+    };
+
+    const writeSection = (title: string) => {
+      checkY(14);
+      y += 4;
+      doc.setFontSize(11);
+      doc.setFont('helvetica', 'bold');
+      doc.setTextColor(255, 24, 0);
+      doc.text(title, margin, y);
+      y += 6;
+      doc.setTextColor(0, 0, 0);
+    };
+
+    const today = new Date();
+    const months = ['January','February','March','April','May','June','July','August','September','October','November','December'];
+    const todayStr = `${today.getDate()} ${months[today.getMonth()]} ${today.getFullYear()}`;
+    const workshopName = ob.legal_name || ob.name || '[Workshop]';
+    const tradingName = ob.name || '[Trading Name]';
+    const address = ob.address ? `${ob.address}, New Zealand` : '[Workshop Address], New Zealand';
+    const nzbn = ob.nzbn || '[NZBN]';
+    const gst = (ob as any).gst_number || 'Not registered';
+    const signerName = ob.owner_name || '[Signer Name]';
+    const title = signerTitle || 'Owner';
+    const now = new Date();
+    const h = now.getHours();
+    const ampm = h >= 12 ? 'PM' : 'AM';
+    const hh = String(h > 12 ? h - 12 : h === 0 ? 12 : h).padStart(2, '0');
+    const mm = String(now.getMinutes()).padStart(2, '0');
+    const dd = String(now.getDate()).padStart(2, '0');
+    const mo = String(now.getMonth() + 1).padStart(2, '0');
+    const yyyy = now.getFullYear();
+    const mechSignedAt = `${dd}/${mo}/${yyyy} at ${hh}:${mm} ${ampm}`;
+
+    // Header
+    doc.setFontSize(16);
+    doc.setFont('helvetica', 'bold');
+    doc.setTextColor(21, 4, 2);
+    doc.text('TORQUED', margin, 12);
+    doc.setFontSize(8);
+    doc.setFont('helvetica', 'normal');
+    doc.setTextColor(255, 24, 0);
+    doc.text('NZ MECHANIC PLATFORM', margin + 30, 12);
+    doc.setFillColor(255, 24, 0);
+    doc.rect(0, 18, 210, 2, 'F');
+    y = 28;
+
+    writeText('TORQUED NZ MECHANIC PLATFORM AGREEMENT', 14, true, [21, 4, 2]);
+    y += 2;
+    writeText(`Date: ${todayStr}`, 9, false, [80, 80, 80]);
+    y += 3;
+
+    // Parties
+    writeSection('PARTIES');
+    writePara(`This Mechanic Platform Agreement ("Agreement") is entered into as of ${todayStr} between:`);
+    writePara(`Platform Operator: Torqued Limited, a company incorporated in New Zealand ("Torqued"), operating the Torqued platform at torqued-psi.vercel.app.`);
+    writePara(`Workshop / Service Partner: ${workshopName} ("Workshop" or "Partner"), trading as: ${tradingName}, of ${address}, NZBN: ${nzbn}, GST Number: ${gst}.`);
+    writePara(`Together referred to as the "Parties."`);
+
+    writeSection('1. DEFINITIONS');
+    writePara(`1.1 "Platform" means the Torqued web and mobile application, APIs, and associated infrastructure operated by Torqued.`);
+    writePara(`1.2 "Services" means the automotive repair, maintenance, and diagnostic services offered by the Workshop through the Platform.`);
+    writePara(`1.3 "Customer" means any individual or entity that books Services through the Platform.`);
+    writePara(`1.4 "Booking" means a confirmed appointment made by a Customer for Services through the Platform.`);
+    writePara(`1.5 "Commission" means the fee payable to Torqued as a percentage of each completed Booking's total invoiced value.`);
+    writePara(`1.6 "Subscription Fee" means the recurring monthly fee payable by the Workshop to access the Platform.`);
+    writePara(`1.7 "Payout" means the net payment made to the Workshop after deducting Commission and applicable fees.`);
+
+    writeSection('2. PLATFORM ACCESS & SUBSCRIPTION');
+    writePara(`2.1 Subscription Fee: The Workshop agrees to pay Torqued a subscription fee of NZD $99.00 per month (inclusive of GST) for access to the Platform, billed monthly in advance via the Workshop's nominated payment method through Stripe.`);
+    writePara(`2.2 Billing Start Date: Billing shall commence on the date agreed during onboarding (the "Billing Start Date"). The Workshop may configure its profile and add services before the Billing Start Date, but listing visibility and the ability to accept Bookings will only activate from the Billing Start Date.`);
+    writePara(`2.3 Trial Periods: Where Torqued grants a trial period, no subscription fee is charged during that period. On expiry of the trial period, the standard subscription fee applies automatically unless the Workshop cancels before the trial ends.`);
+    writePara(`2.4 Promotional Pricing: Where Torqued offers promotional pricing (e.g. 50% discount for the first three months), such pricing is as described at the time of signup and is subject to Torqued's discretion to modify or withdraw.`);
+    writePara(`2.5 Cancellation: Either Party may cancel this Agreement by providing 30 days' written notice. Subscription fees are non-refundable for the current billing period on cancellation.`);
+
+    writeSection('3. COMMISSION & PAYOUTS');
+    writePara(`3.1 Commission Rate: Torqued charges a commission of 4% (plus GST) on the total invoiced value of each completed Booking facilitated through the Platform.`);
+    writePara(`3.2 Payout Schedule: Torqued will process Payouts to the Workshop's nominated NZ bank account on a weekly basis (each Monday for the prior week's completed Bookings), subject to all funds having been received from Customers.`);
+    writePara(`3.3 Payment Processing: Customer payments are processed through Stripe. Torqued acts as the merchant of record for Customer-facing transactions. Payouts to the Workshop will be net of Commission and any Stripe processing fees.`);
+    writePara(`3.4 GST: All fees and commissions stated are exclusive of GST unless otherwise specified. Where the Workshop is GST-registered, GST will be added to commissions and subscription fees as applicable.`);
+    writePara(`3.5 Disputes: In the event of a disputed payment, Torqued reserves the right to withhold Payout pending resolution, not to exceed 30 days.`);
+
+    writeSection('4. WORKSHOP OBLIGATIONS');
+    writePara(`4.1 The Workshop agrees to: (a) maintain all necessary licences, certifications, and registrations required under New Zealand law to provide the Services; (b) provide Services to the standard of a reasonably competent automotive professional; (c) comply with all applicable New Zealand legislation, including (without limitation) the Consumer Guarantees Act 1993 ("CGA"), the Fair Trading Act 1986, the Health and Safety at Work Act 2015, and the Privacy Act 2020; (d) respond to Booking requests within the timeframes specified on the Platform (or within 24 hours where no timeframe is specified); (e) honour confirmed Bookings unless cancellation is permitted under this Agreement; (f) maintain adequate public liability insurance (minimum $1,000,000 per event) and notify Torqued of any material change to coverage; (g) promptly notify Torqued of any complaint, claim, or regulatory investigation relating to Services provided through the Platform.`);
+    writePara(`4.2 Pricing Accuracy: The Workshop is solely responsible for setting accurate and lawful prices for Services on the Platform. Torqued bears no liability for pricing errors made by the Workshop.`);
+    writePara(`4.3 Consumer Guarantees Act Compliance: The Workshop acknowledges that Services provided to consumers are subject to guarantees under the CGA and agrees to resolve any CGA claims in accordance with the Act. Torqued may facilitate resolution but is not liable for Workshop obligations under the CGA.`);
+
+    writeSection('5. TORQUED OBLIGATIONS');
+    writePara(`5.1 Torqued agrees to: (a) provide the Workshop with access to the Platform in accordance with this Agreement; (b) process Customer payments in a timely manner and make Payouts in accordance with clause 3.2; (c) provide reasonable technical support for Platform-related issues; (d) maintain reasonable security standards for data processed through the Platform; (e) notify the Workshop of any material changes to Platform fees or terms with at least 30 days' notice.`);
+    writePara(`5.2 Platform Availability: Torqued does not guarantee uninterrupted access to the Platform and may perform maintenance that temporarily affects availability. Torqued will endeavour to provide advance notice of planned outages.`);
+
+    writeSection('6. CANCELLATIONS & REFUNDS');
+    writePara(`6.1 Cancellation Policy: The Workshop's cancellation policy (as configured on the Platform) applies to Customer Bookings. The Workshop is responsible for honouring its stated policy.`);
+    writePara(`6.2 Refunds: Where a Customer is entitled to a refund (whether under the Workshop's cancellation policy, the CGA, or otherwise), the Workshop authorises Torqued to process such refund from the Workshop's Payout. Torqued will notify the Workshop of any refund processed.`);
+    writePara(`6.3 Disputes Between Workshop and Customer: Torqued may, at its discretion, facilitate dispute resolution between the Workshop and Customer but is not obligated to do so and bears no liability for the outcome of any dispute.`);
+
+    writeSection('7. INTELLECTUAL PROPERTY');
+    writePara(`7.1 Platform IP: All intellectual property in the Platform (including software, trademarks, and content developed by Torqued) remains the exclusive property of Torqued.`);
+    writePara(`7.2 Workshop Content: The Workshop grants Torqued a non-exclusive, royalty-free licence to use the Workshop's trading name, logo, descriptions, and photos on the Platform for the purpose of providing the Services.`);
+    writePara(`7.3 Restrictions: The Workshop must not reverse-engineer, copy, or create derivative works from the Platform or its underlying technology.`);
+
+    writeSection('8. PRIVACY & DATA');
+    writePara(`8.1 Data Handling: Torqued collects and handles personal information in accordance with its Privacy Policy at torqued-psi.vercel.app/privacy and the Privacy Act 2020.`);
+    writePara(`8.2 Customer Data: The Workshop acknowledges that Customer personal information accessed through the Platform may only be used for the purpose of providing Services under a confirmed Booking and must not be used for unsolicited marketing, sold to third parties, or retained beyond what is necessary under applicable law.`);
+    writePara(`8.3 Data Breach: Each Party must promptly notify the other of any actual or reasonably suspected data breach affecting the other's data.`);
+
+    writeSection('9. LIABILITY & INDEMNITY');
+    writePara(`9.1 Limitation of Liability: To the maximum extent permitted by New Zealand law, Torqued's total liability to the Workshop under or in connection with this Agreement is limited to the total subscription fees paid by the Workshop in the 3 months immediately preceding the event giving rise to the claim.`);
+    writePara(`9.2 Excluded Loss: Torqued is not liable for any indirect, consequential, special, or punitive loss, including loss of profit, revenue, or opportunity, arising from this Agreement.`);
+    writePara(`9.3 Workshop Indemnity: The Workshop indemnifies Torqued against any claim, loss, damage, or expense (including legal costs) arising from: (a) the Workshop's breach of this Agreement; (b) the Workshop's provision of (or failure to provide) Services; (c) any infringement by the Workshop of a third party's intellectual property; or (d) the Workshop's non-compliance with applicable law.`);
+    writePara(`9.4 Consumer Law: Nothing in this Agreement limits any rights the Workshop may have under the Consumer Guarantees Act 1993 or the Fair Trading Act 1986 where those Acts apply.`);
+
+    writeSection('10. TERM & TERMINATION');
+    writePara(`10.1 Term: This Agreement commences on the date it is signed and continues until terminated in accordance with this clause.`);
+    writePara(`10.2 Termination by Notice: Either Party may terminate this Agreement on 30 days' written notice to the other Party at legal@torquedapp.nz.`);
+    writePara(`10.3 Immediate Termination: Torqued may terminate this Agreement immediately and without notice if the Workshop: (a) breaches any material provision of this Agreement and fails to remedy the breach within 7 days of notice; (b) becomes insolvent or enters liquidation or receivership; (c) engages in fraudulent, illegal, or seriously harmful conduct; or (d) receives repeated Customer complaints that Torqued reasonably considers to reflect a systemic failure in service quality.`);
+    writePara(`10.4 Effect of Termination: On termination: (a) all outstanding Payouts owed to the Workshop will be paid within 14 days, net of any amounts owed to Torqued; (b) the Workshop's access to the Platform will be suspended; and (c) clauses 7, 8, 9, and 11 survive termination.`);
+
+    writeSection('11. GOVERNING LAW & DISPUTES');
+    writePara(`11.1 Governing Law: This Agreement is governed by the laws of New Zealand.`);
+    writePara(`11.2 Dispute Resolution: The Parties agree to attempt to resolve any dispute in good faith through negotiation before initiating legal proceedings. If the dispute is not resolved within 20 business days of one Party giving written notice, either Party may refer the dispute to mediation under the AMINZ mediation rules, or (if mediation fails) to arbitration or the courts of New Zealand.`);
+    writePara(`11.3 Consumer Disputes: Nothing in this clause limits the Workshop's right to make a complaint to the Commerce Commission or bring proceedings in the Disputes Tribunal.`);
+
+    writeSection('12. GENERAL');
+    writePara(`12.1 Entire Agreement: This Agreement constitutes the entire agreement between the Parties regarding its subject matter and supersedes all prior representations, discussions, or agreements.`);
+    writePara(`12.2 Amendments: Torqued may amend this Agreement by providing at least 30 days' written notice to the Workshop. Continued use of the Platform after the effective date of an amendment constitutes acceptance.`);
+    writePara(`12.3 Waiver: A failure by a Party to exercise a right under this Agreement does not constitute a waiver of that right.`);
+    writePara(`12.4 Severability: If any provision of this Agreement is unenforceable, the remaining provisions continue in full force.`);
+    writePara(`12.5 Notices: Notices under this Agreement may be given by email to the addresses on file for each Party. Torqued's legal contact is legal@torquedapp.nz.`);
+    writePara(`12.6 Relationship: The Parties are independent contractors. Nothing in this Agreement creates an employment, partnership, agency, or joint venture relationship.`);
+
+    // Signature block
+    checkY(70);
+    y += 6;
+    doc.setFontSize(11);
+    doc.setFont('helvetica', 'bold');
+    doc.setTextColor(21, 4, 2);
+    doc.text('SIGNATURES', margin, y);
+    y += 8;
+
+    // Torqued signatory
+    doc.setFontSize(9);
+    doc.setFont('helvetica', 'bold');
+    doc.setTextColor(0, 0, 0);
+    doc.text('For and on behalf of Torqued Limited:', margin, y);
+    y += 6;
+    doc.setFont('helvetica', 'normal');
+    doc.text('Signed: Sri Berry', margin, y); y += 5;
+    doc.text('Title: Director / Co-Founder', margin, y); y += 5;
+    doc.text('Date/Time: 15/06/2026 at 9:00 AM', margin, y); y += 10;
+
+    // Workshop signatory
+    doc.setFont('helvetica', 'bold');
+    doc.text(`For and on behalf of ${workshopName}:`, margin, y);
+    y += 6;
+    doc.setFont('helvetica', 'normal');
+    doc.text(`Signed: ${signerName}`, margin, y); y += 5;
+    doc.text(`Title: ${title}`, margin, y); y += 5;
+    doc.text(`Trading as: ${tradingName}`, margin, y); y += 5;
+    doc.text(`Date/Time: ${mechSignedAt}`, margin, y); y += 10;
+
+    doc.setFontSize(8);
+    doc.setTextColor(100, 100, 100);
+    doc.text('By electronically signing this Agreement, the Workshop confirms it has read, understood, and agrees to be bound by its terms.', margin, y);
+
+    return doc.output('datauristring').split(',')[1];
+  };
 
   const renderContent = () => {
     switch (activeTab) {
@@ -2938,64 +3849,304 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
     }
   };
 
+  // Password setup — shown when mechanic arrived via magic link and hasn't set a password yet
+  const [newPassword, setNewPassword] = useState('');
+  const [newPasswordConfirm, setNewPasswordConfirm] = useState('');
+  const [passwordSetStatus, setPasswordSetStatus] = useState<'idle' | 'saving' | 'done' | 'error'>('idle');
+  const [passwordSetError, setPasswordSetError] = useState<string | null>(null);
+  const needsPassword = typeof window !== 'undefined' && localStorage.getItem('torqued_needs_password') === '1';
+
+  // Self-contained reset/onboarding link: ?reset_token=<signed>. Captured once at mount.
+  const [resetToken] = useState(() => new URLSearchParams(window.location.search).get('reset_token'));
+  if (resetToken && passwordSetStatus !== 'done') {
+    return (
+      <div className="min-h-screen bg-background text-foreground flex items-center justify-center p-4">
+        <div className="w-full max-w-md bg-card border border-border rounded-3xl p-8 space-y-6 shadow-xl">
+          <Logo />
+          <div className="space-y-1">
+            <h2 className="text-2xl font-black tracking-tighter">Set your password</h2>
+            <p className="text-sm text-muted">Choose a password for your Torqued workshop account.</p>
+          </div>
+          <div className="space-y-3">
+            <input type="password" value={newPassword} onChange={e => setNewPassword(e.target.value)} placeholder="New password (min 8 characters)" className="w-full bg-background border border-border rounded-xl px-4 h-12 text-sm text-foreground placeholder:text-muted focus:outline-none focus:border-torqued-red" />
+            <input type="password" value={newPasswordConfirm} onChange={e => setNewPasswordConfirm(e.target.value)} placeholder="Confirm password" className="w-full bg-background border border-border rounded-xl px-4 h-12 text-sm text-foreground placeholder:text-muted focus:outline-none focus:border-torqued-red" />
+            {passwordSetError && <p className="text-xs text-torqued-red font-bold">{passwordSetError}</p>}
+            <button
+              disabled={passwordSetStatus === 'saving' || newPassword.length < 8 || newPassword !== newPasswordConfirm}
+              className="w-full h-12 bg-torqued-red text-white rounded-xl font-bold text-sm disabled:opacity-40"
+              onClick={async () => {
+                if (newPassword !== newPasswordConfirm) { setPasswordSetError('Passwords do not match.'); return; }
+                if (newPassword.length < 8) { setPasswordSetError('Password must be at least 8 characters.'); return; }
+                setPasswordSetStatus('saving'); setPasswordSetError(null);
+                try {
+                  const r = await fetch('/api/auth/set-password', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ token: resetToken, password: newPassword }) });
+                  const d = await r.json();
+                  if (!r.ok) { setPasswordSetStatus('error'); setPasswordSetError(d.error || 'Could not set password.'); return; }
+                  // Sign them straight in with the new password.
+                  try { await loginMechanic(d.email, newPassword); } catch {}
+                  window.history.replaceState({}, document.title, window.location.pathname);
+                  setPasswordSetStatus('done');
+                } catch (e: any) { setPasswordSetStatus('error'); setPasswordSetError(e?.message || 'Could not set password.'); }
+              }}
+            >
+              {passwordSetStatus === 'saving' ? 'Setting password…' : 'Set password & sign in →'}
+            </button>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  if (user && needsPassword && passwordSetStatus !== 'done') {
+    return (
+      <div className="min-h-screen bg-background text-foreground flex items-center justify-center p-4">
+        <div className="w-full max-w-md bg-card border border-border rounded-3xl p-8 space-y-6 shadow-xl">
+          <Logo />
+          <div className="space-y-1">
+            <h2 className="text-2xl font-black tracking-tighter">Set your password</h2>
+            <p className="text-sm text-muted">You're in via a magic link. Create a password so you can sign in next time.</p>
+          </div>
+          <div className="space-y-3">
+            <div>
+              <label className="text-[10px] font-black uppercase tracking-widest text-muted block mb-1">New password</label>
+              <input type="password" value={newPassword} onChange={e => setNewPassword(e.target.value)} placeholder="At least 8 characters" className="w-full bg-background border border-border rounded-xl px-4 h-12 text-sm text-foreground placeholder:text-muted focus:outline-none focus:border-torqued-red" />
+            </div>
+            <div>
+              <label className="text-[10px] font-black uppercase tracking-widest text-muted block mb-1">Confirm password</label>
+              <input type="password" value={newPasswordConfirm} onChange={e => setNewPasswordConfirm(e.target.value)} placeholder="Repeat password" className="w-full bg-background border border-border rounded-xl px-4 h-12 text-sm text-foreground placeholder:text-muted focus:outline-none focus:border-torqued-red" />
+            </div>
+            {passwordSetError && <p className="text-xs text-torqued-red font-bold">{passwordSetError}</p>}
+            <button
+              disabled={passwordSetStatus === 'saving' || newPassword.length < 8 || newPassword !== newPasswordConfirm}
+              className="w-full h-12 bg-torqued-red text-white rounded-xl font-bold text-sm disabled:opacity-40"
+              onClick={async () => {
+                if (newPassword !== newPasswordConfirm) { setPasswordSetError('Passwords do not match.'); return; }
+                if (newPassword.length < 8) { setPasswordSetError('Password must be at least 8 characters.'); return; }
+                setPasswordSetStatus('saving');
+                setPasswordSetError(null);
+                try {
+                  const { error } = await supabase.auth.updateUser({ password: newPassword });
+                  if (error) { setPasswordSetStatus('error'); setPasswordSetError(error.message); return; }
+                  localStorage.removeItem('torqued_needs_password');
+                  setPasswordSetStatus('done');
+                } catch (e: any) { setPasswordSetStatus('error'); setPasswordSetError(e?.message || 'Could not set password.'); }
+              }}
+            >
+              {passwordSetStatus === 'saving' ? 'Setting password…' : 'Set password & continue →'}
+            </button>
+            <button className="w-full text-xs text-muted hover:text-foreground py-2" onClick={() => { localStorage.removeItem('torqued_needs_password'); setPasswordSetStatus('done'); }}>
+              Skip for now
+            </button>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   // Onboarding wizard — shown after login, before subscription, until completed
   if (user && onboardingComplete === false) {
-    const obInput = "w-full bg-white/5 border border-white/10 rounded-xl px-4 h-12 text-sm text-white placeholder:text-white/30 focus:outline-none focus:border-torqued-red";
-    const obLabel = "text-[10px] font-black uppercase tracking-widest text-white/50 block mb-1";
+    const obInput = "w-full bg-card border border-border rounded-xl px-4 h-12 text-sm text-foreground placeholder:text-muted focus:outline-none focus:border-torqued-red";
+    const obLabel = "text-[10px] font-black uppercase tracking-widest text-muted block mb-1";
+    const OB_STEPS = 5;
     return (
-      <div className="min-h-screen bg-torqued-dark text-white flex items-center justify-center p-4">
-        <div className="w-full max-w-lg bg-card border border-white/10 rounded-3xl p-8 space-y-6">
+      <div className="min-h-screen bg-background text-foreground flex items-center justify-center p-4">
+        <div className="w-full max-w-lg bg-card border border-border rounded-3xl p-8 space-y-6 shadow-xl">
           <div className="flex items-center justify-between">
-            <Logo variant="light" />
-            <span className="text-[10px] font-black uppercase tracking-widest text-white/40">Step {obStep} of 3</span>
+            <Logo />
+            <span className="text-[10px] font-black uppercase tracking-widest text-muted">Step {obStep + 1} of {OB_STEPS}</span>
           </div>
-          <div className="h-1.5 bg-white/10 rounded-full overflow-hidden"><div className="h-full bg-torqued-red transition-all" style={{ width: `${(obStep/3)*100}%` }} /></div>
+          <div className="h-1.5 bg-border rounded-full overflow-hidden"><div className="h-full bg-torqued-red transition-all" style={{ width: `${((obStep + 1)/OB_STEPS)*100}%` }} /></div>
+
+          {/* Step 0: Email OTP verification */}
+          {obStep === 0 && (
+            <div className="space-y-4">
+              <div><h2 className="text-2xl font-black tracking-tight">Verify Your Workshop Email</h2><p className="text-sm text-muted">Enter the email address the workshop owner can access.</p></div>
+              <div>
+                <label className={obLabel}>Workshop Email <span className="text-torqued-red">*</span></label>
+                <input className={obInput} type="email" placeholder="workshop@example.com" value={obEmail} onChange={e => { setObEmail(e.target.value); setObOtpSent(false); setObOtp(''); setObOtpError(''); }} disabled={obOtpVerified} />
+              </div>
+              {!obOtpVerified && !obOtpSent && (
+                <Button fullWidth className="bg-torqued-red text-white" disabled={!obEmail || obOtpLoading} onClick={async () => {
+                  setObOtpLoading(true); setObOtpError('');
+                  try {
+                    const r = await fetch('/api/mechanic/send-email-otp', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ email: obEmail, mechanicId: user.id }) });
+                    const d = await r.json();
+                    if (r.ok) setObOtpSent(true);
+                    else setObOtpError(d.error || 'Could not send code');
+                  } catch { setObOtpError('Could not connect'); } finally { setObOtpLoading(false); }
+                }}>{obOtpLoading ? 'Sending…' : 'Send Verification Code'}</Button>
+              )}
+              {obOtpSent && !obOtpVerified && (
+                <div className="space-y-3">
+                  <p className="text-xs text-muted">A 6-digit code was sent to <strong className="text-foreground">{obEmail}</strong>.</p>
+                  <div>
+                    <label className={obLabel}>Verification Code</label>
+                    <input className={obInput} type="text" inputMode="numeric" maxLength={6} placeholder="000000" value={obOtp} onChange={e => { setObOtp(e.target.value); setObOtpError(''); }} />
+                  </div>
+                  {obOtpError && <p className="text-xs text-torqued-red">{obOtpError}</p>}
+                  <div className="flex gap-3">
+                    <Button variant="outline" className="border-border text-white" disabled={obOtpLoading} onClick={async () => {
+                      setObOtpLoading(true); setObOtpError('');
+                      try {
+                        const r = await fetch('/api/mechanic/send-email-otp', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ email: obEmail, mechanicId: user.id }) });
+                        if (!r.ok) { const d = await r.json(); setObOtpError(d.error || 'Could not resend'); }
+                      } catch { setObOtpError('Could not connect'); } finally { setObOtpLoading(false); }
+                    }}>Resend</Button>
+                    <Button fullWidth className="bg-torqued-red text-white" disabled={obOtp.length < 6 || obOtpLoading} onClick={async () => {
+                      setObOtpLoading(true); setObOtpError('');
+                      try {
+                        const r = await fetch('/api/mechanic/verify-email-otp', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ email: obEmail, code: obOtp, mechanicId: user.id }) });
+                        const d = await r.json();
+                        if (d.verified) { setObOtpVerified(true); setObOtpError(''); }
+                        else setObOtpError(d.error || 'Invalid or expired code');
+                      } catch { setObOtpError('Could not connect'); } finally { setObOtpLoading(false); }
+                    }}>{obOtpLoading ? 'Verifying…' : 'Verify'}</Button>
+                  </div>
+                </div>
+              )}
+              {obOtpVerified && (
+                <div className="space-y-4">
+                  <div className="flex items-center gap-2 text-emerald-600 dark:text-emerald-400 text-sm font-bold"><span>✓</span><span>Email verified: {obEmail}</span></div>
+                  <Button fullWidth className="bg-torqued-red text-white" onClick={() => setObStep(1)}>Continue</Button>
+                </div>
+              )}
+            </div>
+          )}
 
           {obStep === 1 && (
             <div className="space-y-4">
-              <div><h2 className="text-2xl font-black tracking-tight">Workshop details</h2><p className="text-sm text-white/50">Tell us about your business.</p></div>
-              <div><label className={obLabel}>Workshop name</label><input className={obInput} value={ob.name} onChange={e=>setOb({...ob,name:e.target.value})} /></div>
+              <div><h2 className="text-2xl font-black tracking-tight">Workshop Details</h2><p className="text-sm text-muted">Tell us about your business.</p></div>
+              <div><label className={obLabel}>Trading / Workshop Name <span className="text-torqued-red">*</span></label><input className={obInput} placeholder="e.g. Smith's Auto" value={ob.name} onChange={e=>setOb({...ob,name:e.target.value})} /></div>
+              <div><label className={obLabel}>Legal Name (if different from trading name)</label><input className={obInput} placeholder="Leave blank if same as above" value={ob.legal_name} onChange={e=>setOb({...ob,legal_name:e.target.value})} /></div>
               <div className="grid grid-cols-2 gap-3">
-                <div><label className={obLabel}>NZBN</label><input className={obInput} value={ob.nzbn} onChange={e=>setOb({...ob,nzbn:e.target.value})} /></div>
-                <div><label className={obLabel}>Phone</label><input className={obInput} value={ob.phone} onChange={e=>setOb({...ob,phone:e.target.value})} /></div>
+                <div><label className={obLabel}>NZBN <span className="text-torqued-red">*</span></label><input className={obInput} placeholder="13-digit NZBN" value={ob.nzbn} onChange={e=>setOb({...ob,nzbn:e.target.value})} /></div>
+                <div><label className={obLabel}>Years in Trade <span className="text-torqued-red">*</span></label><input type="number" className={obInput} placeholder="e.g. 12" value={ob.years_in_trade} onChange={e=>setOb({...ob,years_in_trade:e.target.value})} /></div>
               </div>
-              <div><label className={obLabel}>Address</label><input className={obInput} value={ob.address} onChange={e=>setOb({...ob,address:e.target.value})} /></div>
-              <div><label className={obLabel}>Owner name</label><input className={obInput} value={ob.owner_name} onChange={e=>setOb({...ob,owner_name:e.target.value})} /></div>
-              <Button fullWidth className="bg-torqued-red text-white" disabled={!ob.name} onClick={()=>setObStep(2)}>Continue</Button>
+              {/* Address with Nominatim autocomplete */}
+              <div className="relative">
+                <label className={obLabel}>Workshop Address <span className="text-torqued-red">*</span></label>
+                <input className={obInput} value={ob.address} onChange={e => {
+                  const val = e.target.value;
+                  setOb({...ob, address: val});
+                  setAddrSuggestions([]);
+                  if (addrTimer) clearTimeout(addrTimer);
+                  if (val.length > 3) {
+                    setAddrTimer(setTimeout(async () => {
+                      try {
+                        const res = await fetch(`https://nominatim.openstreetmap.org/search?format=json&countrycodes=nz&limit=5&q=${encodeURIComponent(val)}`);
+                        const data = await res.json();
+                        setAddrSuggestions(data || []);
+                      } catch { setAddrSuggestions([]); }
+                    }, 400));
+                  }
+                }} placeholder="Start typing your address…" />
+                {addrSuggestions.length > 0 && (
+                  <div className="absolute z-50 left-0 right-0 top-full mt-1 bg-card border border-border rounded-xl overflow-hidden shadow-2xl">
+                    {addrSuggestions.map((s, i) => (
+                      <button key={i} type="button" className="w-full text-left px-4 py-2.5 text-sm text-white hover:bg-muted/20 border-b border-border last:border-0"
+                        onClick={() => { setOb({...ob, address: s.display_name}); setAddrSuggestions([]); }}>
+                        {s.display_name}
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
+              <div><label className={obLabel}>Workshop Phone <span className="text-torqued-red">*</span></label><input className={obInput} value={ob.phone} onChange={e=>setOb({...ob,phone:e.target.value})} /></div>
+              <div className="grid grid-cols-2 gap-3">
+                <div><label className={obLabel}>Owner Name <span className="text-torqued-red">*</span></label><input className={obInput} value={ob.owner_name} onChange={e=>setOb({...ob,owner_name:e.target.value})} /></div>
+                <div><label className={obLabel}>Owner Contact Number</label><input className={obInput} value={ob.owner_phone} onChange={e=>setOb({...ob,owner_phone:e.target.value})} /></div>
+              </div>
+              <div>
+                <label className={obLabel}>About You & Your Expertise <span className="text-torqued-red">*</span> <span className="text-muted ml-1">(up to 250 words)</span></label>
+                <textarea className="w-full bg-card border border-border rounded-xl px-4 py-3 text-sm text-white placeholder:text-muted focus:outline-none focus:border-torqued-red resize-none" rows={4}
+                  placeholder="In 250 words or less, tell us about yourself and your expertise / specialties…"
+                  value={ob.bio} onChange={e => { const words = e.target.value.split(/\s+/).filter(Boolean); if (words.length <= 250) setOb({...ob, bio: e.target.value}); }} />
+                <p className="text-[10px] text-muted mt-1">{ob.bio.split(/\s+/).filter(Boolean).length} / 250 words</p>
+              </div>
+              <div className="flex gap-3">
+                <Button variant="outline" className="border-border text-white" onClick={()=>setObStep(0)}>Back</Button>
+                <Button fullWidth className="bg-torqued-red text-white" disabled={!ob.name || !ob.nzbn || !ob.years_in_trade || !ob.address || !ob.phone || !ob.owner_name || !ob.bio} onClick={()=>setObStep(2)}>Continue</Button>
+              </div>
             </div>
           )}
 
           {obStep === 2 && (
             <div className="space-y-4">
-              <div><h2 className="text-2xl font-black tracking-tight">Payout details</h2><p className="text-sm text-white/50">Where we send your earnings.</p></div>
+              <div><h2 className="text-2xl font-black tracking-tight">Payout Details</h2><p className="text-sm text-muted">Where we send your earnings.</p></div>
               <div><label className={obLabel}>Name on account</label><input className={obInput} value={ob.bank_account_name} onChange={e=>setOb({...ob,bank_account_name:e.target.value})} /></div>
               <div><label className={obLabel}>Bank account number</label><input className={obInput} placeholder="00-0000-0000000-00" value={ob.bank_account_number} onChange={e=>setOb({...ob,bank_account_number:e.target.value})} /></div>
-              <div className="flex gap-3"><Button variant="outline" className="border-white/20 text-white" onClick={()=>setObStep(1)}>Back</Button><Button fullWidth className="bg-torqued-red text-white" onClick={()=>setObStep(3)}>Continue</Button></div>
+              <div className="flex gap-3"><Button variant="outline" className="border-border text-white" onClick={()=>setObStep(1)}>Back</Button><Button fullWidth className="bg-torqued-red text-white" onClick={()=>setObStep(3)}>Continue</Button></div>
             </div>
           )}
 
           {obStep === 3 && (
             <div className="space-y-4">
-              <div><h2 className="text-2xl font-black tracking-tight">Rates & capacity</h2><p className="text-sm text-white/50">Used to price jobs and set availability.</p></div>
+              <div><h2 className="text-2xl font-black tracking-tight">Rates & Subscription</h2><p className="text-sm text-muted">Set your pricing and select your start date.</p></div>
               <div className="grid grid-cols-3 gap-3">
                 <div><label className={obLabel}>Labour $/hr</label><input type="number" className={obInput} value={ob.labour_rate||''} onChange={e=>setOb({...ob,labour_rate:parseFloat(e.target.value)||0})} /></div>
                 <div><label className={obLabel}>Technicians</label><input type="number" className={obInput} value={ob.technicians||''} onChange={e=>setOb({...ob,technicians:parseInt(e.target.value)||1})} /></div>
                 <div><label className={obLabel}>Parts lead (days)</label><input type="number" className={obInput} value={ob.parts_lead_days||''} onChange={e=>setOb({...ob,parts_lead_days:parseInt(e.target.value)||1})} /></div>
               </div>
-              {obSaving && <p className="text-xs text-white/40">Saving…</p>}
+              <div>
+                <label className={obLabel}>Subscription Start Date <span className="text-torqued-red">*</span></label>
+                <input type="date" className={obInput} value={ob.billing_start_date} onChange={e=>setOb({...ob,billing_start_date:e.target.value})}
+                  min={new Date().toISOString().slice(0,10)} />
+                <p className="text-[10px] text-muted mt-1">You can configure your profile and add parts before this date. You'll be listed and able to accept jobs from this date onwards.</p>
+              </div>
+              {obSaving && <p className="text-xs text-muted">Saving…</p>}
               <div className="flex gap-3">
-                <Button variant="outline" className="border-white/20 text-white" onClick={()=>setObStep(2)}>Back</Button>
-                <Button fullWidth className="bg-torqued-red text-white" disabled={obSaving} onClick={async()=>{
+                <Button variant="outline" className="border-border text-white" onClick={()=>setObStep(2)}>Back</Button>
+                <Button fullWidth className="bg-torqued-red text-white" disabled={obSaving || !ob.billing_start_date} onClick={()=>setObStep(4)}>Continue to Subscription</Button>
+              </div>
+            </div>
+          )}
+
+          {obStep === 4 && (
+            <div className="space-y-4">
+              <div><h2 className="text-2xl font-black tracking-tight">Mechanic Agreement</h2><p className="text-sm text-muted">Review and sign to complete your registration.</p></div>
+              <div className="bg-card border border-border rounded-xl p-4 space-y-3 max-h-48 overflow-y-auto text-xs text-foreground/60 leading-relaxed">
+                <p className="font-bold text-foreground/80 text-sm">Mechanic Platform Agreement</p>
+                <p className="text-muted">Effective Date: {new Date().toLocaleDateString('en-NZ', { day: 'numeric', month: 'long', year: 'numeric' })}</p>
+                <p className="text-muted font-bold">Key Terms: NZD $99.00/month subscription (incl. GST) · 4% commission per completed job · Weekly Monday payouts · NZ law governs</p>
+                <p><span className="font-bold text-foreground/80">1. Parties</span><br />Torqued NZ, Dunedin, New Zealand, NZBN: 9429053747006 ("Torqued")<br />AND {ob.legal_name || ob.name || '[Workshop Legal Name]'} trading as {ob.name || '[Trading Name]'}, {ob.address || '[Address]'}, NZBN: {ob.nzbn || '[NZBN]'} ("Mechanic Partner")</p>
+                <p><span className="font-bold text-foreground/80">2. Platform Access</span><br />Torqued grants a non-exclusive licence to list services and receive bookings, subject to ongoing subscription payment. The Partner must hold valid NZ business registration, appropriate qualifications, and public liability insurance.</p>
+                <p><span className="font-bold text-foreground/80">3. Obligations</span><br />The Partner must perform all services with reasonable care and skill, maintain accurate listings and pricing, communicate professionally, and comply with all applicable NZ laws and trade standards.</p>
+                <p><span className="font-bold text-foreground/80">4. Fees & Payment</span><br />Subscription: NZD $99.00 + GST/month via Stripe.<br />Commission: 4% of Job Value (incl. GST) per Completed Job, deducted from Weekly Payout.<br />Weekly Payout = Total Job Value – 4% Commission, disbursed every Monday via Stripe Connect.</p>
+                <p><span className="font-bold text-foreground/80">5. Consumer Guarantees</span><br />The Partner is the supplier under the Consumer Guarantees Act 1993 and is solely responsible for service quality, defects, and customer claims. Torqued operates as a marketplace only.</p>
+                <p><span className="font-bold text-foreground/80">6. Liability & Indemnity</span><br />The Partner indemnifies Torqued against all losses arising from services performed, breach of this Agreement, or negligence. Torqued's liability is limited to 3 months' subscription fees paid.</p>
+                <p><span className="font-bold text-foreground/80">7. Intellectual Property</span><br />All Platform IP is owned by Torqued. The Partner grants Torqued a licence to use their business name and listings to operate the Platform.</p>
+                <p><span className="font-bold text-foreground/80">8. Privacy & Confidentiality</span><br />Both parties must comply with the Privacy Act 2020. Confidential information must not be disclosed for 2 years post-termination.</p>
+                <p><span className="font-bold text-foreground/80">9. Term & Termination</span><br />Rolling monthly. Either party may terminate: Partner by cancelling subscription (access continues to end of billing cycle); Torqued on 30 days' notice or immediately for material breach, insolvency, or safety risk.</p>
+                <p><span className="font-bold text-foreground/80">10. Dispute Resolution</span><br />Good faith negotiation (14 days) → AMINZ mediation → NZ courts.</p>
+                <p><span className="font-bold text-foreground/80">11. General</span><br />Governed by New Zealand law. Independent contractor relationship. Torqued may amend on 30 days' notice.</p>
+                <p className="text-muted border-t border-border pt-2">Signed on behalf of Torqued:<br />Sri Berry · Torqued NZ · NZBN 9429053747006<br />Digitally signed {new Date().toLocaleDateString('en-NZ', { day: 'numeric', month: 'long', year: 'numeric' })} at 9:00 AM</p>
+              </div>
+              <div className="space-y-3">
+                <div><label className={obLabel}>Signer's Full Name <span className="text-torqued-red">*</span></label><input className={obInput} placeholder="e.g. Jane Smith" value={ob.owner_name} onChange={e=>setOb({...ob,owner_name:e.target.value})} /></div>
+                <div><label className={obLabel}>Signer's Title</label><input className={obInput} placeholder="e.g. Director, Owner" value={ob.signer_title} onChange={e=>setOb({...ob, signer_title: e.target.value})} /></div>
+              </div>
+              {obSaving && <p className="text-xs text-muted">Processing…</p>}
+              <div className="flex gap-3">
+                <Button variant="outline" className="border-border text-white" onClick={()=>setObStep(3)}>Back</Button>
+                <Button fullWidth className="bg-torqued-red text-white" disabled={obSaving || !ob.owner_name} onClick={async()=>{
                   setObSaving(true);
                   try {
                     await fetch('/api/mechanic/save-onboarding', {
                       method:'POST', headers:{'Content-Type':'application/json'},
-                      body: JSON.stringify({ mechanicId: user.id, fields: ob, complete: true }),
+                      body: JSON.stringify({ mechanicId: user.id, fields: { ...ob, agreement_signed_at: new Date().toISOString(), agreement_signed_by: ob.owner_name }, complete: true }),
                     });
+                    try {
+                      const pdfBase64 = generateContractPdf(ob.signer_title || 'Owner');
+                      await fetch('/api/mechanic/email-contract', {
+                        method: 'POST', headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ mechanicId: user.id, pdfBase64, email: user.email, workshopName: ob.legal_name || ob.name }),
+                      });
+                    } catch (e) { console.error('Contract email failed (non-blocking):', e); }
                     setOnboardingComplete(true);
                   } catch {} finally { setObSaving(false); }
-                }}>Finish — Continue to Subscription</Button>
+                }}>I Agree & Complete Registration</Button>
               </div>
+              <p className="text-[10px] text-muted text-center">By clicking above, you confirm you have authority to sign on behalf of {ob.legal_name || ob.name} and agree to the Torqued Mechanic Agreement. A PDF copy will be emailed to you.</p>
             </div>
           )}
         </div>
@@ -3005,16 +4156,16 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
 
   if (!user || (!userProfile?.subscriptionActive && !justActivated)) {
     return (
-      <div className="min-h-screen bg-torqued-dark text-white flex flex-col">
-        {/* Navigation */}
-        <nav className="p-4 md:px-8 flex justify-between items-center bg-background/50 border-b border-white/10">
-          <Logo variant="light" />
+      <div className="min-h-screen bg-background text-foreground flex flex-col">
+{/* Navigation */}
+        <nav className="p-4 md:px-8 flex justify-between items-center bg-background/80 border-b border-border backdrop-blur-sm">
+          <Logo />
           {user ? (
-            <Button size="sm" variant="outline" className="text-white border-white/20 hover:bg-white/5" onClick={logout}>
+            <Button size="sm" variant="outline" className="border-border" onClick={() => { setIncomingJobs([]); setCustomers([]); setBilling(null); setJobNotes({}); setVehiclePhotos({}); setProfileData({ name: '', nzbn: '', phone: '', address: '', serviceAreas: [], diagnosticTools: [], certifications: [], labourRate: 145, shopFee: 25, offersPpi: false, bannerImage: '' }); logout(); }}>
               Sign Out
             </Button>
           ) : (
-            <Button size="sm" className="bg-torqued-red" onClick={() => setMechAuthMode('login')}>
+            <Button size="sm" className="bg-torqued-red text-white" onClick={() => setMechAuthMode('login')}>
               Sign In
             </Button>
           )}
@@ -3027,17 +4178,17 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
           <motion.div 
             initial={{ opacity: 0, y: 30 }}
             animate={{ opacity: 1, y: 0 }}
-            className="w-full max-w-xl bg-card border border-white/10 shadow-2xl rounded-3xl p-8 sm:p-12 space-y-8 text-center"
+            className="w-full max-w-xl bg-card border border-border shadow-2xl rounded-3xl p-8 sm:p-12 space-y-8 text-center"
           >
             <div className="w-20 h-20 bg-torqued-red/10 border border-torqued-red/20 text-torqued-red rounded-2xl flex items-center justify-center mx-auto shadow-inner">
               <Wrench size={38} className="animate-pulse" />
             </div>
 
             <div className="space-y-3">
-              <h2 className="text-3xl sm:text-5xl font-black italic tracking-tighter uppercase text-white leading-none">
-                Mechanic Portal <span className="text-torqued-red font-normal italic text-3xl sm:text-5xl">Hub</span>
+              <h2 className="text-3xl sm:text-5xl font-black tracking-tighter uppercase text-foreground leading-none">
+                Mechanic Portal <span className="text-torqued-red font-normal text-3xl sm:text-5xl">Hub</span>
               </h2>
-              <p className="text-sm sm:text-base text-white/60">
+              <p className="text-sm sm:text-base text-muted">
                 Unlock automated parts diagnostics, custom quotes, invoice management, and direct high-value diesel and euro leads.
               </p>
             </div>
@@ -3046,9 +4197,9 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
               <div className="space-y-5 text-center">
                 <div className="w-16 h-16 mx-auto rounded-2xl bg-emerald-500/10 border border-emerald-500/20 flex items-center justify-center text-emerald-400 text-3xl">✉️</div>
                 <div className="space-y-2">
-                  <h3 className="text-xl font-black text-white">Check your email</h3>
-                  <p className="text-sm text-white/60">
-                    We've sent a confirmation link to <span className="text-white font-bold">{mechEmail}</span>. Click it to activate your workshop account, then log in.
+                  <h3 className="text-xl font-black text-foreground">Check your email</h3>
+                  <p className="text-sm text-muted">
+                    We've sent a confirmation link to <span className="text-foreground font-bold">{mechEmail}</span>. Click it to activate your workshop account, then log in.
                   </p>
                 </div>
 
@@ -3064,7 +4215,7 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                     if (err) { setMechResendMsg(err); }
                     else { setMechResendMsg('Link resent — check your inbox.'); setMechResendCooldown(30); }
                   }}
-                  className="text-xs font-bold text-torqued-red hover:text-red-400 disabled:text-white/30 disabled:cursor-not-allowed transition-colors"
+                  className="text-xs font-bold text-torqued-red hover:text-red-400 disabled:text-muted disabled:cursor-not-allowed transition-colors"
                 >
                   {mechResendCooldown > 0 ? `Resend link in ${mechResendCooldown}s` : "Didn't get it? Resend link"}
                 </button>
@@ -3072,7 +4223,7 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                 <Button
                   fullWidth
                   variant="outline"
-                  className="border-white/20 text-white"
+                  className="border-border text-foreground"
                   onClick={() => { setMechSignupSent(false); setMechAuthMode('login'); setMechPassword(''); setMechResendMsg(null); }}
                 >
                   Back to Login
@@ -3080,14 +4231,14 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
               </div>
             ) : !user ? (
               <div className="space-y-4 text-left">
-                <div className="flex rounded-xl overflow-hidden border border-white/10">
+                <div className="flex rounded-xl overflow-hidden border border-border">
                   <button
                     onClick={() => { setMechAuthMode('login'); setMechAuthError(null); }}
-                    className={`flex-1 py-2.5 text-xs font-black uppercase tracking-wider transition-all ${mechAuthMode === 'login' ? 'bg-torqued-red text-white' : 'text-white/40 hover:text-white'}`}
+                    className={`flex-1 py-2.5 text-xs font-black uppercase tracking-wider transition-all ${mechAuthMode === 'login' ? 'bg-torqued-red text-white' : 'text-muted hover:text-foreground'}`}
                   >Login</button>
                   <button
                     onClick={() => { setMechAuthMode('signup'); setMechAuthError(null); }}
-                    className={`flex-1 py-2.5 text-xs font-black uppercase tracking-wider transition-all ${mechAuthMode === 'signup' ? 'bg-torqued-red text-white' : 'text-white/40 hover:text-white'}`}
+                    className={`flex-1 py-2.5 text-xs font-black uppercase tracking-wider transition-all ${mechAuthMode === 'signup' ? 'bg-torqued-red text-white' : 'text-muted hover:text-foreground'}`}
                   >Register</button>
                 </div>
 
@@ -3098,7 +4249,7 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                       placeholder="Workshop / Business Name"
                       value={mechName}
                       onChange={e => setMechName(e.target.value)}
-                      className="w-full bg-white/5 border border-white/10 rounded-xl px-4 h-12 text-sm text-white placeholder:text-white/30 focus:outline-none focus:border-torqued-red"
+                      className="w-full bg-card border border-border rounded-xl px-4 h-12 text-sm text-foreground placeholder:text-muted focus:outline-none focus:border-torqued-red"
                     />
                   )}
                   <input
@@ -3106,20 +4257,47 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                     placeholder="Email address"
                     value={mechEmail}
                     onChange={e => setMechEmail(e.target.value)}
-                    className="w-full bg-white/5 border border-white/10 rounded-xl px-4 h-12 text-sm text-white placeholder:text-white/30 focus:outline-none focus:border-torqued-red"
+                    className="w-full bg-card border border-border rounded-xl px-4 h-12 text-sm text-foreground placeholder:text-muted focus:outline-none focus:border-torqued-red"
                   />
                   <input
                     type="password"
                     placeholder="Password"
                     value={mechPassword}
                     onChange={e => setMechPassword(e.target.value)}
-                    className="w-full bg-white/5 border border-white/10 rounded-xl px-4 h-12 text-sm text-white placeholder:text-white/30 focus:outline-none focus:border-torqued-red"
+                    className="w-full bg-card border border-border rounded-xl px-4 h-12 text-sm text-foreground placeholder:text-muted focus:outline-none focus:border-torqued-red"
                   />
                 </div>
 
                 {mechAuthError && (
                   <p className="text-xs text-torqued-red font-bold">{mechAuthError}</p>
                 )}
+
+                {mechAuthMode === 'login' && (
+                  <div className="text-right -mt-1">
+                    <button
+                      type="button"
+                      disabled={mechAuthLoading}
+                      onClick={async () => {
+                        if (!mechEmail) { setMechAuthError('Enter your email above first, then tap "Forgot password".'); return; }
+                        setMechAuthError(null); setMechResendMsg(null); setMechAuthLoading(true);
+                        try {
+                          const r = await fetch('/api/mechanic/forgot-password', {
+                            method: 'POST', headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ email: mechEmail }),
+                          });
+                          const d = await r.json();
+                          if (!r.ok) setMechAuthError(d.error || 'Could not send reset link.');
+                          else setMechResendMsg('✓ Password reset link sent — check your email.');
+                        } catch { setMechAuthError('Could not connect. Please try again.'); }
+                        finally { setMechAuthLoading(false); }
+                      }}
+                      className="text-[11px] font-bold text-muted hover:text-torqued-red transition-colors"
+                    >
+                      Forgot password?
+                    </button>
+                  </div>
+                )}
+                {mechResendMsg && <p className="text-xs text-emerald-500 font-bold">{mechResendMsg}</p>}
 
                 <Button
                   fullWidth
@@ -3132,8 +4310,8 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                     try {
                       if (mechAuthMode === 'login') {
                         await loginMechanic(mechEmail, mechPassword);
-                        // First-time login: offer a passkey for next time
-                        if (passkeysSupported() && mechEmail && window.confirm('Set up a passkey for faster sign-in? You\'ll use Face ID / Touch ID instead of your password next time.')) {
+                        // Offer a passkey only if this account doesn't already have one.
+                        if (passkeysSupported() && mechEmail && !(await hasPasskey('mechanic', mechEmail)) && window.confirm('Set up a passkey for faster sign-in? You\'ll use passkey instead of your password next time.')) {
                           try { await registerPasskey('mechanic', mechEmail); window.alert('Passkey added.'); } catch {}
                         }
                       } else {
@@ -3165,7 +4343,7 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                         setMechAuthError(e?.message || 'Passkey sign-in failed');
                       } finally { setMechAuthLoading(false); }
                     }}
-                    className="w-full text-xs font-bold text-white/70 hover:text-white border border-white/10 rounded-xl h-12 flex items-center justify-center gap-2"
+                    className="w-full text-xs font-bold text-muted hover:text-foreground border border-border rounded-xl h-12 flex items-center justify-center gap-2"
                   >
                     <span aria-hidden>🔑</span> Sign in with passkey
                   </button>
@@ -3173,61 +4351,23 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
               </div>
             ) : (
               <div className="space-y-6">
-                <div className="p-4 bg-white/5 border border-white/10 rounded-2xl text-left flex items-center gap-4">
+                <div className="p-4 bg-card border border-border rounded-2xl text-left flex items-center gap-4">
                   <div className="w-10 h-10 rounded-full bg-torqued-red/10 border border-torqued-red/20 flex items-center justify-center text-torqued-red font-bold text-sm overflow-hidden">
                     {(user.user_metadata?.full_name ?? user.email ?? '?').charAt(0).toUpperCase()}
                   </div>
                   <div className="flex-1 min-w-0">
-                    <p className="text-xs font-bold text-white truncate">{user.user_metadata?.full_name ?? user.email}</p>
+                    <p className="text-xs font-bold text-foreground truncate">{user.user_metadata?.full_name ?? user.email}</p>
                     <p className="text-[10px] text-white/50 truncate font-mono">{user.email}</p>
                   </div>
                 </div>
 
-                <div className="space-y-4 border-t border-white/10 pt-6">
+                <div className="space-y-4 border-t border-border pt-6">
                   <div className="flex justify-between text-left items-center">
                     <div>
-                      <p className="font-bold text-sm text-white">Torqued Garage Portal Plan</p>
-                      <p className="text-[10px] text-white/50">Unlimited leads + 4% commission on jobs</p>
+                      <p className="font-bold text-sm text-foreground">Torqued Garage Portal Plan</p>
+                      <p className="text-[10px] text-muted">Unlimited leads + 4% commission on jobs</p>
                     </div>
-                    <span className="font-black italic text-torqued-red text-lg">$99.00 <span className="text-[9px] block font-normal text-white/40 not-italic text-right">/ month</span></span>
-                  </div>
-
-                  {/* Promo / trial code — bypasses payment, no card required */}
-                  <div className="space-y-2">
-                    <div className="flex gap-2">
-                      <input
-                        value={subPromo}
-                        onChange={e => { setSubPromo(e.target.value); setSubPromoError(null); }}
-                        placeholder="Promo code (e.g. trial)"
-                        className="flex-1 bg-white/5 border border-white/10 rounded-xl px-4 h-12 text-sm text-white placeholder:text-white/30 focus:outline-none focus:border-torqued-red uppercase"
-                      />
-                      <Button
-                        disabled={subPromoLoading || !subPromo.trim() || !user}
-                        className="bg-white/10 hover:bg-white/20 text-white font-black uppercase text-[10px] tracking-widest px-5 h-12"
-                        onClick={async () => {
-                          if (!user) return;
-                          setSubPromoLoading(true);
-                          setSubPromoError(null);
-                          try {
-                            const r = await fetch('/api/mechanic/redeem-promo', {
-                              method: 'POST', headers: { 'Content-Type': 'application/json' },
-                              body: JSON.stringify({ mechanicId: user.id, code: subPromo }),
-                            });
-                            const d = await r.json();
-                            if (d.activated) { setJustActivated(true); markSubscriptionActive(); }
-                            else setSubPromoError(d.error || 'Invalid promo code.');
-                          } catch {
-                            setSubPromoError('Could not apply code. Please try again.');
-                          } finally {
-                            setSubPromoLoading(false);
-                          }
-                        }}
-                      >
-                        {subPromoLoading ? '...' : 'Apply'}
-                      </Button>
-                    </div>
-                    {subPromoError && <p className="text-[11px] text-torqued-red font-bold">{subPromoError}</p>}
-                    <p className="text-[10px] text-white/30 text-center">Have a trial code? Apply it to skip payment.</p>
+                    <span className="font-black italic text-torqued-red text-lg">$99.00 <span className="text-[9px] block font-normal text-muted not-italic text-right">/ month</span></span>
                   </div>
 
                   <Button
@@ -3555,21 +4695,42 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
             </button>
           ))}
         </nav>
-        <div className="p-4 border-t border-border">
+        <div className="p-4 border-t border-border space-y-2">
           <div className="flex items-center gap-3 p-3 bg-card rounded-xl border border-border">
-            <div className="w-10 h-10 bg-torqued-red rounded-lg flex items-center justify-center font-bold text-white">PM</div>
-            <div className="flex-1 min-w-0">
-              <p className="text-xs font-bold truncate">Precision Mechanical</p>
-              <p className="text-[10px] text-muted truncate">NZ</p>
+            <div className="w-10 h-10 bg-torqued-red rounded-lg flex items-center justify-center font-bold text-white text-xs">
+              {(profileData.name || 'W').split(' ').map((w: string) => w[0]).slice(0, 2).join('')}
             </div>
-            <MoreVertical size={16} className="text-muted" />
+            <div className="flex-1 min-w-0">
+              <p className="text-xs font-bold truncate">{profileData.name || 'Workshop'}</p>
+              <p className="text-[10px] text-muted truncate">{profileData.address ? profileData.address.split(',')[0] : user?.email || ''}</p>
+            </div>
           </div>
+          <button
+            onClick={() => { setIncomingJobs([]); setCustomers([]); setBilling(null); setJobNotes({}); setVehiclePhotos({}); setProfileData({ name: '', nzbn: '', phone: '', address: '', serviceAreas: [], diagnosticTools: [], certifications: [], labourRate: 145, shopFee: 25, offersPpi: false, bannerImage: '' }); logout(); }}
+            className="w-full flex items-center justify-center gap-2 py-2.5 rounded-xl border border-border text-xs font-bold text-muted hover:text-torqued-red hover:border-torqued-red/40 hover:bg-torqued-red/5 transition-all"
+          >
+            <LogOut size={14} /> Sign Out
+          </button>
         </div>
       </aside>
 
       {/* Main Content */}
       <main className="flex-1 p-4 sm:p-6 md:p-8 overflow-y-auto bg-background">
-        <header className="flex flex-col lg:flex-row lg:justify-between lg:items-center gap-6 mb-8">
+        {portalLoading && (
+          <div className="flex items-center justify-center h-64">
+            <div className="w-8 h-8 border-4 border-border border-t-torqued-red rounded-full animate-spin" />
+          </div>
+        )}
+        {!portalLoading && billingStartDate && new Date(billingStartDate) > new Date() && (
+          <div className="mb-6 flex items-start gap-3 bg-amber-500/10 border border-amber-500/25 rounded-2xl px-5 py-4">
+            <AlertCircle size={18} className="text-amber-500 shrink-0 mt-0.5" />
+            <div>
+              <p className="text-sm font-bold text-foreground">Listing activates on {new Date(billingStartDate).toLocaleDateString('en-NZ', { day: 'numeric', month: 'long', year: 'numeric' })}</p>
+              <p className="text-xs text-muted mt-0.5">You can configure your profile and add services now. Your workshop will appear in customer search and you can accept jobs from your subscription start date.</p>
+            </div>
+          </div>
+        )}
+        {!portalLoading && <><header className="flex flex-col lg:flex-row lg:justify-between lg:items-center gap-6 mb-8">
           <div>
             <h1 className="text-4xl text-foreground tracking-tighter">
               {sidebarItems.find(i => i.id === activeTab)?.label}
@@ -3662,7 +4823,7 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
           </div>
         )}
 
-        {renderContent()}
+        {renderContent()}</>}
       </main>
       {selectedJobId && renderHealthReport()}
       {showProcurement && renderProcurementModal()}
@@ -3713,6 +4874,15 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                         const v = await fetch(`/api/vehicles/${encodeURIComponent(plate)}`).then(r => r.ok ? r.json() : null);
                         if (v) setColdForm(c => ({ ...c, make: c.make || v.make || '', model: c.model || v.model || '' }));
                       }
+                      // Auto-fill customer name/email from most recent booking for this rego
+                      if (user?.id) {
+                        const custRes = await fetch(`/api/mechanic/customer-lookup?mechanicId=${encodeURIComponent(user.id)}&rego=${encodeURIComponent(plate)}`).then(r => r.ok ? r.json() : null).catch(() => null);
+                        if (custRes?.customer) {
+                          if (custRes.customer.customer_name && !coldForm.customerName) setColdForm(c => ({ ...c, customerName: custRes.customer.customer_name }));
+                          if (custRes.customer.email && !coldForm.email) setColdForm(c => ({ ...c, email: custRes.customer.email }));
+                          if (custRes.customer.customer_phone && !coldForm.phone) setColdForm(c => ({ ...c, phone: custRes.customer.customer_phone }));
+                        }
+                      }
                       // After vehicle details fetched, check if customer account exists
                       await checkHistoryAccess(plate);
                     } catch {}
@@ -3743,64 +4913,37 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
 
                 {histAccessState === 'needs_otp' && (
                   <div className="space-y-2">
-                    <p className="text-xs text-foreground">The owner of this vehicle has a Torqued account. To view their service history, we need to send them a one-time access code. Once they provide you with the code, enter it below to unlock their service history for this quote.</p>
+                    <p className="text-xs text-foreground">The owner of this vehicle has a Torqued account. We'll email them a secure link to grant you 12 hours of access to their service history — no code to relay.</p>
                     <button
                       onClick={() => checkHistoryAccess(coldForm.rego)}
                       className="text-xs font-bold bg-torqued-red text-white px-4 py-2 rounded-lg hover:bg-torqued-red/80 transition-colors">
-                      Send Access Code
+                      Email access link
                     </button>
                   </div>
                 )}
 
-                {(histAccessState === 'otp_sent' || histAccessState === 'already_sent') && (
+                {(histAccessState === 'otp_sent' || histAccessState === 'already_sent' || histAccessState === 'entering_code') && (
                   <div className="space-y-2">
                     <p className="text-xs text-foreground">
                       {histAccessState === 'already_sent'
-                        ? 'A code has already been sent to the vehicle owner.'
-                        : 'An access code has been sent to the vehicle owner\'s email.'}
-                      {histOtpExpiry && <span className="text-muted"> Expires {new Date(histOtpExpiry).toLocaleTimeString('en-NZ', { hour: 'numeric', minute: '2-digit' })}.</span>}
+                        ? 'An access link has already been emailed to the vehicle owner.'
+                        : 'A 12-hour access link has been emailed to the vehicle owner.'}
+                      {histOtpExpiry && <span className="text-muted"> Valid until {new Date(histOtpExpiry).toLocaleString('en-NZ', { weekday: 'short', hour: 'numeric', minute: '2-digit' })}.</span>}
                     </p>
+                    <p className="text-[11px] text-muted">Once they've tapped it, check for access:</p>
                     <div className="flex gap-2">
-                      <input
-                        type="text"
-                        inputMode="numeric"
-                        maxLength={6}
-                        value={histOtpInput}
-                        onChange={e => setHistOtpInput(e.target.value.replace(/\D/g, '').slice(0, 6))}
-                        placeholder="Enter 6-digit code"
-                        className="flex-1 bg-card border border-border rounded-lg px-3 h-10 text-sm text-foreground tracking-widest font-mono text-center"
-                      />
                       <button
                         onClick={verifyHistOtp}
-                        disabled={histOtpInput.length !== 6}
-                        className="text-xs font-bold bg-torqued-red text-white px-4 py-2 rounded-lg disabled:opacity-40 hover:bg-torqued-red/80 transition-colors">
-                        Unlock
+                        className="text-xs font-bold bg-torqued-red text-white px-4 py-2 rounded-lg hover:bg-torqued-red/80 transition-colors">
+                        {histAccessState === 'verifying' ? 'Checking…' : 'Check access'}
                       </button>
-                    </div>
-                    {histAccessMsg && <p className="text-xs text-torqued-red font-bold">{histAccessMsg}</p>}
-                  </div>
-                )}
-
-                {histAccessState === 'entering_code' && (
-                  <div className="space-y-2">
-                    <div className="flex gap-2">
-                      <input
-                        type="text"
-                        inputMode="numeric"
-                        maxLength={6}
-                        value={histOtpInput}
-                        onChange={e => setHistOtpInput(e.target.value.replace(/\D/g, '').slice(0, 6))}
-                        placeholder="Enter 6-digit code"
-                        className="flex-1 bg-card border border-border rounded-lg px-3 h-10 text-sm text-foreground tracking-widest font-mono text-center"
-                      />
                       <button
-                        onClick={verifyHistOtp}
-                        disabled={histOtpInput.length !== 6}
-                        className="text-xs font-bold bg-torqued-red text-white px-4 py-2 rounded-lg disabled:opacity-40">
-                        Unlock
+                        onClick={() => checkHistoryAccess(coldForm.rego)}
+                        className="text-xs font-bold border border-border text-foreground px-4 py-2 rounded-lg hover:bg-card transition-colors">
+                        Resend link
                       </button>
                     </div>
-                    {histAccessMsg && <p className="text-xs text-torqued-red font-bold">{histAccessMsg}</p>}
+                    {histAccessMsg && <p className="text-xs text-amber-500 font-bold">{histAccessMsg}</p>}
                   </div>
                 )}
 
@@ -3959,6 +5102,23 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                 ))}
               </div>
 
+              {/* Shop Fee */}
+              <div className="space-y-1">
+                <label className="text-[10px] font-black uppercase tracking-widest text-muted">Workshop Fee ($) <span className="font-normal normal-case tracking-normal text-muted/60">— freight, sundries &amp; consumables</span></label>
+                <input type="number" value={qShopFee||''} onChange={e=>setQShopFee(parseFloat(e.target.value)||0)} className="w-full bg-background border border-border rounded-lg px-3 h-10 text-sm text-foreground" />
+              </div>
+
+              {/* Parts Lead Time */}
+              <div className="space-y-1">
+                <label className="text-[10px] font-black uppercase tracking-widest text-muted">Parts Lead Time <span className="font-normal normal-case tracking-normal text-muted/60">— business days until parts arrive (0 = no wait)</span></label>
+                <div className="flex items-center gap-3">
+                  <input type="number" min={0} max={30} value={qLeadTimeDays||''} onChange={e=>setQLeadTimeDays(Math.max(0,parseInt(e.target.value)||0))} placeholder="0" className="w-24 bg-background border border-border rounded-lg px-3 h-10 text-sm text-foreground" />
+                  {qLeadTimeDays > 0 && (
+                    <p className="text-xs text-amber-400">Customer's earliest drop-off will be {qLeadTimeDays} business day{qLeadTimeDays!==1?'s':''} from now</p>
+                  )}
+                </div>
+              </div>
+
               {/* Discount */}
               <div className="space-y-1">
                 <label className="text-[10px] font-black uppercase tracking-widest text-muted">Discount ($)</label>
@@ -3976,6 +5136,7 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                 <div className="flex justify-between text-muted"><span>Parts</span><span>${qPartsTotal.toFixed(2)}</span></div>
                 <div className="flex justify-between text-muted"><span>Labour ({qLabourHours}h × ${qLabourRate})</span><span>${qLabourTotal.toFixed(2)}</span></div>
                 {qOtherTotal>0 && <div className="flex justify-between text-muted"><span>Other</span><span>${qOtherTotal.toFixed(2)}</span></div>}
+                {qShopFee>0 && <div className="flex justify-between text-muted"><span>Workshop fee</span><span>${qShopFee.toFixed(2)}</span></div>}
                 {qDiscount>0 && <div className="flex justify-between text-emerald-500"><span>Discount</span><span>-${qDiscount.toFixed(2)}</span></div>}
                 <div className="flex justify-between font-black text-foreground text-lg pt-1.5 border-t border-border"><span>Total (GST incl.)</span><span className="text-torqued-red">${qTotal.toFixed(2)}</span></div>
               </div>
@@ -3988,6 +5149,7 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                     ...qParts.filter(p=>p.name).map(p=>`${p.name} x${p.qty} — $${(p.qty*p.unitPrice).toFixed(2)}`),
                     `Labour: ${qLabourHours}h × $${qLabourRate} = $${qLabourTotal.toFixed(2)}`,
                     ...qOther.filter(o=>o.name).map(o=>`${o.name} — $${o.amount.toFixed(2)}`),
+                    qShopFee>0?`Workshop fee — $${qShopFee.toFixed(2)}`:'',
                     qDiscount>0?`Discount: -$${qDiscount.toFixed(2)}`:'',
                     qNotes.trim()?`\nNotes: ${qNotes.trim()}`:''
                   ].filter(Boolean).join('\n');
@@ -3995,13 +5157,13 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                     method: 'POST', headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({
                       bookingId: quoteJob.id, total: qTotal, note, customerName: quoteJob.customerName, pdfBase64,
-                      items: { parts: qParts, labourHours: qLabourHours, labourRate: qLabourRate, other: qOther, discount: qDiscount, notes: qNotes },
+                      items: { parts: qParts, labourHours: qLabourHours, labourRate: qLabourRate, shopFee: qShopFee, other: qOther, discount: qDiscount, notes: qNotes, leadTimeDays: qLeadTimeDays || 0 },
                     }),
                   });
                   if (r.ok) {
                     // Mark diagnostic job as quoted → moves it to the SENT filter
                     setIncomingJobs(prev => prev.map(j => j.id === quoteJob.id
-                      ? { ...j, quoteItems: { parts: qParts, labourHours: qLabourHours, labourRate: qLabourRate, other: qOther, discount: qDiscount, notes: qNotes } }
+                      ? { ...j, quoteItems: { parts: qParts, labourHours: qLabourHours, labourRate: qLabourRate, shopFee: qShopFee, other: qOther, discount: qDiscount, notes: qNotes, leadTimeDays: qLeadTimeDays || 0 } }
                       : j
                     ));
                     fetch('/api/mechanic/update-job-status', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ bookingId: quoteJob.id, status: 'quoted' }) }).catch(() => {});
@@ -4012,6 +5174,126 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                 } catch (e) { alert('Could not generate/send quote.'); }
                 finally { setQSending(false); }
               }}>{qSending ? 'Generating & sending…' : `Email Quote PDF — $${qTotal.toFixed(2)}`}</Button>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
+      {/* Refund Modal */}
+      {refundModal && (
+        <div className="fixed inset-0 z-[200] flex items-center justify-center p-4 bg-foreground/30 backdrop-blur-sm" onClick={() => !refundBusy && setRefundModal(null)}>
+          <div className="bg-card border border-border rounded-2xl p-6 w-full max-w-md space-y-4 shadow-2xl" onClick={e => e.stopPropagation()}>
+            <div className="flex items-center justify-between">
+              <h3 className="text-lg font-black">Issue Refund</h3>
+              <button onClick={() => !refundBusy && setRefundModal(null)} className="text-muted hover:text-foreground text-xl">✕</button>
+            </div>
+            <p className="text-xs text-muted">Job <strong className="text-foreground">#{refundModal.job.id}</strong> · {refundModal.job.vehicle_rego || refundModal.job.reg} · <strong className="text-foreground">${Number(refundModal.job.total_price || refundModal.job.suggestedQuote || 0).toFixed(2)} paid</strong></p>
+            <div className="space-y-3">
+              <div>
+                <label className="text-[10px] font-black uppercase tracking-widest text-muted block mb-1">Refund Amount (NZD) — leave blank for full refund</label>
+                <input type="number" min={0} step={0.01} value={refundAmount} onChange={e => setRefundAmount(e.target.value)} placeholder={`Full refund ($${Number(refundModal.job.total_price || 0).toFixed(2)})`} className="w-full bg-background border border-border rounded-xl px-3 h-10 text-sm text-foreground" />
+              </div>
+              <div>
+                <label className="text-[10px] font-black uppercase tracking-widest text-muted block mb-1">Reason (required)</label>
+                <textarea value={refundReason} onChange={e => setRefundReason(e.target.value)} rows={3} placeholder="Describe the reason for this refund…" className="w-full bg-background border border-border rounded-xl px-3 py-2 text-sm text-foreground resize-none" />
+              </div>
+            </div>
+            <div className="flex gap-3">
+              <button onClick={() => !refundBusy && setRefundModal(null)} className="flex-1 px-4 h-10 rounded-xl border border-border text-sm font-bold text-foreground hover:bg-background">Cancel</button>
+              <button disabled={refundBusy || !refundReason.trim()} onClick={async () => {
+                setRefundBusy(true);
+                const r = await fetch('/api/stripe/refund', {
+                  method: 'POST', headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify({ bookingId: refundModal.job.id, amount: refundAmount.trim() ? parseFloat(refundAmount) : undefined, reason: refundReason.trim() }),
+                });
+                const d = await r.json();
+                setRefundBusy(false);
+                if (d.success) {
+                  alert(`Refunded $${d.refunded}. Recorded with reason: "${refundReason}"`);
+                  setRefundModal(null);
+                } else { alert(d.error || 'Refund failed — check Stripe dashboard.'); }
+              }} className="flex-1 px-4 h-10 rounded-xl bg-amber-500 text-white text-sm font-black disabled:opacity-50">
+                {refundBusy ? 'Processing…' : 'Issue Refund'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Reschedule Request Modal */}
+      <AnimatePresence>
+        {rescheduleModal && (
+          <div className="fixed inset-0 z-[200] flex items-center justify-center p-4 bg-foreground/30 backdrop-blur-sm" onClick={() => setRescheduleModal(null)}>
+            <motion.div
+              initial={{ opacity: 0, scale: 0.95 }} animate={{ opacity: 1, scale: 1 }} exit={{ opacity: 0, scale: 0.95 }}
+              onClick={e => e.stopPropagation()}
+              className="bg-background border border-border rounded-2xl p-6 w-full max-w-md space-y-5 shadow-2xl"
+            >
+              <div className="flex justify-between items-center">
+                <h3 className="text-lg font-black text-foreground">Request Reschedule</h3>
+                <button onClick={() => setRescheduleModal(null)} className="text-muted hover:text-foreground text-xl">✕</button>
+              </div>
+              <p className="text-sm text-muted">Propose a new date & time to the customer for job <strong className="text-foreground">#{rescheduleModal.job.id}</strong>. They will receive an email to accept or contact you.</p>
+              <div className="space-y-3">
+                <div>
+                  <label className="text-[10px] font-black uppercase tracking-widest text-muted block mb-1">Proposed Date & Time</label>
+                  <input type="datetime-local" value={rescheduleDate} onChange={e => setRescheduleDate(e.target.value)}
+                    className="w-full bg-card border border-border rounded-xl px-3 py-2.5 text-sm text-foreground focus:outline-none focus:border-torqued-red" />
+                </div>
+                <div>
+                  <label className="text-[10px] font-black uppercase tracking-widest text-muted block mb-1">Reason / Comment (optional)</label>
+                  <textarea value={rescheduleComment} onChange={e => setRescheduleComment(e.target.value)} rows={3} placeholder="e.g. Parts delayed, technician unavailable…"
+                    className="w-full bg-card border border-border rounded-xl px-3 py-2.5 text-sm text-foreground focus:outline-none focus:border-torqued-red resize-none" />
+                </div>
+              </div>
+              <div className="flex gap-3">
+                <Button variant="outline" className="flex-1 border-border text-foreground" onClick={() => setRescheduleModal(null)}>Cancel</Button>
+                <Button disabled={!rescheduleDate || rescheduleSending} className="flex-1 bg-torqued-red text-white" onClick={async () => {
+                  setRescheduleSending(true);
+                  try {
+                    const r = await fetch('/api/mechanic/reschedule-request', {
+                      method: 'POST', headers: { 'Content-Type': 'application/json' },
+                      body: JSON.stringify({ bookingId: rescheduleModal.job.id, proposedDate: rescheduleDate, comment: rescheduleComment, mechanicName: profileData.name }),
+                    });
+                    const d = await r.json();
+                    if (r.ok) { alert('Reschedule request sent to the customer.'); setRescheduleModal(null); }
+                    else alert(d.error || 'Could not send request. Try again.');
+                  } catch { alert('Connection error. Try again.'); }
+                  finally { setRescheduleSending(false); }
+                }}>{rescheduleSending ? 'Sending…' : 'Send Request'}</Button>
+              </div>
+            </motion.div>
+          </div>
+        )}
+
+        {checkoutModal && (
+          <div className="fixed inset-0 z-[200] flex items-center justify-center p-4 bg-foreground/30 backdrop-blur-sm" onClick={() => !checkoutBusy && setCheckoutModal(null)}>
+            <motion.div
+              initial={{ opacity: 0, scale: 0.95 }} animate={{ opacity: 1, scale: 1 }} exit={{ opacity: 0, scale: 0.95 }}
+              onClick={e => e.stopPropagation()}
+              className="bg-background border border-border rounded-2xl p-6 w-full max-w-md space-y-5 shadow-2xl"
+            >
+              <div className="flex justify-between items-center">
+                <h3 className="text-lg font-black text-foreground">Check-out · Car Ready</h3>
+                <button onClick={() => setCheckoutModal(null)} className="text-muted hover:text-foreground text-xl">✕</button>
+              </div>
+              <p className="text-sm text-muted">Record the odometer for job <strong className="text-foreground">#{checkoutModal.job.id}</strong>. The customer will be notified their vehicle is ready.</p>
+              <div className="space-y-3">
+                <div>
+                  <label className="text-[10px] font-black uppercase tracking-widest text-muted block mb-1">Odometer at check-out (km)</label>
+                  <input type="text" inputMode="numeric" value={checkoutKm} onChange={e => setCheckoutKm(e.target.value)} placeholder="e.g. 124500"
+                    className="w-full bg-card border border-border rounded-xl px-3 py-2.5 text-sm text-foreground focus:outline-none focus:border-torqued-red" />
+                </div>
+                <div>
+                  <label className="text-[10px] font-black uppercase tracking-widest text-muted block mb-1">Notes for the customer (optional)</label>
+                  <textarea value={checkoutNotes} onChange={e => setCheckoutNotes(e.target.value)} rows={3} placeholder="e.g. Replaced front pads, recommend rear pads next service…"
+                    className="w-full bg-card border border-border rounded-xl px-3 py-2.5 text-sm text-foreground focus:outline-none focus:border-torqued-red resize-none" />
+                </div>
+              </div>
+              <div className="flex gap-3">
+                <Button variant="outline" className="flex-1 border-border text-foreground" disabled={checkoutBusy} onClick={() => setCheckoutModal(null)}>Cancel</Button>
+                <Button disabled={!checkoutKm.trim() || checkoutBusy} className="flex-1 bg-torqued-red text-white" onClick={confirmCheckout}>{checkoutBusy ? 'Saving…' : 'Mark car ready'}</Button>
+              </div>
             </motion.div>
           </div>
         )}
