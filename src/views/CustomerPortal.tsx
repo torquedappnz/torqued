@@ -73,6 +73,10 @@ function summariseQuote(qi: any, isDiag: boolean): string {
   return isDiag ? 'Repair Quote' : 'Your Quote';
 }
 
+type HealthInsight = { title: string; detail: string; severity: 'good' | 'due' | 'overdue' | 'info' };
+// Module-level AI insights cache — persists across re-renders, keyed by "rego:historyVersion"
+const _healthCache = new Map<string, HealthInsight[]>();
+
 // Map a health-insight title to a bookable SERVICES id (best-effort).
 function insightToServiceId(title: string): string | null {
   const t = title.toLowerCase();
@@ -1984,16 +1988,18 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
   const [histSummaries, setHistSummaries] = useState<Record<string, string>>({});
 
   // ── Vehicle Health Overview (AI) ────────────────────────────────────────────
-  type HealthInsight = { title: string; detail: string; severity: 'good' | 'due' | 'overdue' | 'info' };
   const [healthInsights, setHealthInsights] = useState<HealthInsight[]>([]);
   const [healthLoading, setHealthLoading] = useState(false);
   const [healthHasHistory, setHealthHasHistory] = useState(true);
+  const [historyVersion, setHistoryVersion] = useState(0);
 
   useEffect(() => {
     if (!vehicle?.rego || !garageUnlocked) return;
+    const cacheKey = `${vehicle.rego}:${historyVersion}`;
+    const cached = _healthCache.get(cacheKey);
+    if (cached) { setHealthInsights(cached); setHealthLoading(false); return; }
     setHealthInsights([]);
     setHealthLoading(true);
-    // Backend now fetches authoritative history from DB by rego — no need to pass manualHistory.
     fetch('/api/ai/health-insights', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -2007,12 +2013,16 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
       }),
     })
       .then(async r => { const d = await r.json(); if (!r.ok) throw new Error(d?.error); return d; })
-      .then(d => { if (Array.isArray(d.insights)) { setHealthInsights(d.insights); setHealthHasHistory(d.hasHistory ?? true); } })
+      .then(d => {
+        if (Array.isArray(d.insights)) {
+          _healthCache.set(cacheKey, d.insights);
+          setHealthInsights(d.insights);
+          setHealthHasHistory(d.hasHistory ?? true);
+        }
+      })
       .catch((err) => { console.warn('[health-insights]', err?.message); })
       .finally(() => setHealthLoading(false));
-  // Depend only on vehicle.rego — backend fetches its own history, so manualHistory.length no longer needed.
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [vehicle?.rego]);
+  }, [vehicle?.rego, historyVersion]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Vehicle photos
   const [vehiclePhotos, setVehiclePhotos] = useState<{ id: string; photo_url: string; comment: string; uploaded_by: string; created_at: string }[]>([]);
@@ -2973,6 +2983,7 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                                   if (!entryDate || !entryService) return;
                                   const newItem = { date: entryDate, service: entryService, provider: entryProvider || 'Unknown', mileage: entryMileage, price: entryPrice, notes: entryNotes };
                                   setManualHistory(prev => [...prev, newItem].sort((a, b) => parseServiceDate(b.date) - parseServiceDate(a.date)));
+                                  setHistoryVersion(v => v + 1);
                                   setShowHistoryEntry(false); setEntryDate(''); setEntryService(''); setEntryProvider(''); setEntryMileage(''); setEntryPrice(''); setEntryNotes('');
                                 }} className="flex-1 py-1.5 bg-torqued-red text-white text-xs font-bold rounded-lg">Save Record</button>
                                 <button onClick={() => setShowHistoryEntry(false)} className="px-3 py-1.5 border border-border text-xs font-bold rounded-lg">Cancel</button>
@@ -3005,6 +3016,7 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                                           <button onClick={async () => {
                                             const updated = { ...item, date: editLogDate, service: editLogService, provider: editLogProvider, mileage: editLogMileage, price: editLogPrice, notes: editLogNotes };
                                             setManualHistory(prev => prev.map((h, i) => i === originalIdx ? updated : h));
+                                            setHistoryVersion(v => v + 1);
                                             setEditingLogIdx(null);
                                             if (item.id) await fetch('/api/customer/update-history', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id: item.id, fields: { date: editLogDate, service: editLogService, provider: editLogProvider, mileage: editLogMileage, price: editLogPrice } }) }).catch(() => {});
                                           }} className="flex-1 py-1.5 bg-torqued-red text-white text-xs font-bold rounded-lg">Save</button>
@@ -3021,7 +3033,7 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                                         {!isTorqued && (
                                           <div className="flex items-center gap-1 shrink-0">
                                             <button onClick={() => { setEditingLogIdx(idx); setEditLogDate(item.date||''); setEditLogService(item.service||''); setEditLogProvider(item.provider||''); setEditLogMileage(item.mileage||''); setEditLogPrice(item.price||''); setEditLogNotes(item.notes||''); }} className="p-1 hover:bg-card rounded text-muted hover:text-foreground transition-colors"><Edit2 size={11} /></button>
-                                            <button onClick={() => setManualHistory(prev => prev.filter((_, i) => i !== originalIdx))} className="p-1 hover:bg-torqued-red/10 rounded text-muted hover:text-torqued-red transition-colors"><Plus size={11} className="rotate-45" /></button>
+                                            <button onClick={() => { setManualHistory(prev => prev.filter((_, i) => i !== originalIdx)); setHistoryVersion(v => v + 1); }} className="p-1 hover:bg-torqued-red/10 rounded text-muted hover:text-torqued-red transition-colors"><Plus size={11} className="rotate-45" /></button>
                                           </div>
                                         )}
                                       </div>
@@ -3036,8 +3048,9 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
 
                       {/* AI insight cards */}
                       {healthLoading ? (
-                        <div className="space-y-2">
-                          {[...Array(3)].map((_, i) => <div key={i} className="h-14 rounded-xl bg-background animate-pulse" />)}
+                        <div className="flex items-center gap-3 py-3 px-3 bg-background rounded-xl border border-border">
+                          <div className="w-4 h-4 border-2 border-torqued-red/30 border-t-torqued-red rounded-full animate-spin shrink-0" />
+                          <p className="text-xs text-muted font-bold">Analysing your vehicle history…</p>
                         </div>
                       ) : (
                         <div className="space-y-2">
@@ -3319,6 +3332,21 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                             <li key={item} className="text-[10px] text-muted flex items-start gap-1"><span className="text-torqued-red mt-0.5">✓</span>{item}</li>
                           ))}
                         </ul>
+                      </div>
+                    </div>
+                  </div>
+                )}
+
+                {/* Brake pad rotor machining info — shown when front or rear pads selected */}
+                {(selectedServices.includes('brakes_front_pads') || selectedServices.includes('brakes_rear_pads')) &&
+                 !selectedServices.includes('brakes_front_rotors') && !selectedServices.includes('brakes_rear_rotors') && (
+                  <div className="p-4 bg-amber-500/8 border border-amber-500/25 rounded-xl space-y-2">
+                    <div className="flex items-start gap-3">
+                      <span className="text-lg shrink-0">🛑</span>
+                      <div className="space-y-1.5">
+                        <p className="text-sm font-bold text-amber-400">Rotor machining included — here's why it matters</p>
+                        <p className="text-[11px] text-muted leading-relaxed">When brake pads wear down, they score grooves into your rotors. Fitting new pads on scored rotors causes uneven contact — leading to brake shudder, reduced stopping power, and pads wearing out faster. Your mechanic will machine (resurface) your rotors as part of this job at no extra charge, restoring a flat surface for the new pads to bed in correctly.</p>
+                        <p className="text-[10px] text-amber-400/80 font-bold">✓ Rotor machining cost included in your quote</p>
                       </div>
                     </div>
                   </div>
