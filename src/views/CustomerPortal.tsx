@@ -1034,7 +1034,7 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
   useEffect(() => {
     if (!garageUnlocked || view !== 'garage') return;
     const first = garageVehicles.find(gv => !archivedRegos.includes(gv.rego));
-    if (first && !vehicle) loadVehicleByRego(first.rego);
+    if (first && first.rego !== vehicle?.rego) loadVehicleByRego(first.rego);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [garageUnlocked, garageVehicles.length, view]);
 

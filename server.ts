@@ -5992,7 +5992,10 @@ app.post('/api/customer/remove-vehicle', async (req, res) => {
       return res.status(403).json({ error: 'Not authorised to remove this vehicle' });
     }
 
-    await supabase.from('vehicles').update({ owner_id: null }).eq('rego', formattedRego);
+    await Promise.all([
+      supabase.from('vehicles').update({ owner_id: null }).eq('rego', formattedRego),
+      supabase.from('vehicle_history').delete().eq('rego', formattedRego),
+    ]);
     res.json({ success: true });
   } catch (err) {
     console.error('[customer/remove-vehicle]', err);

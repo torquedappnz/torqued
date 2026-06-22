@@ -45,16 +45,7 @@ export const MOCK_VEHICLES: Record<string, Vehicle> = {
     mileage: 220000,
     thumbnail: 'https://images.unsplash.com/photo-1590362891991-f776e747a588?auto=format&fit=crop&q=80&w=400',
   },
-  'MTESLA': {
-    id: 'v3',
-    rego: 'MTESLA',
-    make: 'Tesla',
-    model: 'Model 3',
-    year: 2020,
-    variant: 'Long Range Dual Motor',
-    mileage: 120000,
-    thumbnail: 'https://images.unsplash.com/photo-1560958089-b8a1929cea89?auto=format&fit=crop&q=80&w=400',
-  }
+
 };
 
 export const MOCK_VEHICLE = MOCK_VEHICLES['RAH190'];
