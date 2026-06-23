@@ -264,13 +264,13 @@ app.get('/api/mechanics', async (_req, res) => {
 app.post('/api/mechanic/update-job-status', async (req, res) => {
   try {
     const { bookingId, status } = req.body;
-    const allowed = ['booked', 'in_progress', 'completed', 'declined', 'cancelled', 'pending', 'quoted'];
+    const allowed = ['booked', 'accepted', 'in_progress', 'completed', 'declined', 'cancelled', 'pending', 'quoted'];
     if (!bookingId || !allowed.includes(status)) return res.status(400).json({ error: 'bookingId and a valid status are required' });
     const supabase = getSupabaseAdmin();
     if (!supabase) return res.status(500).json({ error: 'Database not configured' });
 
     // Enforce billing_start_date: mechanic cannot accept jobs before their billing starts
-    if (status === 'in_progress') {
+    if (status === 'accepted' || status === 'in_progress') {
       const { data: booking } = await supabase.from('bookings').select('mechanic_id').eq('id', bookingId).single();
       if (booking?.mechanic_id) {
         const { data: profile } = await supabase.from('profiles').select('billing_start_date').eq('id', booking.mechanic_id).single();
