@@ -612,14 +612,23 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
       doc.splitTextToSize(qNotes.trim(), 180).forEach((line: string) => { doc.text(line, 15, y); y += 4.5; });
     }
 
-    // QR + CTA
-    if (qr) doc.addImage(qr, 'PNG', 15, 240, 32, 32);
+    // QR + CTA — placed after notes; spill to a new page if less than 50mm remaining
+    const QR_BLOCK_H = 42; // 32mm image + padding
+    if (y + QR_BLOCK_H > 272) { doc.addPage(); y = 18; }
+    y += 8;
+    if (qr) doc.addImage(qr, 'PNG', 15, y, 32, 32);
     doc.setTextColor(21, 4, 2); doc.setFont('Helvetica', 'bold'); doc.setFontSize(11);
-    doc.text('Book on your own terms with Torqued', 52, 250);
+    doc.text('Book on your own terms with Torqued', 52, y + 10);
     doc.setFont('Helvetica', 'normal'); doc.setFontSize(9); doc.setTextColor(100, 100, 100);
-    doc.text('Scan the QR code to accept this quote and book instantly.', 52, 256);
-    doc.setFontSize(7.5); doc.setTextColor(150, 150, 150);
-    doc.text('Quote provided via Torqued — NZ\'s smarter way to get your car sorted. Prices include 15% GST.', 15, 285);
+    doc.text('Scan the QR code to accept this quote and book instantly.', 52, y + 16);
+    y += QR_BLOCK_H;
+    // Footer always at bottom of last page
+    const pageCount = (doc as any).internal.getNumberOfPages();
+    for (let i = 1; i <= pageCount; i++) {
+      doc.setPage(i);
+      doc.setFontSize(7.5); doc.setTextColor(150, 150, 150);
+      doc.text('Quote provided via Torqued — NZ\'s smarter way to get your car sorted. Prices include 15% GST.', 15, 290);
+    }
 
     return doc.output('datauristring').split(',')[1];
   };
