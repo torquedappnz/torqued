@@ -5,9 +5,10 @@ import { cn } from '../utils';
 
 interface VehicleTimelineAnalysisProps {
   rego?: string;
+  onInsightsLoaded?: (insights: { title: string; detail: string; severity: string }[]) => void;
 }
 
-export const VehicleTimelineAnalysis: React.FC<VehicleTimelineAnalysisProps> = ({ rego }) => {
+export const VehicleTimelineAnalysis: React.FC<VehicleTimelineAnalysisProps> = ({ rego, onInsightsLoaded }) => {
   const [insights, setInsights] = useState<{ title: string; detail: string; severity: string }[] | null>(null);
   const [insightsLoading, setInsightsLoading] = useState(false);
 
@@ -30,14 +31,17 @@ export const VehicleTimelineAnalysis: React.FC<VehicleTimelineAnalysisProps> = (
           body: JSON.stringify({ rego, make: vRes?.make, model: vRes?.model, year: vRes?.year, mileage: vRes?.mileage, history }),
         });
         const d = await r.json();
-        setInsights(r.ok && Array.isArray(d.insights) ? d.insights : []);
+        const loaded = r.ok && Array.isArray(d.insights) ? d.insights : [];
+        setInsights(loaded);
+        onInsightsLoaded?.(loaded);
       } catch {
         setInsights([]);
+        onInsightsLoaded?.([]);
       } finally {
         setInsightsLoading(false);
       }
     })();
-  }, [rego]);
+  }, [rego]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const sevStyle = (s: string) =>
     s === 'overdue' ? 'border-red-500/30 bg-red-500/5 text-red-500'

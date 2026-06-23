@@ -829,6 +829,7 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
   const [jobsSubtab, setJobsSubtab] = useState<'accept' | 'today' | 'upcoming' | 'history' | 'cold'>('accept');
   const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
   const [selectedJobId, setSelectedJobId] = useState<string | null>(null);
+  const [modalInsights, setModalInsights] = useState<{ title: string; detail: string; severity: string }[]>([]);
   const [calendarView, setCalendarView] = useState<'day' | 'week' | 'month'>('week');
   const [calendarMonth, setCalendarMonth] = useState(() => { const d = new Date(); return { year: d.getFullYear(), month: d.getMonth() }; });
   const [parts, setParts] = useState<InventoryPart[]>([]);
@@ -3080,10 +3081,11 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
               <h2 className="text-3xl text-foreground font-black">{job.reg}: {job.model}</h2>
               <p className="text-muted text-sm font-mono uppercase tracking-widest mt-1">Status: {job.status} • Sync: Live</p>
             </div>
-            <button 
+            <button
               onClick={() => {
                 setSelectedJobId(null);
                 setDiagnosticStep('review');
+                setModalInsights([]);
               }}
               className="p-2 hover:bg-background rounded-full transition-colors text-muted hover:text-foreground border border-transparent hover:border-border"
             >
@@ -3093,7 +3095,7 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
 
           <div className="flex-1 overflow-y-auto p-8 space-y-8 bg-background">
             {/* AI Health Insights + Vehicle Timeline */}
-            <VehicleTimelineAnalysis rego={job.reg} />
+            <VehicleTimelineAnalysis rego={job.reg} onInsightsLoaded={setModalInsights} />
 
             <div className="grid grid-cols-1 lg:grid-cols-3 gap-12 text-foreground">
               {/* Left Column: Service History */}
@@ -3233,8 +3235,129 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
             <Button variant="outline" onClick={() => {
               setSelectedJobId(null);
               setDiagnosticStep('review');
+              setModalInsights([]);
             }} className="border-border text-foreground hover:bg-background">Close Report</Button>
-            <Button className="bg-torqued-red text-white">Print Summary</Button>
+            <Button className="bg-torqued-red text-white" onClick={async () => {
+              const { jsPDF } = await import('jspdf');
+              const doc = new jsPDF({ unit: 'mm', format: 'a4' });
+              const red: [number, number, number] = [220, 38, 38];
+              const dark: [number, number, number] = [17, 17, 17];
+              const muted: [number, number, number] = [120, 120, 120];
+              let y = 18;
+
+              // Header
+              doc.setFont('helvetica', 'bold');
+              doc.setFontSize(8);
+              doc.setTextColor(...red);
+              doc.text('VEHICLE HEALTH REPORT — TORQUED NZ', 14, y);
+              y += 8;
+              doc.setFontSize(20);
+              doc.setTextColor(...dark);
+              doc.text(`${job.reg}: ${job.model}`, 14, y);
+              y += 7;
+              doc.setFont('helvetica', 'normal');
+              doc.setFontSize(8);
+              doc.setTextColor(...muted);
+              doc.text(`STATUS: ${(job.status || '').toUpperCase()}  •  PRINTED: ${new Date().toLocaleDateString('en-NZ', { day: '2-digit', month: 'short', year: 'numeric' })}`, 14, y);
+              y += 10;
+
+              // Divider
+              doc.setDrawColor(...red);
+              doc.setLineWidth(0.4);
+              doc.line(14, y, 196, y);
+              y += 8;
+
+              // AI Health Insights
+              if (modalInsights.length > 0) {
+                doc.setFont('helvetica', 'bold');
+                doc.setFontSize(10);
+                doc.setTextColor(...dark);
+                doc.text('AI HEALTH INSIGHTS', 14, y);
+                y += 6;
+
+                const cols = [14, 107];
+                let col = 0;
+                let rowY = y;
+                let maxRowY = y;
+
+                for (const ins of modalInsights) {
+                  const x = cols[col];
+                  const boxW = 90;
+                  const lines = doc.splitTextToSize(ins.detail, boxW - 6);
+                  const boxH = 6 + lines.length * 4.5 + 3;
+
+                  const c: [number, number, number] =
+                    ins.severity === 'good' ? [16, 185, 129] :
+                    ins.severity === 'due' ? [245, 158, 11] :
+                    ins.severity === 'overdue' ? [220, 38, 38] : [100, 100, 100];
+
+                  doc.setDrawColor(...c);
+                  doc.setFillColor(255, 255, 255);
+                  doc.roundedRect(x, rowY, boxW, boxH, 3, 3, 'FD');
+
+                  doc.setFont('helvetica', 'bold');
+                  doc.setFontSize(8);
+                  doc.setTextColor(...c);
+                  doc.text(ins.title.toUpperCase(), x + 3, rowY + 5);
+
+                  doc.setFont('helvetica', 'normal');
+                  doc.setFontSize(7.5);
+                  doc.setTextColor(...dark);
+                  doc.text(lines, x + 3, rowY + 10);
+
+                  maxRowY = Math.max(maxRowY, rowY + boxH);
+                  col++;
+                  if (col === 2) { col = 0; rowY = maxRowY + 3; maxRowY = rowY; }
+                }
+                y = maxRowY + 8;
+              }
+
+              // Service History
+              if (jobHistory.length > 0) {
+                if (y > 220) { doc.addPage(); y = 18; }
+                doc.setDrawColor(220, 220, 220);
+                doc.setLineWidth(0.2);
+                doc.line(14, y, 196, y);
+                y += 7;
+
+                doc.setFont('helvetica', 'bold');
+                doc.setFontSize(10);
+                doc.setTextColor(...dark);
+                doc.text('SERVICE HISTORY', 14, y);
+                y += 6;
+
+                for (const h of jobHistory) {
+                  if (y > 265) { doc.addPage(); y = 18; }
+                  doc.setFont('helvetica', 'bold');
+                  doc.setFontSize(8);
+                  doc.setTextColor(...dark);
+                  const dateStr = h.service_date || h.date || '';
+                  const kmStr = h.mileage ? ` · ${Number(h.mileage).toLocaleString()} km` : '';
+                  doc.text(`${dateStr}${kmStr}`, 14, y);
+                  y += 4.5;
+                  doc.setFont('helvetica', 'normal');
+                  doc.setFontSize(7.5);
+                  doc.setTextColor(...muted);
+                  const desc = h.work_done || h.service || '';
+                  const lines = doc.splitTextToSize(desc, 180);
+                  doc.text(lines, 14, y);
+                  y += lines.length * 4 + 3;
+                }
+              }
+
+              // Footer
+              const pageCount = (doc as any).internal.getNumberOfPages();
+              for (let i = 1; i <= pageCount; i++) {
+                doc.setPage(i);
+                doc.setFont('helvetica', 'normal');
+                doc.setFontSize(7);
+                doc.setTextColor(...muted);
+                doc.text('Generated by Torqued NZ — torqued-psi.vercel.app', 14, 290);
+                doc.text(`Page ${i} of ${pageCount}`, 190, 290, { align: 'right' });
+              }
+
+              doc.save(`${job.reg}-health-report-${new Date().toISOString().slice(0, 10)}.pdf`);
+            }}>Print Summary</Button>
           </div>
         </motion.div>
       </div>
