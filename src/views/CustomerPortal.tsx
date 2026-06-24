@@ -74,8 +74,29 @@ function summariseQuote(qi: any, isDiag: boolean): string {
 }
 
 type HealthInsight = { title: string; detail: string; severity: 'good' | 'due' | 'overdue' | 'info' };
-// Module-level AI insights cache — persists across re-renders, keyed by "rego:historyVersion"
-const _healthCache = new Map<string, HealthInsight[]>();
+// localStorage-backed AI insights cache — persists across page refreshes.
+// Only invalidated when historyVersion increments (history add/edit/delete).
+const HEALTH_CACHE_PREFIX = 'torqued_health:';
+function readHealthCache(key: string): { insights: HealthInsight[]; hasHistory: boolean } | null {
+  try {
+    const raw = localStorage.getItem(HEALTH_CACHE_PREFIX + key);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    if (Array.isArray(parsed?.insights)) return parsed;
+  } catch {}
+  return null;
+}
+function writeHealthCache(key: string, data: { insights: HealthInsight[]; hasHistory: boolean }) {
+  try { localStorage.setItem(HEALTH_CACHE_PREFIX + key, JSON.stringify(data)); } catch {}
+}
+// Purge stale cache keys for a rego when a new version is written
+function pruneHealthCache(rego: string, currentVersion: number) {
+  try {
+    Object.keys(localStorage)
+      .filter(k => k.startsWith(HEALTH_CACHE_PREFIX + rego + ':') && !k.endsWith(':' + currentVersion))
+      .forEach(k => localStorage.removeItem(k));
+  } catch {}
+}
 
 // Map a health-insight title to a bookable SERVICES id (best-effort).
 function insightToServiceId(title: string): string | null {
@@ -2010,8 +2031,13 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
   useEffect(() => {
     if (!vehicle?.rego || !garageUnlocked) return;
     const cacheKey = `${vehicle.rego}:${historyVersion}`;
-    const cached = _healthCache.get(cacheKey);
-    if (cached) { setHealthInsights(cached); setHealthLoading(false); return; }
+    const cached = readHealthCache(cacheKey);
+    if (cached) {
+      setHealthInsights(cached.insights);
+      setHealthHasHistory(cached.hasHistory);
+      setHealthLoading(false);
+      return;
+    }
     setHealthInsights([]);
     setHealthLoading(true);
     fetch('/api/ai/health-insights', {
@@ -2029,9 +2055,11 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
       .then(async r => { const d = await r.json(); if (!r.ok) throw new Error(d?.error); return d; })
       .then(d => {
         if (Array.isArray(d.insights)) {
-          _healthCache.set(cacheKey, d.insights);
+          const entry = { insights: d.insights, hasHistory: d.hasHistory ?? true };
+          writeHealthCache(cacheKey, entry);
+          pruneHealthCache(vehicle.rego, historyVersion);
           setHealthInsights(d.insights);
-          setHealthHasHistory(d.hasHistory ?? true);
+          setHealthHasHistory(entry.hasHistory);
         }
       })
       .catch((err) => { console.warn('[health-insights]', err?.message); })

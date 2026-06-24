@@ -4600,36 +4600,52 @@ app.post('/api/ai/health-insights', async (req, res) => {
       ? `Service history (most recent first):\n${history.slice(0, 20).map((h: any) => `- ${h.service_date || 'unknown date'}: ${h.work_done}${h.mileage ? ` at ${h.mileage} km` : ''}${h.provider ? ` (${h.provider})` : ''}`).join('\n')}`
       : 'No service history on file.';
 
+    // Estimate annual mileage from the two most-separated history entries with both date and mileage
+    let annualKmEstimate: number | null = null;
+    const withBoth = history.filter((h: any) => h.service_date && h.mileage && Number(h.mileage) > 0);
+    if (withBoth.length >= 2) {
+      const sorted = [...withBoth].sort((a: any, b: any) => a.service_date.localeCompare(b.service_date));
+      const oldest = sorted[0], newest = sorted[sorted.length - 1];
+      const years = (new Date(newest.service_date).getTime() - new Date(oldest.service_date).getTime()) / (365.25 * 24 * 3600 * 1000);
+      const kmSpan = Number(newest.mileage) - Number(oldest.mileage);
+      if (years >= 0.25 && kmSpan > 0) annualKmEstimate = Math.round(kmSpan / years);
+    }
+
     const km = Number(resolvedMileage) || 0;
     const today = new Date().toISOString().slice(0, 10);
+    const annualKmLine = annualKmEstimate
+      ? `Estimated annual mileage: ~${annualKmEstimate.toLocaleString()} km/year (calculated from service history).`
+      : `Estimated annual mileage: unknown — use km-based intervals only for time projections.`;
+
     const prompt = `You are an NZ vehicle service advisor. Today is ${today}.
 
 Vehicle: ${resolvedYear || 'unknown year'} ${resolvedMake || ''} ${resolvedModel || ''} (${formattedRego || ''}), current odometer: ${km ? `${km.toLocaleString()} km` : 'unknown'}.
+${annualKmLine}
 
 ${historyText}
 
 Your job: produce ONLY genuine, vehicle-specific service recommendations. Rules:
-1. Read the service history carefully. If a service (e.g. cambelt, oil change, transmission) was completed recently, mark it "good" — do NOT suggest it is due unless the interval has genuinely been exceeded.
-2. Only include a service if it is relevant to this specific vehicle. Examples:
-   - EVs and PHEVs do not need cambelt or transmission fluid services in the same way — adapt accordingly.
-   - Chain-driven engines (most modern VAG/Toyota/Honda engines) need no cambelt — use severity "info" if you mention it at all, or skip.
-   - PHEVs may have extended oil intervals — reflect the manufacturer recommendation.
-3. Use ONLY the actual service history and vehicle age/mileage to determine urgency. Do not invent or assume services that the history shows were recently done.
-4. Typical NZ intervals for reference (adjust for this specific vehicle/manufacturer):
-   - Oil & Filter: 10,000–15,000 km or 12 months (PHEVs often longer)
+1. Read the service history carefully. If a service was completed recently, mark it "good" — do NOT suggest it is due unless the interval has genuinely been exceeded.
+2. ALWAYS use the estimated annual mileage to calculate realistic time-to-next-service. If annual mileage is low (e.g. <8,000 km/yr) and the km interval is far away, do NOT mark a service as "due" solely because of time elapsed — use km progress as the primary signal.
+3. Only include a service if it is relevant to this specific vehicle:
+   - EVs and PHEVs do not need cambelt or transmission fluid services in the same way.
+   - Chain-driven engines need no cambelt — skip or use "info" only.
+   - PHEVs may have extended oil intervals.
+4. NZ service intervals (use these — do not substitute longer intervals unless manufacturer-specific):
+   - Oil & Filter: every 10,000 km or 12 months, whichever comes first
    - Cambelt: 100,000 km or 5 years (belt-driven only)
-   - Transmission fluid: 60,000 km or 4 years
+   - Transmission fluid: 60,000 km or 4 years — only flag as "due" if genuinely approaching by km
    - Brakes: inspect every 20,000 km or 12 months
    - Spark plugs: 40,000–100,000 km depending on type
    - Coolant: 60,000 km or 3–5 years
-5. Return 3–6 insights. Only include services that are actually due, overdue, or approaching due based on real evidence. If the history clearly shows a service was done recently, mark it "good" and give next-due info, or skip it entirely if there is nothing useful to add.
-6. Km calculations: km_since_last = current_km − km_at_last_service. Only mark "overdue" if km_since_last ≥ interval OR date interval is clearly exceeded.
+5. Return 3–6 insights. Only include services that are actually due, overdue, or approaching due based on real evidence.
+6. Km calculations: km_since_last = current_km − km_at_last_service. Only mark "overdue" if km_since_last ≥ interval OR time interval is clearly exceeded AND annual mileage confirms the vehicle is actually near the km interval.
 
 Severity:
   "good"    = confirmed recently done, clearly within interval
-  "due"     = approaching interval (within ~10%), or due based on time even if km not reached
+  "due"     = approaching interval (within ~15% of km interval, or time due AND km confirms it)
   "overdue" = interval genuinely exceeded by km or time
-  "info"    = not applicable to this vehicle (e.g. no cambelt, EV drivetrain), or general advisory
+  "info"    = not applicable to this vehicle, or general advisory
 
 Return ONLY valid JSON (no markdown): {"insights":[{"title":"short label","detail":"1–2 sentences with specific km/date context.","severity":"good|due|overdue|info"}]}`;
 
