@@ -2003,6 +2003,7 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
   // ── Vehicle Health Overview (AI) ────────────────────────────────────────────
   const [healthInsights, setHealthInsights] = useState<HealthInsight[]>([]);
   const [healthLoading, setHealthLoading] = useState(false);
+  const [showAllInsights, setShowAllInsights] = useState(false);
   const [healthHasHistory, setHealthHasHistory] = useState(true);
   const [historyVersion, setHistoryVersion] = useState(0);
 
@@ -2949,7 +2950,7 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                   {(healthInsights.length > 0 || healthLoading) && garageUnlocked && (
                     <div className="space-y-3 pt-4 border-t border-border">
                       <div className="flex items-center justify-between gap-2">
-                        <p className="text-xs font-black uppercase tracking-widest text-muted">AI Recommendations</p>
+                        <p className="text-xs font-black uppercase tracking-widest text-muted">Vehicle Health</p>
                         <button
                           onClick={() => setShowHistorySheet(true)}
                           className="text-xs text-torqued-red font-bold hover:underline"
@@ -5101,11 +5102,11 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
             </div>
           </section>
 
-              {/* Vehicle Health Overview */}
+              {/* Vehicle Health */}
               <section className="space-y-4">
                 <div className="flex justify-between items-center gap-3">
                   <div>
-                    <h3 className="text-2xl font-bold tracking-tight">Service Recommendations</h3>
+                    <h3 className="text-2xl font-bold tracking-tight">Vehicle Health</h3>
                     {vehicle && <p className="text-xs text-muted mt-0.5">{vehicle.year} {vehicle.make} {vehicle.model}</p>}
                   </div>
                   <div className="flex gap-2">
@@ -5123,14 +5124,14 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                 {!vehicle ? (
                   <Card className="p-6 bg-card border-border text-center text-sm text-muted italic">Select a vehicle above to see personalised service recommendations.</Card>
                 ) : healthLoading ? (
-                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                    {[...Array(5)].map((_, i) => (
+                  <div className="space-y-3">
+                    {[...Array(4)].map((_, i) => (
                       <div key={i} className="h-16 rounded-2xl bg-card animate-pulse" />
                     ))}
                   </div>
                 ) : healthInsights.length === 0 ? (
                   <Card className="p-6 bg-card border-border text-center space-y-2">
-                    <p className="text-sm text-muted">Could not load service recommendations.</p>
+                    <p className="text-sm text-muted">Could not load vehicle health insights.</p>
                     <p className="text-xs text-muted/60">This may be a temporary issue — try refreshing the page.</p>
                   </Card>
                 ) : (
@@ -5140,57 +5141,84 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                       <p className="text-sm text-amber-400 font-medium">No service history on file for this vehicle — insights are estimated from vehicle age and mileage. <button onClick={() => setShowHistorySheet(true)} className="underline font-bold">Add a record</button> to improve accuracy.</p>
                     </Card>
                   )}
-                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                    {healthInsights.map((insight, i) => {
-                      const isGood     = insight.severity === 'good';
-                      const isDue      = insight.severity === 'due';
-                      const isOverdue  = insight.severity === 'overdue';
-                      return (
-                        <Card
-                          key={i}
-                          className={cn(
-                            "p-4 flex items-start gap-3 border transition-all",
-                            isGood    && "border-emerald-500/20 bg-emerald-500/5",
-                            isDue     && "border-amber-500/20 bg-amber-500/5",
-                            isOverdue && "border-torqued-red/30 bg-torqued-red/5",
-                            !isGood && !isDue && !isOverdue && "border-border bg-card"
-                          )}
-                        >
-                          <div className={cn(
-                            "w-8 h-8 rounded-xl flex items-center justify-center shrink-0 text-base",
-                            isGood    && "bg-emerald-500/15",
-                            isDue     && "bg-amber-500/15",
-                            isOverdue && "bg-torqued-red/15",
-                            !isGood && !isDue && !isOverdue && "bg-card"
-                          )}>
-                            {isGood ? '✓' : isOverdue ? '⚠' : isDue ? '🔔' : 'ℹ'}
-                          </div>
-                          <div className="min-w-0 flex-1">
-                            <p className={cn(
-                              "text-sm font-bold leading-tight",
-                              isGood    && "text-emerald-400",
-                              isDue     && "text-amber-400",
-                              isOverdue && "text-torqued-red",
-                            )}>{insight.title}</p>
-                            <p className="text-xs text-muted mt-0.5 leading-snug">{insight.detail}</p>
-                          </div>
-                          {(isDue || isOverdue) && (
-                            <button
-                              onClick={async () => {
-                                const sid = insightToServiceId(insight.title);
-                                setRego(vehicle.rego);
-                                setSelectedServices(sid ? [sid] : []);
-                                setStep(sid ? 2 : 1);
-                                await loadVehicleByRego(vehicle.rego);
-                                setView('quote');
-                              }}
-                              className="shrink-0 text-[10px] font-black uppercase tracking-widest text-torqued-red hover:underline"
-                            >Book →</button>
-                          )}
-                        </Card>
-                      );
-                    })}
-                  </div>
+                  {/* Sort: overdue → due → good/info. Actionable items first. */}
+                  {(() => {
+                    const sevOrder = { overdue: 0, due: 1, good: 2, info: 3 };
+                    const sorted = [...healthInsights].sort((a, b) => (sevOrder[a.severity as keyof typeof sevOrder] ?? 3) - (sevOrder[b.severity as keyof typeof sevOrder] ?? 3));
+                    const LIMIT = 6;
+                    const visible = showAllInsights ? sorted : sorted.slice(0, LIMIT);
+                    return (
+                      <>
+                        <div className="space-y-3">
+                          {visible.map((insight, i) => {
+                            const isGood     = insight.severity === 'good';
+                            const isDue      = insight.severity === 'due';
+                            const isOverdue  = insight.severity === 'overdue';
+                            return (
+                              <Card
+                                key={i}
+                                className={cn(
+                                  "p-4 flex items-start gap-3 border transition-all",
+                                  isGood    && "border-emerald-500/20 bg-emerald-500/5",
+                                  isDue     && "border-amber-500/20 bg-amber-500/5",
+                                  isOverdue && "border-torqued-red/30 bg-torqued-red/5",
+                                  !isGood && !isDue && !isOverdue && "border-border bg-card"
+                                )}
+                              >
+                                <div className={cn(
+                                  "w-8 h-8 rounded-xl flex items-center justify-center shrink-0 text-base",
+                                  isGood    && "bg-emerald-500/15",
+                                  isDue     && "bg-amber-500/15",
+                                  isOverdue && "bg-torqued-red/15",
+                                  !isGood && !isDue && !isOverdue && "bg-card"
+                                )}>
+                                  {isGood ? '✓' : isOverdue ? '⚠' : isDue ? '🔔' : 'ℹ'}
+                                </div>
+                                <div className="min-w-0 flex-1">
+                                  <p className={cn(
+                                    "text-sm font-bold leading-tight",
+                                    isGood    && "text-emerald-400",
+                                    isDue     && "text-amber-400",
+                                    isOverdue && "text-torqued-red",
+                                  )}>{insight.title}</p>
+                                  <p className="text-xs text-muted mt-0.5 leading-snug">{insight.detail}</p>
+                                </div>
+                                {(isDue || isOverdue) && (
+                                  <button
+                                    onClick={async () => {
+                                      const sid = insightToServiceId(insight.title);
+                                      setRego(vehicle.rego);
+                                      setSelectedServices(sid ? [sid] : []);
+                                      setStep(sid ? 2 : 1);
+                                      await loadVehicleByRego(vehicle.rego);
+                                      setView('quote');
+                                    }}
+                                    className="shrink-0 text-[10px] font-black uppercase tracking-widest text-torqued-red hover:underline"
+                                  >Book →</button>
+                                )}
+                              </Card>
+                            );
+                          })}
+                        </div>
+                        {sorted.length > LIMIT && (
+                          <button
+                            onClick={() => setShowAllInsights(v => !v)}
+                            className="w-full py-2.5 text-xs font-bold text-muted hover:text-foreground border border-dashed border-border rounded-xl transition-colors"
+                          >
+                            {showAllInsights ? 'Show less ↑' : `See ${sorted.length - LIMIT} more insight${sorted.length - LIMIT !== 1 ? 's' : ''} ↓`}
+                          </button>
+                        )}
+                        {/* AI disclaimer */}
+                        <div className="flex items-start gap-2 px-3 py-2.5 bg-card rounded-xl border border-border">
+                          <span className="text-muted text-[11px] shrink-0 mt-0.5">ℹ</span>
+                          <p className="text-[11px] text-muted leading-relaxed">
+                            These insights are generated by AI and may not be fully accurate. Always confirm recommendations with a qualified mechanic.{' '}
+                            <button onClick={() => setShowHistorySheet(true)} className="underline font-bold text-foreground/70 hover:text-foreground">View your raw service history.</button>
+                          </p>
+                        </div>
+                      </>
+                    );
+                  })()}
                   </div>
                 )}
 
