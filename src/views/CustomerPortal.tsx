@@ -4761,6 +4761,10 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
     });
   };
   const [removingRego, setRemovingRego] = useState<string | null>(null);
+  const [transferModal, setTransferModal] = useState<{ rego: string; label: string } | null>(null);
+  const [transferEmail, setTransferEmail] = useState('');
+  const [transferLoading, setTransferLoading] = useState(false);
+  const [transferResult, setTransferResult] = useState<{ ok: boolean; message: string } | null>(null);
   const removeVehicle = async (rego: string) => {
     if (!window.confirm(`Remove ${rego} from your account?\n\nWe'll remove this vehicle from your account. See our privacy policy to learn more about how we handle service history data.`)) return;
     setRemovingRego(rego);
@@ -5076,6 +5080,15 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                           onClick={(e) => { e.stopPropagation(); toggleArchive(gv.rego); }}
                           className="text-[10px] font-bold uppercase tracking-widest text-muted hover:text-torqued-red px-2"
                         >{isArchived ? 'Restore' : 'Archive'}</button>
+                        <button
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setTransferModal({ rego: gv.rego, label: `${gv.year} ${gv.make} ${gv.model}` });
+                            setTransferEmail('');
+                            setTransferResult(null);
+                          }}
+                          className="text-[10px] font-bold uppercase tracking-widest text-muted hover:text-torqued-red px-2"
+                        >Transfer</button>
                         <button
                           onClick={(e) => { e.stopPropagation(); removeVehicle(gv.rego); }}
                           disabled={removingRego === gv.rego}
@@ -6334,6 +6347,91 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                 <Button fullWidth className="bg-torqued-red text-white" disabled={batchSaving || !!batchProgress || parsedBatch.length === 0} onClick={saveBatch}>
                   {batchSaving ? 'Saving…' : `Save ${parsedBatch.length} record${parsedBatch.length === 1 ? '' : 's'}`}
                 </Button>
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
+      {/* Vehicle Transfer Modal */}
+      <AnimatePresence>
+        {transferModal && (
+          <div className="fixed inset-0 z-[130] flex items-center justify-center bg-black/70 backdrop-blur-sm p-4" onClick={() => { if (!transferLoading) { setTransferModal(null); setTransferResult(null); } }}>
+            <motion.div
+              initial={{ opacity: 0, scale: 0.95, y: 16 }} animate={{ opacity: 1, scale: 1, y: 0 }} exit={{ opacity: 0, scale: 0.95, y: 16 }}
+              className="w-full max-w-sm bg-card border border-border rounded-3xl shadow-2xl p-6 space-y-5"
+              onClick={e => e.stopPropagation()}
+            >
+              <div className="space-y-1">
+                <div className="torqued-badge text-[10px] w-fit mb-2">TRANSFER OWNERSHIP</div>
+                <h3 className="text-lg font-black tracking-tight">{transferModal.label}</h3>
+                <p className="text-[10px] font-mono text-muted uppercase tracking-widest">{transferModal.rego}</p>
+              </div>
+
+              {transferResult ? (
+                <div className={cn("p-4 rounded-2xl space-y-3 text-sm", transferResult.ok ? "bg-emerald-500/10 border border-emerald-500/20" : "bg-torqued-red/10 border border-torqued-red/20")}>
+                  <p className={cn("font-bold", transferResult.ok ? "text-emerald-400" : "text-torqued-red")}>{transferResult.ok ? '✓ Transfer complete' : '✗ Transfer failed'}</p>
+                  <p className="text-xs text-muted leading-relaxed">{transferResult.message}</p>
+                  {transferResult.ok && <p className="text-xs text-muted">This vehicle has been removed from your garage. The new owner will receive an email notification.</p>}
+                </div>
+              ) : (
+                <div className="space-y-4">
+                  <p className="text-sm text-muted leading-relaxed">
+                    Enter the new owner's email address. They must already have a Torqued account. All service history will transfer with the vehicle.
+                  </p>
+                  <div className="space-y-2">
+                    <label className="text-xs font-bold text-muted uppercase tracking-widest">Recipient email</label>
+                    <input
+                      type="email"
+                      value={transferEmail}
+                      onChange={e => setTransferEmail(e.target.value)}
+                      placeholder="new.owner@email.com"
+                      className="w-full px-4 py-3 rounded-xl bg-background border border-border text-sm font-medium focus:outline-none focus:border-torqued-red/50 transition-colors"
+                    />
+                  </div>
+                  <div className="p-3 bg-amber-500/8 border border-amber-500/20 rounded-xl">
+                    <p className="text-[11px] text-amber-400 leading-relaxed">⚠ This action is permanent. Once transferred, you will lose access to this vehicle and its service history.</p>
+                  </div>
+                </div>
+              )}
+
+              <div className="flex gap-3">
+                <button
+                  onClick={() => { setTransferModal(null); setTransferResult(null); }}
+                  disabled={transferLoading}
+                  className="flex-1 py-2.5 rounded-xl border border-border text-sm font-bold text-muted hover:text-foreground transition-colors disabled:opacity-40"
+                >{transferResult?.ok ? 'Close' : 'Cancel'}</button>
+                {!transferResult?.ok && (
+                  <button
+                    disabled={transferLoading || !transferEmail.trim().includes('@')}
+                    onClick={async () => {
+                      setTransferLoading(true);
+                      try {
+                        const r = await fetch('/api/customer/transfer-vehicle', {
+                          method: 'POST',
+                          headers: { 'Content-Type': 'application/json' },
+                          body: JSON.stringify({ ownerId: customerOwnerId, rego: transferModal.rego, recipientEmail: transferEmail.trim() }),
+                        });
+                        const d = await r.json();
+                        if (!r.ok) {
+                          setTransferResult({ ok: false, message: d.error || 'Transfer failed — please try again.' });
+                        } else {
+                          setTransferResult({ ok: true, message: `${transferModal.label} (${transferModal.rego}) has been successfully transferred to ${d.recipientName || transferEmail.trim()}.` });
+                          // Remove from local garage
+                          setGarageVehicles(prev => prev.filter(v => v.rego !== transferModal.rego));
+                          if (vehicle?.rego === transferModal.rego) setVehicle(null);
+                        }
+                      } catch {
+                        setTransferResult({ ok: false, message: 'Network error — please try again.' });
+                      } finally {
+                        setTransferLoading(false);
+                      }
+                    }}
+                    className="flex-1 py-2.5 rounded-xl bg-torqued-red text-white text-sm font-black transition-all hover:bg-red-600 disabled:opacity-40 disabled:cursor-not-allowed flex items-center justify-center gap-2"
+                  >
+                    {transferLoading ? <><div className="w-3.5 h-3.5 border-2 border-white/30 border-t-white rounded-full animate-spin" />Transferring…</> : 'Confirm Transfer'}
+                  </button>
+                )}
               </div>
             </motion.div>
           </div>

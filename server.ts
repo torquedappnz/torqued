@@ -6019,6 +6019,74 @@ app.post('/api/customer/remove-vehicle', async (req, res) => {
   }
 });
 
+// POST /api/customer/transfer-vehicle — transfer a vehicle to another Torqued user by email.
+// Keeps all service history (vehicle_history rows stay attached to the rego).
+app.post('/api/customer/transfer-vehicle', async (req, res) => {
+  try {
+    const { ownerId, rego, recipientEmail } = req.body;
+    if (!ownerId || !rego || !recipientEmail?.trim()) return res.status(400).json({ error: 'ownerId, rego and recipientEmail are required' });
+    const supabase = getSupabaseAdmin();
+    if (!supabase) return res.status(500).json({ error: 'Database not configured' });
+    const formattedRego = (rego as string).toUpperCase().trim();
+    const normalEmail = (recipientEmail as string).toLowerCase().trim();
+
+    // 1. Verify current ownership
+    const { data: veh } = await supabase.from('vehicles').select('owner_id').eq('rego', formattedRego).single();
+    if (!veh) return res.status(404).json({ error: 'Vehicle not found' });
+    let authorised = veh.owner_id === ownerId;
+    if (!authorised && veh.owner_id) {
+      const [{ data: rp }, { data: vp }] = await Promise.all([
+        supabase.from('profiles').select('email').eq('id', ownerId).single(),
+        supabase.from('profiles').select('email').eq('id', veh.owner_id).single(),
+      ]);
+      if (rp?.email && vp?.email && rp.email.toLowerCase() === vp.email.toLowerCase()) authorised = true;
+    }
+    if (!authorised) return res.status(403).json({ error: 'You do not own this vehicle' });
+
+    // 2. Look up recipient by email
+    const { data: recipientProfile } = await supabase.from('profiles').select('id, name, email').ilike('email', normalEmail).maybeSingle();
+    if (!recipientProfile) {
+      return res.status(404).json({ error: `No Torqued account found for ${normalEmail}. Ask them to create a free account at torqued-psi.vercel.app first, then try again.` });
+    }
+    if (recipientProfile.id === ownerId) return res.status(400).json({ error: 'You cannot transfer a vehicle to yourself' });
+
+    // 3. Transfer ownership
+    const { error } = await supabase.from('vehicles').update({ owner_id: recipientProfile.id }).eq('rego', formattedRego);
+    if (error) return res.status(500).json({ error: error.message });
+
+    // 4. Get sender name for the email
+    const { data: senderProfile } = await supabase.from('profiles').select('name, email').eq('id', ownerId).maybeSingle();
+    const senderName = senderProfile?.name || senderProfile?.email || 'A Torqued user';
+    const { data: vehicleData } = await supabase.from('vehicles').select('make, model, year').eq('rego', formattedRego).single();
+    const vehicleLabel = vehicleData ? `${vehicleData.year} ${vehicleData.make} ${vehicleData.model}` : formattedRego;
+
+    // 5. Notify recipient by email
+    const transporter = getMailTransporter();
+    if (transporter) {
+      const html = emailWrap(`<tr><td style="padding:36px 32px;text-align:center;">
+<span style="display:inline-block;background:rgba(255,24,0,.08);color:${EMAIL_RED};font-size:9px;font-weight:900;letter-spacing:2px;text-transform:uppercase;padding:5px 12px;border-radius:6px;font-family:${EMAIL_BODY_FONT};">VEHICLE TRANSFER</span>
+<div style="margin:18px 0 0;">${emailTitle('A vehicle has been transferred to you')}</div>
+${emailGreeting(recipientProfile.name)}
+${emailPara(`<strong>${senderName}</strong> has transferred a vehicle to your Torqued account — including its full service history.`)}
+${emailPara(`<strong style="color:${EMAIL_RED};">${vehicleLabel} (${formattedRego})</strong>`)}
+${emailPara('You can now view its complete service history, get quotes, and book services through Torqued.')}
+<a href="https://torqued-psi.vercel.app/customer" style="display:inline-block;background:${EMAIL_RED};color:#fff;font-family:${EMAIL_TITLE_FONT};font-size:13px;font-weight:900;text-transform:uppercase;letter-spacing:1px;text-decoration:none;padding:14px 34px;border-radius:12px;">View My Vehicle</a>
+</td></tr>`);
+      await transporter.sendMail({
+        from: process.env.SMTP_FROM || '"Torqued" <torquedapp.nz@gmail.com>',
+        to: recipientProfile.email,
+        subject: `${senderName} transferred ${formattedRego} to you on Torqued`,
+        html,
+      }).catch(() => {});
+    }
+
+    res.json({ success: true, recipientName: recipientProfile.name || normalEmail });
+  } catch (err) {
+    console.error('[customer/transfer-vehicle]', err);
+    res.status(500).json({ error: 'Could not transfer vehicle' });
+  }
+});
+
 // ── Stripe Webhook — must be registered before any routes that need parsed JSON bodies
 app.post('/api/stripe/webhook', async (req, res) => {
   const sig = req.headers['stripe-signature'];
