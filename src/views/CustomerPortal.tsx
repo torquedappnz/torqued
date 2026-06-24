@@ -130,6 +130,7 @@ interface ProfileViewProps {
   loadMechanicAccess: () => void; revokeMechanicAccess: (id: string) => void;
   clearCustomerSession: () => void; logout: () => void;
   setView: (v: string) => void;
+  onVehicleTransferred?: (rego: string) => void;
 }
 
 // ── EVQuoteRequest ────────────────────────────────────────────────────────────
@@ -287,7 +288,7 @@ const ProfileView: React.FC<ProfileViewProps> = (props) => {
   const { userName, setUserName, customerEmail, customerOwnerId, location, setLocation, user, updateProfile,
     rego, vehicle, garageVehicles, passkeyCardState, setPasskeyCardState,
     mechanicAccess, accessLoading, loadMechanicAccess, revokeMechanicAccess,
-    clearCustomerSession, logout } = props;
+    clearCustomerSession, logout, onVehicleTransferred } = props;
 
   const [editName, setEditName] = React.useState(userName || '');
   const [editEmail, setEditEmail] = React.useState(customerEmail || '');
@@ -298,6 +299,11 @@ const ProfileView: React.FC<ProfileViewProps> = (props) => {
   const [passkeysLoading, setPasskeysLoading] = React.useState(false);
   const [removingId, setRemovingId] = React.useState<string | null>(null);
   const [locating, setLocating] = React.useState(false);
+  // Transfer ownership state
+  const [txRego, setTxRego] = React.useState('');
+  const [txEmail, setTxEmail] = React.useState('');
+  const [txLoading, setTxLoading] = React.useState(false);
+  const [txResult, setTxResult] = React.useState<{ ok: boolean; message: string } | null>(null);
 
   const useMyLocation = () => {
     if (!navigator.geolocation) { alert('Geolocation is not supported on this device.'); return; }
@@ -512,6 +518,83 @@ const ProfileView: React.FC<ProfileViewProps> = (props) => {
           </div>
         )}
       </Card>
+
+      {/* Transfer Vehicle Ownership */}
+      {(customerOwnerId || user) && garageVehicles.length > 0 && (
+        <Card className="p-5 space-y-4 bg-card border-border">
+          <div>
+            <p className="text-xs font-black uppercase tracking-widest text-muted mb-1">Transfer Vehicle Ownership</p>
+            <p className="text-xs text-muted leading-relaxed">Transfer a vehicle and its full service history to another Torqued user. If they don't have an account yet, they'll receive an invite link to join and claim the vehicle.</p>
+          </div>
+
+          {txResult ? (
+            <div className={cn("p-4 rounded-2xl space-y-2", txResult.ok ? "bg-emerald-500/10 border border-emerald-500/20" : "bg-torqued-red/10 border border-torqued-red/20")}>
+              <p className={cn("text-sm font-bold", txResult.ok ? "text-emerald-400" : "text-torqued-red")}>{txResult.ok ? '✓ Done' : '✗ Failed'}</p>
+              <p className="text-xs text-muted leading-relaxed">{txResult.message}</p>
+              <button onClick={() => { setTxResult(null); setTxEmail(''); setTxRego(''); }} className="text-xs font-bold text-muted underline">Transfer another vehicle</button>
+            </div>
+          ) : (
+            <div className="space-y-3">
+              <div className="space-y-1.5">
+                <label className="text-[11px] font-bold text-muted uppercase tracking-widest">Vehicle</label>
+                <select
+                  value={txRego}
+                  onChange={e => setTxRego(e.target.value)}
+                  className="w-full px-3 py-2.5 rounded-xl bg-background border border-border text-sm font-medium focus:outline-none focus:border-torqued-red/50 transition-colors appearance-none"
+                >
+                  <option value="">Select a vehicle…</option>
+                  {garageVehicles.map(v => (
+                    <option key={v.rego} value={v.rego}>{v.year} {v.make} {v.model} ({v.rego})</option>
+                  ))}
+                </select>
+              </div>
+              <div className="space-y-1.5">
+                <label className="text-[11px] font-bold text-muted uppercase tracking-widest">New Owner's Email</label>
+                <input
+                  type="email"
+                  value={txEmail}
+                  onChange={e => setTxEmail(e.target.value)}
+                  placeholder="new.owner@email.com"
+                  className="w-full px-3 py-2.5 rounded-xl bg-background border border-border text-sm font-medium focus:outline-none focus:border-torqued-red/50 transition-colors"
+                />
+                <p className="text-[11px] text-muted leading-relaxed">If they don't have a Torqued account, they'll receive an invite email with a secure link to claim the vehicle.</p>
+              </div>
+              <div className="p-3 bg-amber-500/8 border border-amber-500/20 rounded-xl">
+                <p className="text-[11px] text-amber-400 leading-relaxed">⚠ This is permanent. You will lose access to this vehicle and its service history once transferred.</p>
+              </div>
+              <button
+                disabled={txLoading || !txRego || !txEmail.trim().includes('@')}
+                onClick={async () => {
+                  setTxLoading(true);
+                  try {
+                    const r = await fetch('/api/customer/transfer-vehicle', {
+                      method: 'POST',
+                      headers: { 'Content-Type': 'application/json' },
+                      body: JSON.stringify({ ownerId: customerOwnerId, rego: txRego, recipientEmail: txEmail.trim() }),
+                    });
+                    const d = await r.json();
+                    if (!r.ok) {
+                      setTxResult({ ok: false, message: d.error || 'Transfer failed — please try again.' });
+                    } else if (d.invited) {
+                      setTxResult({ ok: true, message: `Invite sent to ${txEmail.trim()}. They'll receive an email with a secure link to join Torqued and claim ${txRego}. The vehicle stays in your garage until they accept.` });
+                    } else {
+                      setTxResult({ ok: true, message: `${txRego} has been transferred to ${d.recipientName || txEmail.trim()}. It has been removed from your garage.` });
+                      onVehicleTransferred?.(txRego);
+                    }
+                  } catch {
+                    setTxResult({ ok: false, message: 'Network error — please try again.' });
+                  } finally {
+                    setTxLoading(false);
+                  }
+                }}
+                className="w-full py-2.5 rounded-xl bg-torqued-red text-white text-sm font-black hover:bg-red-600 transition-all disabled:opacity-40 disabled:cursor-not-allowed flex items-center justify-center gap-2"
+              >
+                {txLoading ? <><div className="w-3.5 h-3.5 border-2 border-white/30 border-t-white rounded-full animate-spin" />Transferring…</> : 'Transfer Ownership'}
+              </button>
+            </div>
+          )}
+        </Card>
+      )}
 
       {/* Sign out */}
       <button
@@ -972,6 +1055,14 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
   const [magicSentTo, setMagicSentTo] = useState<string | null>(null);
   const [magicFallbackLink, setMagicFallbackLink] = useState<string | null>(null);
   const [magicVerifying, setMagicVerifying] = useState(false);
+  // Pending vehicle claim (from transfer invite link ?claim=<token>)
+  const [claimToken, setClaimToken] = useState<string | null>(() => new URLSearchParams(window.location.search).get('claim'));
+  const [claimInfo, setClaimInfo] = useState<{ rego: string; vehicleLabel: string; recipientEmail: string } | null>(null);
+  const [claimOtpSent, setClaimOtpSent] = useState(false);
+  const [claimOtp, setClaimOtp] = useState('');
+  const [claimLoading, setClaimLoading] = useState(false);
+  const [claimError, setClaimError] = useState<string | null>(null);
+  const [claimDone, setClaimDone] = useState(false);
 
   // Restore a recent (≤48h) verified session on this browser
   useEffect(() => {
@@ -1088,6 +1179,15 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
   const [quotePaying, setQuotePaying] = useState(false);
   const [quoteOnlyMode, setQuoteOnlyMode] = useState(() => !!new URLSearchParams(window.location.search).get('quote'));
   useEffect(() => {
+    // Load transfer claim info if arriving via invite link
+    if (claimToken) {
+      window.history.replaceState({}, document.title, window.location.pathname);
+      fetch(`/api/customer/transfer-invite?token=${encodeURIComponent(claimToken)}`)
+        .then(r => r.json())
+        .then(d => { if (d.rego) setClaimInfo(d); else { setClaimError('This invite link is invalid or has expired.'); setClaimToken(null); } })
+        .catch(() => { setClaimError('Could not load invite. Try again.'); setClaimToken(null); });
+    }
+
     const params = new URLSearchParams(window.location.search);
     const qid = params.get('quote');
     if (!qid) return;
@@ -4761,10 +4861,6 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
     });
   };
   const [removingRego, setRemovingRego] = useState<string | null>(null);
-  const [transferModal, setTransferModal] = useState<{ rego: string; label: string } | null>(null);
-  const [transferEmail, setTransferEmail] = useState('');
-  const [transferLoading, setTransferLoading] = useState(false);
-  const [transferResult, setTransferResult] = useState<{ ok: boolean; message: string } | null>(null);
   const removeVehicle = async (rego: string) => {
     if (!window.confirm(`Remove ${rego} from your account?\n\nWe'll remove this vehicle from your account. See our privacy policy to learn more about how we handle service history data.`)) return;
     setRemovingRego(rego);
@@ -4856,6 +4952,10 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
         clearCustomerSession={clearCustomerSession}
         logout={logout}
         setView={setView}
+        onVehicleTransferred={(r) => {
+          setGarageVehicles(prev => prev.filter(v => v.rego !== r));
+          if (vehicle?.rego === r) setVehicle(null);
+        }}
       />
     );
   };
@@ -5080,15 +5180,6 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                           onClick={(e) => { e.stopPropagation(); toggleArchive(gv.rego); }}
                           className="text-[10px] font-bold uppercase tracking-widest text-muted hover:text-torqued-red px-2"
                         >{isArchived ? 'Restore' : 'Archive'}</button>
-                        <button
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            setTransferModal({ rego: gv.rego, label: `${gv.year} ${gv.make} ${gv.model}` });
-                            setTransferEmail('');
-                            setTransferResult(null);
-                          }}
-                          className="text-[10px] font-bold uppercase tracking-widest text-muted hover:text-torqued-red px-2"
-                        >Transfer</button>
                         <button
                           onClick={(e) => { e.stopPropagation(); removeVehicle(gv.rego); }}
                           disabled={removingRego === gv.rego}
@@ -5978,6 +6069,107 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
         </div>
       )}
 
+      {/* Vehicle claim flow — triggered by ?claim=<token> invite link */}
+      {(claimToken || claimInfo || claimDone || claimError) && (
+        <div className="fixed inset-0 z-[140] flex items-center justify-center bg-black/80 backdrop-blur-sm p-4">
+          <motion.div initial={{ opacity: 0, scale: 0.95 }} animate={{ opacity: 1, scale: 1 }} className="w-full max-w-sm bg-card border border-border rounded-3xl shadow-2xl p-6 space-y-5">
+            <div className="text-center space-y-2">
+              <div className="torqued-badge text-[10px] w-fit mx-auto mb-2">VEHICLE INVITE</div>
+              {claimDone ? (
+                <>
+                  <div className="w-14 h-14 bg-emerald-500 rounded-2xl flex items-center justify-center mx-auto text-white text-2xl">✓</div>
+                  <h3 className="text-xl font-black tracking-tight">Vehicle claimed!</h3>
+                  <p className="text-sm text-muted">It's now in your Torqued garage. You can view its full service history and get quotes.</p>
+                  <button onClick={() => { setClaimToken(null); setClaimInfo(null); setClaimDone(false); setView('dashboard'); }} className="w-full mt-2 py-2.5 rounded-xl bg-torqued-red text-white text-sm font-black hover:bg-red-600 transition-all">Go to My Garage →</button>
+                </>
+              ) : claimError ? (
+                <>
+                  <h3 className="text-lg font-black tracking-tight text-torqued-red">Invite error</h3>
+                  <p className="text-sm text-muted">{claimError}</p>
+                </>
+              ) : !claimInfo ? (
+                <div className="py-6 flex flex-col items-center gap-3">
+                  <div className="w-5 h-5 border-2 border-torqued-red/30 border-t-torqued-red rounded-full animate-spin" />
+                  <p className="text-sm text-muted">Loading invite…</p>
+                </div>
+              ) : (
+                <>
+                  <h3 className="text-xl font-black tracking-tight">You've been sent a vehicle</h3>
+                  <div className="p-3 bg-torqued-red/8 border border-torqued-red/20 rounded-xl">
+                    <p className="text-sm font-bold text-foreground">{claimInfo.vehicleLabel}</p>
+                    <p className="text-[10px] font-mono text-muted uppercase tracking-widest">{claimInfo.rego}</p>
+                  </div>
+                  <p className="text-xs text-muted leading-relaxed">Including its full service history. To claim it, we'll send a 6-digit code to <strong className="text-foreground">{claimInfo.recipientEmail}</strong>.</p>
+                  {claimOtpSent ? (
+                    <div className="space-y-3 pt-2">
+                      <input
+                        type="tel" maxLength={6} value={claimOtp} onChange={e => setClaimOtp(e.target.value.replace(/\D/g, ''))}
+                        placeholder="000000"
+                        className="w-full text-center text-2xl font-black tracking-[0.4em] px-4 py-3 rounded-xl bg-background border border-border focus:outline-none focus:border-torqued-red/50"
+                      />
+                      {claimError && <p className="text-xs text-torqued-red font-bold">{claimError}</p>}
+                      <button
+                        disabled={claimLoading || claimOtp.length !== 6}
+                        onClick={async () => {
+                          setClaimLoading(true); setClaimError(null);
+                          try {
+                            // Verify OTP and get ownerId
+                            const vr = await fetch('/api/otp/verify', {
+                              method: 'POST', headers: { 'Content-Type': 'application/json' },
+                              body: JSON.stringify({ email: claimInfo.recipientEmail, code: claimOtp }),
+                            });
+                            const vd = await vr.json();
+                            if (!vr.ok || !vd.ownerId) { setClaimError(vd.error || 'Incorrect code — try again.'); return; }
+                            // Execute transfer claim
+                            const cr = await fetch('/api/customer/claim-transfer', {
+                              method: 'POST', headers: { 'Content-Type': 'application/json' },
+                              body: JSON.stringify({ token: claimToken, ownerId: vd.ownerId }),
+                            });
+                            const cd = await cr.json();
+                            if (!cr.ok) { setClaimError(cd.error || 'Could not claim vehicle.'); return; }
+                            // Bootstrap session for new user
+                            setCustomerOwnerId(vd.ownerId);
+                            setCustomerEmail(claimInfo.recipientEmail);
+                            setCustomerVerifiedAt(Date.now());
+                            persistCustomerSession({ ownerId: vd.ownerId, email: claimInfo.recipientEmail, rego: claimInfo.rego, vehicles: cd.vehicles || [] });
+                            setGarageVehicles(cd.vehicles || []);
+                            setClaimDone(true);
+                          } catch { setClaimError('Something went wrong — please try again.'); }
+                          finally { setClaimLoading(false); }
+                        }}
+                        className="w-full py-2.5 rounded-xl bg-torqued-red text-white text-sm font-black disabled:opacity-40 hover:bg-red-600 transition-all flex items-center justify-center gap-2"
+                      >
+                        {claimLoading ? <><div className="w-3.5 h-3.5 border-2 border-white/30 border-t-white rounded-full animate-spin" />Verifying…</> : 'Claim Vehicle'}
+                      </button>
+                    </div>
+                  ) : (
+                    <button
+                      disabled={claimLoading}
+                      onClick={async () => {
+                        setClaimLoading(true); setClaimError(null);
+                        try {
+                          const r = await fetch('/api/otp/send', {
+                            method: 'POST', headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ email: claimInfo.recipientEmail }),
+                          });
+                          const d = await r.json();
+                          if (!r.ok) { setClaimError(d.error || 'Could not send code.'); return; }
+                          setClaimOtpSent(true);
+                        } catch { setClaimError('Network error — try again.'); }
+                        finally { setClaimLoading(false); }
+                      }}
+                      className="w-full py-2.5 rounded-xl bg-torqued-red text-white text-sm font-black disabled:opacity-40 hover:bg-red-600 transition-all flex items-center justify-center gap-2"
+                    >
+                      {claimLoading ? <><div className="w-3.5 h-3.5 border-2 border-white/30 border-t-white rounded-full animate-spin" />Sending…</> : 'Send me a code →'}
+                    </button>
+                  )}
+                </>
+              )}
+            </div>
+          </motion.div>
+        </div>
+      )}
+
       <main className="flex-1 max-w-4xl mx-auto w-full p-6 py-8 md:py-16">
         <AnimatePresence mode="wait">
           {view === 'quote' ? renderStep() : view === 'profile' ? renderProfile() : renderDashboard()}
@@ -6353,90 +6545,7 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
         )}
       </AnimatePresence>
 
-      {/* Vehicle Transfer Modal */}
-      <AnimatePresence>
-        {transferModal && (
-          <div className="fixed inset-0 z-[130] flex items-center justify-center bg-black/70 backdrop-blur-sm p-4" onClick={() => { if (!transferLoading) { setTransferModal(null); setTransferResult(null); } }}>
-            <motion.div
-              initial={{ opacity: 0, scale: 0.95, y: 16 }} animate={{ opacity: 1, scale: 1, y: 0 }} exit={{ opacity: 0, scale: 0.95, y: 16 }}
-              className="w-full max-w-sm bg-card border border-border rounded-3xl shadow-2xl p-6 space-y-5"
-              onClick={e => e.stopPropagation()}
-            >
-              <div className="space-y-1">
-                <div className="torqued-badge text-[10px] w-fit mb-2">TRANSFER OWNERSHIP</div>
-                <h3 className="text-lg font-black tracking-tight">{transferModal.label}</h3>
-                <p className="text-[10px] font-mono text-muted uppercase tracking-widest">{transferModal.rego}</p>
-              </div>
 
-              {transferResult ? (
-                <div className={cn("p-4 rounded-2xl space-y-3 text-sm", transferResult.ok ? "bg-emerald-500/10 border border-emerald-500/20" : "bg-torqued-red/10 border border-torqued-red/20")}>
-                  <p className={cn("font-bold", transferResult.ok ? "text-emerald-400" : "text-torqued-red")}>{transferResult.ok ? '✓ Transfer complete' : '✗ Transfer failed'}</p>
-                  <p className="text-xs text-muted leading-relaxed">{transferResult.message}</p>
-                  {transferResult.ok && <p className="text-xs text-muted">This vehicle has been removed from your garage. The new owner will receive an email notification.</p>}
-                </div>
-              ) : (
-                <div className="space-y-4">
-                  <p className="text-sm text-muted leading-relaxed">
-                    Enter the new owner's email address. They must already have a Torqued account. All service history will transfer with the vehicle.
-                  </p>
-                  <div className="space-y-2">
-                    <label className="text-xs font-bold text-muted uppercase tracking-widest">Recipient email</label>
-                    <input
-                      type="email"
-                      value={transferEmail}
-                      onChange={e => setTransferEmail(e.target.value)}
-                      placeholder="new.owner@email.com"
-                      className="w-full px-4 py-3 rounded-xl bg-background border border-border text-sm font-medium focus:outline-none focus:border-torqued-red/50 transition-colors"
-                    />
-                  </div>
-                  <div className="p-3 bg-amber-500/8 border border-amber-500/20 rounded-xl">
-                    <p className="text-[11px] text-amber-400 leading-relaxed">⚠ This action is permanent. Once transferred, you will lose access to this vehicle and its service history.</p>
-                  </div>
-                </div>
-              )}
-
-              <div className="flex gap-3">
-                <button
-                  onClick={() => { setTransferModal(null); setTransferResult(null); }}
-                  disabled={transferLoading}
-                  className="flex-1 py-2.5 rounded-xl border border-border text-sm font-bold text-muted hover:text-foreground transition-colors disabled:opacity-40"
-                >{transferResult?.ok ? 'Close' : 'Cancel'}</button>
-                {!transferResult?.ok && (
-                  <button
-                    disabled={transferLoading || !transferEmail.trim().includes('@')}
-                    onClick={async () => {
-                      setTransferLoading(true);
-                      try {
-                        const r = await fetch('/api/customer/transfer-vehicle', {
-                          method: 'POST',
-                          headers: { 'Content-Type': 'application/json' },
-                          body: JSON.stringify({ ownerId: customerOwnerId, rego: transferModal.rego, recipientEmail: transferEmail.trim() }),
-                        });
-                        const d = await r.json();
-                        if (!r.ok) {
-                          setTransferResult({ ok: false, message: d.error || 'Transfer failed — please try again.' });
-                        } else {
-                          setTransferResult({ ok: true, message: `${transferModal.label} (${transferModal.rego}) has been successfully transferred to ${d.recipientName || transferEmail.trim()}.` });
-                          // Remove from local garage
-                          setGarageVehicles(prev => prev.filter(v => v.rego !== transferModal.rego));
-                          if (vehicle?.rego === transferModal.rego) setVehicle(null);
-                        }
-                      } catch {
-                        setTransferResult({ ok: false, message: 'Network error — please try again.' });
-                      } finally {
-                        setTransferLoading(false);
-                      }
-                    }}
-                    className="flex-1 py-2.5 rounded-xl bg-torqued-red text-white text-sm font-black transition-all hover:bg-red-600 disabled:opacity-40 disabled:cursor-not-allowed flex items-center justify-center gap-2"
-                  >
-                    {transferLoading ? <><div className="w-3.5 h-3.5 border-2 border-white/30 border-t-white rounded-full animate-spin" />Transferring…</> : 'Confirm Transfer'}
-                  </button>
-                )}
-              </div>
-            </motion.div>
-          </div>
-        )}
-      </AnimatePresence>
 
       {/* Upload or Add Service History sheet */}
       <AnimatePresence>

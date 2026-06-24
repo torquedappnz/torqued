@@ -6043,24 +6043,59 @@ app.post('/api/customer/transfer-vehicle', async (req, res) => {
     }
     if (!authorised) return res.status(403).json({ error: 'You do not own this vehicle' });
 
-    // 2. Look up recipient by email
-    const { data: recipientProfile } = await supabase.from('profiles').select('id, name, email').ilike('email', normalEmail).maybeSingle();
-    if (!recipientProfile) {
-      return res.status(404).json({ error: `No Torqued account found for ${normalEmail}. Ask them to create a free account at torqued-psi.vercel.app first, then try again.` });
-    }
-    if (recipientProfile.id === ownerId) return res.status(400).json({ error: 'You cannot transfer a vehicle to yourself' });
-
-    // 3. Transfer ownership
-    const { error } = await supabase.from('vehicles').update({ owner_id: recipientProfile.id }).eq('rego', formattedRego);
-    if (error) return res.status(500).json({ error: error.message });
-
-    // 4. Get sender name for the email
+    // 2. Look up sender details for emails
     const { data: senderProfile } = await supabase.from('profiles').select('name, email').eq('id', ownerId).maybeSingle();
     const senderName = senderProfile?.name || senderProfile?.email || 'A Torqued user';
     const { data: vehicleData } = await supabase.from('vehicles').select('make, model, year').eq('rego', formattedRego).single();
     const vehicleLabel = vehicleData ? `${vehicleData.year} ${vehicleData.make} ${vehicleData.model}` : formattedRego;
 
-    // 5. Notify recipient by email
+    // 3. Look up recipient by email
+    const { data: recipientProfile } = await supabase.from('profiles').select('id, name, email').ilike('email', normalEmail).maybeSingle();
+
+    if (!recipientProfile) {
+      // Recipient doesn't have an account — set a pending invite token on the vehicle
+      const token = require('crypto').randomBytes(24).toString('hex');
+      const expiresAt = new Date(Date.now() + 7 * 24 * 3600 * 1000).toISOString(); // 7 days
+      await supabase.from('vehicles').update({
+        pending_transfer_email: normalEmail,
+        pending_transfer_token: token,
+        pending_transfer_expires_at: expiresAt,
+      }).eq('rego', formattedRego);
+
+      const claimUrl = `https://torqued-psi.vercel.app/customer?claim=${token}`;
+      const transporter = getMailTransporter();
+      if (transporter) {
+        const html = emailWrap(`<tr><td style="padding:36px 32px;text-align:center;">
+<span style="display:inline-block;background:rgba(255,24,0,.08);color:${EMAIL_RED};font-size:9px;font-weight:900;letter-spacing:2px;text-transform:uppercase;padding:5px 12px;border-radius:6px;font-family:${EMAIL_BODY_FONT};">VEHICLE INVITE</span>
+<div style="margin:18px 0 0;">${emailTitle('You\'ve been sent a vehicle on Torqued')}</div>
+${emailGreeting(null)}
+${emailPara(`<strong>${senderName}</strong> has transferred a vehicle to you — including its complete service history.`)}
+${emailPara(`<strong style="color:${EMAIL_RED};">${vehicleLabel} (${formattedRego})</strong>`)}
+${emailPara('Tap below to create your free Torqued account and claim the vehicle. The link expires in 7 days.')}
+<a href="${claimUrl}" style="display:inline-block;background:${EMAIL_RED};color:#fff;font-family:${EMAIL_TITLE_FONT};font-size:13px;font-weight:900;text-transform:uppercase;letter-spacing:1px;text-decoration:none;padding:14px 34px;border-radius:12px;">Claim My Vehicle →</a>
+</td></tr>`);
+        await transporter.sendMail({
+          from: process.env.SMTP_FROM || '"Torqued" <torquedapp.nz@gmail.com>',
+          to: normalEmail,
+          subject: `${senderName} sent you a vehicle on Torqued — claim it here`,
+          html,
+        }).catch(() => {});
+      }
+      return res.json({ success: true, invited: true });
+    }
+
+    if (recipientProfile.id === ownerId) return res.status(400).json({ error: 'You cannot transfer a vehicle to yourself' });
+
+    // 4. Recipient has account — transfer immediately
+    const { error } = await supabase.from('vehicles').update({
+      owner_id: recipientProfile.id,
+      pending_transfer_email: null,
+      pending_transfer_token: null,
+      pending_transfer_expires_at: null,
+    }).eq('rego', formattedRego);
+    if (error) return res.status(500).json({ error: error.message });
+
+    // 5. Notify recipient
     const transporter = getMailTransporter();
     if (transporter) {
       const html = emailWrap(`<tr><td style="padding:36px 32px;text-align:center;">
@@ -6084,6 +6119,67 @@ ${emailPara('You can now view its complete service history, get quotes, and book
   } catch (err) {
     console.error('[customer/transfer-vehicle]', err);
     res.status(500).json({ error: 'Could not transfer vehicle' });
+  }
+});
+
+// GET /api/customer/transfer-invite?token=<token> — fetch pending transfer info for the claim screen.
+app.get('/api/customer/transfer-invite', async (req, res) => {
+  try {
+    const { token } = req.query;
+    if (!token) return res.status(400).json({ error: 'token required' });
+    const supabase = getSupabaseAdmin();
+    if (!supabase) return res.status(500).json({ error: 'Database not configured' });
+    const { data: veh } = await supabase
+      .from('vehicles')
+      .select('rego, make, model, year, pending_transfer_email, pending_transfer_expires_at')
+      .eq('pending_transfer_token', token as string)
+      .maybeSingle();
+    if (!veh) return res.status(404).json({ error: 'Invite not found or already claimed' });
+    if (veh.pending_transfer_expires_at && new Date(veh.pending_transfer_expires_at) < new Date()) {
+      return res.status(410).json({ error: 'This invite link has expired. Ask the sender to resend it.' });
+    }
+    res.json({
+      rego: veh.rego,
+      vehicleLabel: `${veh.year} ${veh.make} ${veh.model}`,
+      recipientEmail: veh.pending_transfer_email,
+    });
+  } catch (err) {
+    console.error('[customer/transfer-invite]', err);
+    res.status(500).json({ error: 'Could not load invite' });
+  }
+});
+
+// POST /api/customer/claim-transfer — called after OTP verify to execute a pending vehicle transfer.
+app.post('/api/customer/claim-transfer', async (req, res) => {
+  try {
+    const { token, ownerId } = req.body;
+    if (!token || !ownerId) return res.status(400).json({ error: 'token and ownerId required' });
+    const supabase = getSupabaseAdmin();
+    if (!supabase) return res.status(500).json({ error: 'Database not configured' });
+    const { data: veh } = await supabase
+      .from('vehicles')
+      .select('rego, make, model, year, pending_transfer_email, pending_transfer_expires_at, pending_transfer_token')
+      .eq('pending_transfer_token', token as string)
+      .maybeSingle();
+    if (!veh) return res.status(404).json({ error: 'Invite not found or already claimed' });
+    if (veh.pending_transfer_expires_at && new Date(veh.pending_transfer_expires_at) < new Date()) {
+      return res.status(410).json({ error: 'This invite has expired. Ask the sender to resend it.' });
+    }
+    const { error } = await supabase.from('vehicles').update({
+      owner_id: ownerId,
+      pending_transfer_email: null,
+      pending_transfer_token: null,
+      pending_transfer_expires_at: null,
+    }).eq('rego', veh.rego);
+    if (error) return res.status(500).json({ error: error.message });
+
+    // Return the new owner's full vehicle list for session bootstrap
+    const { data: allVehicles } = await supabase.from('vehicles').select('rego, make, model, year, variant, mileage, thumbnail').eq('owner_id', ownerId);
+    const vehicles = (allVehicles || []).map((v: any) => ({ id: v.rego, rego: v.rego, make: v.make, model: v.model, year: v.year, variant: v.variant ?? undefined, mileage: v.mileage ?? 0, thumbnail: v.thumbnail ?? undefined }));
+    res.json({ success: true, rego: veh.rego, vehicles });
+  } catch (err) {
+    console.error('[customer/claim-transfer]', err);
+    res.status(500).json({ error: 'Could not claim vehicle' });
   }
 });
 
