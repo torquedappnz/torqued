@@ -3840,7 +3840,7 @@ app.get('/api/fleet-prices', async (req, res) => {
         const fvFirstWord = String(custVehicle.model || '').split(' ')[0];
         const queryFV = async (modelPat: string, withYear: boolean) => {
           let q = (supabase as any).from('fleet_vehicles')
-            .select('engine_family_id')
+            .select('engine_family_id, body_type')
             .ilike('make', custVehicle.make!)
             .ilike('model', modelPat);
           if (withYear && custVehicle.year)
@@ -3859,7 +3859,7 @@ app.get('/api/fleet-prices', async (req, res) => {
         if (fvRows?.length) {
           const efFamilyId: string = fvRows[0].engine_family_id;
 
-          const [efFamilyRes, efPartsRes, efRateRes] = await Promise.all([
+          const [efFamilyRes, efPartsRes, efRateRes, tierPartsRes, jobTimesRes, bodyMultRes, exemptRes] = await Promise.all([
             supabase.from('engine_families')
               .select('timing_type, oil_capacity_l, oil_spec, segment_tier')
               .eq('family_id', efFamilyId).single(),
@@ -3869,6 +3869,10 @@ app.get('/api/fleet-prices', async (req, res) => {
             mechanicId
               ? supabase.from('profiles').select('labour_rate, shop_fee').eq('id', mechanicId).maybeSingle()
               : supabase.from('profiles').select('labour_rate').eq('role', 'mechanic').eq('subscription_active', true).not('labour_rate', 'is', null),
+            supabase.from('tier_parts_reference').select('job_slug, tier, part_cost_low_ex_gst, part_cost_high_ex_gst'),
+            supabase.from('job_times_reference').select('job_slug, tier, hours_low, hours_high'),
+            supabase.from('body_type_multiplier').select('body_type, multiplier'),
+            supabase.from('body_type_exempt_jobs').select('job_slug'),
           ]);
 
           const ef = efFamilyRes.data as any;
@@ -3927,6 +3931,10 @@ app.get('/api/fleet-prices', async (req, res) => {
               efPrices[svcId].labourHours = '2.25';
               efPrices[svcId].partsLow  = Math.max(0, low - bpLabour);
               efPrices[svcId].partsHigh = Math.max(0, high - bpLabour);
+              // Totals must reflect the floored labour, not the raw stored total_job values
+              efPrices[svcId].low  = efPrices[svcId].partsLow  + bpLabour;
+              efPrices[svcId].high = efPrices[svcId].partsHigh + bpLabour;
+              efPrices[svcId].midpoint = Math.round((efPrices[svcId].low + efPrices[svcId].high) / 2);
             }
 
             // Annotate service jobs with oil info from engine_family
@@ -3934,6 +3942,65 @@ app.get('/api/fleet-prices', async (req, res) => {
               efPrices[svcId].oilType = ef.oil_spec || null;
               efPrices[svcId].oilCapacityL = ef.oil_capacity_l || null;
             }
+          }
+
+          // ── Generic tier-reference fallback ────────────────────────────────
+          // ef_parts_data is sparse — most engine families only have a handful of
+          // rows (basic_service, brake pads). tier_parts_reference/job_times_reference
+          // (migration 037) are fully seeded per segment_tier but were never wired up.
+          // Use them to fill any service still missing a price after the ef_parts_data pass.
+          const tier = (ef?.segment_tier as string) || 'mid';
+          const tierPartsMap = new Map<string, any>(
+            ((tierPartsRes as any).data ?? []).map((r: any) => [`${r.job_slug}|${r.tier}`, r])
+          );
+          const jobTimesMap = new Map<string, any>(
+            ((jobTimesRes as any).data ?? []).map((r: any) => [`${r.job_slug}|${r.tier}`, r])
+          );
+          const bodyMultMap = new Map<string, number>(
+            ((bodyMultRes as any).data ?? []).map((r: any) => [r.body_type, Number(r.multiplier)])
+          );
+          const exemptJobSlugs = new Set<string>(((exemptRes as any).data ?? []).map((r: any) => r.job_slug));
+          const fvBodyType = (fvRows[0] as any).body_type as string | undefined;
+          const bodyMultiplier = fvBodyType ? (bodyMultMap.get(fvBodyType) ?? 1) : 1;
+
+          const GENERIC_JOB_SLUG_TO_SVC: Record<string, string> = {
+            brake_pads_front:            'brakes_front_pads',
+            brake_pads_rear:             'brakes_rear_pads',
+            brake_pads_and_rotors_front: 'brakes_front_rotors',
+            spark_plugs:                 'spark_plugs',
+            cabin_filter:                'cabin_filter',
+            '12v_battery':               'battery',
+            ignition_coil:               'ignition_coils',
+            transmission_service:        'transmission',
+          };
+
+          for (const [jobSlug, svcId] of Object.entries(GENERIC_JOB_SLUG_TO_SVC)) {
+            if (efPrices[svcId]) continue; // ef_parts_data already has a vehicle-specific row
+            const partsRow = tierPartsMap.get(`${jobSlug}|${tier}`) ?? tierPartsMap.get(`${jobSlug}|mid`);
+            const hoursRow = jobTimesMap.get(`${jobSlug}|${tier}`) ?? jobTimesMap.get(`${jobSlug}|mid`);
+            if (!partsRow || !hoursRow) continue;
+
+            const hh = Number(hoursRow.hours_high) || 0;
+            const chargedHrs = Math.ceil(hh * 4) / 4;
+            const jobBodyMult = exemptJobSlugs.has(jobSlug) ? 1 : bodyMultiplier;
+            const labour = chargedHrs > 0 ? Math.round(chargedHrs * efLabourRate * jobBodyMult) : 0;
+            const hrsLabel = chargedHrs > 0 ? String(chargedHrs % 1 === 0 ? chargedHrs.toFixed(0) : chargedHrs.toFixed(2).replace(/0+$/, '')) : null;
+
+            // tier_parts_reference is ex-GST
+            const partsLow = Math.round(Number(partsRow.part_cost_low_ex_gst) * 1.15);
+            const partsHigh = Math.round(Number(partsRow.part_cost_high_ex_gst) * 1.15);
+
+            efPrices[svcId] = {
+              low: partsLow + labour, high: partsHigh + labour,
+              midpoint: Math.round((partsLow + partsHigh) / 2) + labour,
+              partsLow, partsHigh, labourLow: labour, labourHigh: labour, labourHours: hrsLabel,
+              fromTierReference: true,
+            };
+          }
+          // Rear rotor+pad combo has no dedicated reference row — front-axle combo cost
+          // is a reasonable proxy (rear rotor+pad jobs are typically similar cost/labour).
+          if (!efPrices['brakes_rear_rotors'] && efPrices['brakes_front_rotors']) {
+            efPrices['brakes_rear_rotors'] = { ...efPrices['brakes_front_rotors'], approximated: true };
           }
 
           // Fixed-price services
