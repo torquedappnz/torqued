@@ -2625,35 +2625,68 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
       setEvQuoteConcern('');
     }
 
-    // Precise-quote jobs: any selected service with no instant price (timing
-    // chain, water pump, unknown-fluid transmission, etc). These do NOT go
-    // through payment — they fire a quote request the workshop returns within
-    // 1 business hour, alongside (or instead of) the paid booking.
-    if (selectedQuoteJobs.length > 0) {
-      const quoteNames = selectedQuoteJobs
+    // Split the selection into instantly-priced jobs and precise-quote jobs
+    // (services with no instant price for this vehicle).
+    const pricedServiceIds = selectedServices.filter(id => !isQuoteJob(id));
+    const quoteServiceIds = selectedServices.filter(id => isQuoteJob(id));
+    const bookingDateTime = selectedDate ? `${selectedDate}T${selectedTime || '09:00'}` : null;
+
+    // Precise-quote jobs create a SINGLE quote-request entry that carries the
+    // chosen repair date and the full service list. The mechanic builds the quote
+    // (within 1 business hour); it then folds into that one entry and becomes
+    // bookable — we do NOT also create a $0 "booked" entry.
+    let quoteRequestId: string | null = null;
+    if (quoteServiceIds.length > 0) {
+      const quoteNames = quoteServiceIds
+        .filter(id => id !== 'thermostat_housing')
         .map(id => serviceDisplayName(id, SERVICES.find(s => s.id === id)?.name || id))
         .join(', ');
-      const quoteReqId = (crypto as any).randomUUID ? crypto.randomUUID() : `q_${Date.now()}`;
-      fetch('/api/bookings/persist', {
+      quoteRequestId = (crypto as any).randomUUID ? crypto.randomUUID() : `q_${Date.now()}`;
+      await fetch('/api/bookings/persist', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           bookingData: {
-            id: quoteReqId,
+            id: quoteRequestId,
             mechanicId: selectedMechanic.id,
             vehicleId: vehicle?.rego || rego,
-            serviceIds: selectedQuoteJobs,
+            serviceIds: quoteServiceIds,
             totalPrice: 0,
-            paymentMethod: 'TBD',
+            paymentMethod: paymentMethod || 'TBD',
             paymentStatus: 'pending',
             status: 'pending',
-            date: null,
+            date: bookingDateTime,
             customerName: userName || '',
-            email: customerEmail || '',
+            email: customerEmail || userProfile?.email || user?.email || '',
             description: `[Quote Request — respond within 1 business hour] ${quoteNames} for ${vehicle?.year || ''} ${vehicle?.make || ''} ${vehicle?.model || ''}`.trim(),
           },
           userId: user?.id ?? customerOwnerId ?? null,
         }),
-      }).catch(e => console.error('Failed to save precise-quote request alongside booking:', e));
+      }).catch(e => console.error('Failed to save precise-quote request:', e));
+    }
+
+    // If EVERY selected job needs a quote, we're done: no payment, no $0 booking —
+    // exactly one quote-request entry (created above). Confirm as "quote requested".
+    if (pricedServiceIds.length === 0 && quoteServiceIds.length > 0) {
+      const quoteJob: any = {
+        id: quoteRequestId,
+        vehicleId: vehicle?.id || 'v1',
+        serviceIds: quoteServiceIds,
+        mechanicId: selectedMechanic.id,
+        mechanicName: selectedMechanic.name,
+        status: 'pending',
+        paymentStatus: 'pending',
+        paymentMethod,
+        date: bookingDateTime || undefined,
+        totalPrice: 0,
+        email: customerEmail || userProfile?.email || user?.email || null,
+        description: '[Quote Request — respond within 1 business hour]',
+      };
+      setActiveJobs(prev => [...prev, quoteJob]);
+      setLatestBooking(quoteJob);
+      await triggerEmailConfirmation(quoteJob);
+      setIsBookingLoading(false);
+      setStep(7);
+      return;
     }
 
     const isFinanceNow = paymentMethod === 'Finance Now';
@@ -2666,10 +2699,8 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
     // Total price is discounted on confirmation if promo code is applied
     const finalCalculatedPrice = calculatedPrice;
 
-    // The paid booking covers only jobs with a real instant price. Precise-quote
-    // jobs are handled by the separate quote request created above.
-    const pricedServiceIds = selectedServices.filter(id => !isQuoteJob(id));
-
+    // The paid booking covers only jobs with a real instant price. Any precise-
+    // quote jobs are handled by the single quote-request entry created above.
     const newJob: Job = {
       id: Math.random().toString(36).substr(2, 9),
       vehicleId: vehicle?.id || 'v1',
@@ -2681,7 +2712,7 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
       status: (isFinanceNow || mbiStatus === 'not-claimed') ? 'pending' : 'booked',
       paymentStatus: isClaimApproved ? 'confirmed' : (isFinanceNow || mbiStatus === 'not-claimed' ? 'awaiting_approval' : 'confirmed'),
       paymentMethod: mbiStatus === 'not-claimed' ? 'Provident Insurance' : paymentMethod,
-      date: selectedDate ? `${selectedDate}T${selectedTime || '09:00'}` : undefined,
+      date: bookingDateTime || undefined,
       totalPrice: finalCalculatedPrice,
       depositPaid: undefined,
       description: diagnosticComment?.trim() || faultCode || undefined,
