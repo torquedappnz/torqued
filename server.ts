@@ -4080,15 +4080,19 @@ app.get('/api/fleet-prices', async (req, res) => {
         else if (raw.includes('chain')) fallbackTimingDrive = 'chain';
         else fallbackTimingDrive = 'na';
       }
-      const wpMakes = ['volkswagen', 'vw', 'skoda', 'seat', 'audi'];
-      const wpRec = fallbackTimingDrive === 'belt' &&
-        wpMakes.some(m => (custVehicle.make || '').toLowerCase().includes(m));
-      const wpLabourFallback = Math.round(1.0 * 130);
+      // No engine-family or vehicle_models match. We can't price vehicle-specific
+      // work, but WOF / diagnostic / PPI are vehicle-independent standard services
+      // — always offer those instantly so the customer never hits an empty screen.
+      // Everything else becomes a precise 1-business-hour quote on the frontend
+      // (no invented numbers).
       return res.json({
-        prices: {}, timingDrive: fallbackTimingDrive, vehicleId: null,
-        waterPumpRecommended: wpRec,
-        waterPump: wpRec ? { partsLow: 280, partsHigh: 420, labourExtra: wpLabourFallback,
-          low: 280 + wpLabourFallback, high: 420 + wpLabourFallback } : null,
+        prices: {
+          wof:             { low: 55, high: 75, midpoint: 65, partsLow: 0, partsHigh: 0, labourLow: 65, labourHigh: 65, labourHours: '0.5' },
+          diag_inspection: { low: 99, high: 99, midpoint: 99, partsLow: 0, partsHigh: 0, labourLow: 99, labourHigh: 99, labourHours: '1' },
+          ppi:             { low: 199, high: 199, midpoint: 199, partsLow: 0, partsHigh: 0, labourLow: 199, labourHigh: 199, labourHours: '2' },
+        },
+        timingDrive: fallbackTimingDrive, vehicleId: null,
+        waterPumpRecommended: false, waterPump: null,
       });
     }
     const vehicleId: string = vmRows[0].id;
