@@ -1198,14 +1198,24 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
     if (!quoteReview) return;
     setQuotePaying(true);
     try {
+      // Stripe checkout is a full page navigation away and back — all in-memory
+      // React state (quoteReview, quoteOnlyMode) is lost. Persist just enough to
+      // rebuild the confirmation screen on return, or the customer lands on a
+      // blank "Enter Your Car" with no sign their payment succeeded.
+      localStorage.setItem('pending_quote_payment', JSON.stringify({
+        id: quoteReview.id, rego: quoteReview.rego, vehicleLabel: quoteReview.vehicleLabel,
+        mechanicName: quoteReview.mechanicName, serviceIds: quoteReview.serviceIds,
+        note: quoteReview.note, total: quoteReview.total,
+      }));
       const res = await fetch('/api/stripe/create-payment', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ amount: quoteReview.total, bookingId: quoteReview.id, customerEmail: customerEmail || undefined, description: `Torqued quote ${quoteReview.id}` }),
       });
       const session = await res.json();
       if (session?.url) { window.location.href = session.url; return; }
+      localStorage.removeItem('pending_quote_payment');
       setQuotePaying(false);
-    } catch { setQuotePaying(false); }
+    } catch { localStorage.removeItem('pending_quote_payment'); setQuotePaying(false); }
   };
 
   // Verify a returning customer with a passkey. Magic link remains the fallback.
@@ -1507,6 +1517,22 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
     const bookingId = params.get('booking_id');
     if (sessionId && bookingId) {
       const initPaymentVerification = async () => {
+        // A mechanic-built quote paid via payQuote() — restore the quote confirmation
+        // screen (same UI the customer saw before checkout) instead of silently
+        // refreshing bookings in the background with no visible confirmation.
+        const savedQuotePayment = localStorage.getItem('pending_quote_payment');
+        let quoteDraft: any = null;
+        try { quoteDraft = savedQuotePayment ? JSON.parse(savedQuotePayment) : null; } catch { quoteDraft = null; }
+        if (quoteDraft && quoteDraft.id === bookingId) {
+          try { await fetch(`/api/stripe/verify-session?session_id=${sessionId}`); } catch {}
+          localStorage.removeItem('pending_quote_payment');
+          window.history.replaceState({}, document.title, window.location.pathname);
+          setQuoteReview({ ...quoteDraft, paymentStatus: 'confirmed' });
+          setQuoteOnlyMode(true);
+          await loadCustomerBookings();
+          return;
+        }
+
         const savedPending = localStorage.getItem('pending_booking');
         let pendingDraft: any = null;
         try { pendingDraft = savedPending ? JSON.parse(savedPending) : null; } catch { pendingDraft = null; }
