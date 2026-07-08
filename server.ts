@@ -3899,6 +3899,8 @@ app.get('/api/fleet-prices', async (req, res) => {
             'cambelt_full':                'timing',
             'wet_belt_replacement':        'timing',
             'timing_chain_replacement':    'timing',
+            'spark_plugs':                 'spark_plugs',
+            'ignition_coil':               'ignition_coils',
           };
 
           const efPrices: Record<string, any> = {};
