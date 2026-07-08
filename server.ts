@@ -3901,6 +3901,8 @@ app.get('/api/fleet-prices', async (req, res) => {
             'timing_chain_replacement':    'timing',
             'spark_plugs':                 'spark_plugs',
             'ignition_coil':               'ignition_coils',
+            'water_pump_standalone':       'water_pump',
+            'transmission_service':        'transmission',
           };
 
           const efPrices: Record<string, any> = {};

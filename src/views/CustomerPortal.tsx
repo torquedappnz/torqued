@@ -3484,6 +3484,19 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                   </div>
                 )}
 
+                {/* Belt water-pump nudge — pump sits behind the cambelt, so doing both together shares labour */}
+                {selectedServices.includes('water_pump') && vehicleTimingDrive === 'belt' && !selectedServices.includes('timing') && (
+                  <div className="p-4 bg-blue-500/10 border border-blue-500/25 rounded-xl">
+                    <div className="flex items-start gap-3">
+                      <Info size={16} className="text-blue-400 mt-0.5 shrink-0" />
+                      <div className="space-y-1">
+                        <p className="text-sm font-bold text-blue-400">Save on labour — do it with your cambelt</p>
+                        <p className="text-[11px] text-muted leading-relaxed">On this engine the water pump sits behind the timing belt cover, so most of the labour overlaps with a cambelt replacement. If your cambelt is due, doing both together saves you a second strip-down. Your workshop will advise on the day.</p>
+                      </div>
+                    </div>
+                  </div>
+                )}
+
                 {/* Water pump recommendation card — belt-driven VW/Audi/Skoda/Seat */}
                 {waterPumpRecommended && waterPump && selectedServices.includes('timing') && (
                   <div className="p-4 bg-orange-500/10 border border-orange-500/30 rounded-xl space-y-3">
