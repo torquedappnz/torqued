@@ -3856,6 +3856,29 @@ app.get('/api/fleet-prices', async (req, res) => {
         if (!fvRows?.length && fvFirstWord !== custVehicle.model)
           fvRows = await queryFV(fvFirstWord + '%', false);
 
+        // ── Direct fleet_vehicles model match failed — try ef_vehicle_aliases ──
+        // (trim names like "Cross Polo", or a chassis code returned as the model
+        // by some rego lookups) joined back to its real fleet_vehicles row.
+        if (!fvRows?.length) {
+          const queryAlias = async (modelPat: string, withYear: boolean) => {
+            let q = (supabase as any).from('ef_vehicle_aliases')
+              .select('fleet_vehicles!inner(engine_family_id, body_type)')
+              .ilike('alias_make', custVehicle.make!)
+              .ilike('alias_model', modelPat);
+            if (withYear && custVehicle.year)
+              q = q.lte('year_from', custVehicle.year).or(`year_to.is.null,year_to.gte.${custVehicle.year}`);
+            const { data } = await q.limit(1);
+            return (data as any[] | null)?.map(r => r.fleet_vehicles) ?? null;
+          };
+          fvRows = await queryAlias(String(custVehicle.model || ''), true);
+          if (!fvRows?.length && fvFirstWord !== custVehicle.model)
+            fvRows = await queryAlias(fvFirstWord + '%', true);
+          if (!fvRows?.length)
+            fvRows = await queryAlias(String(custVehicle.model || ''), false);
+          if (!fvRows?.length && fvFirstWord !== custVehicle.model)
+            fvRows = await queryAlias(fvFirstWord + '%', false);
+        }
+
         if (fvRows?.length) {
           const efFamilyId: string = fvRows[0].engine_family_id;
 
