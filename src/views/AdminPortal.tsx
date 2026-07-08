@@ -949,7 +949,8 @@ export const AdminPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) => {
 
       {/* Mechanic detail modal */}
       {mechDetail && (
-        <div className="fixed inset-0 z-[120] flex items-center justify-center p-4 bg-black/50 backdrop-blur-sm overflow-y-auto">
+        <div className="fixed inset-0 z-[120] bg-black/50 backdrop-blur-sm overflow-y-auto">
+          <div className="flex min-h-full items-center justify-center p-4">
           <div className="w-full max-w-4xl my-8 bg-card border border-border rounded-3xl p-6 space-y-4">
             {mechDetail.loading ? <p className="text-muted text-sm py-8 text-center">Loading…</p> : (() => {
               const p = mechDetail.profile; const rev = mechDetail.revenue; const bl = mechDetail.billing;
@@ -1263,12 +1264,14 @@ export const AdminPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) => {
               );
             })()}
           </div>
+          </div>
         </div>
       )}
 
       {/* Booking detail modal */}
       {detail && (
-        <div className="fixed inset-0 z-[120] flex items-center justify-center p-4 bg-black/50 backdrop-blur-sm overflow-y-auto">
+        <div className="fixed inset-0 z-[120] bg-black/50 backdrop-blur-sm overflow-y-auto">
+          <div className="flex min-h-full items-center justify-center p-4">
           <div className="w-full max-w-lg my-8 bg-card border border-border rounded-3xl p-6 space-y-4">
             {detail.loading ? <p className="text-muted text-sm py-8 text-center">Loading…</p> : (() => {
               const b = detail.booking; const m = detail.mechanic; const v = detail.vehicle;
@@ -1346,12 +1349,14 @@ export const AdminPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) => {
               );
             })()}
           </div>
+          </div>
         </div>
       )}
 
       {/* Edit modal */}
       {edit && (
-        <div className="fixed inset-0 z-[120] flex items-center justify-center p-4 bg-black/50 backdrop-blur-sm overflow-y-auto">
+        <div className="fixed inset-0 z-[120] bg-black/50 backdrop-blur-sm overflow-y-auto">
+          <div className="flex min-h-full items-center justify-center p-4">
           <div className="w-full max-w-md my-8 bg-card border border-border rounded-3xl p-6 space-y-4">
             <h3 className="text-lg font-black uppercase text-foreground">Edit {edit.kind}</h3>
             <div className="space-y-3">
@@ -1369,6 +1374,7 @@ export const AdminPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) => {
               <Button fullWidth className="bg-torqued-red text-white" onClick={saveEdit}>Save</Button>
               <Button variant="ghost" onClick={() => setEdit(null)}>Cancel</Button>
             </div>
+          </div>
           </div>
         </div>
       )}

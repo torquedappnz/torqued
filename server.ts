@@ -4036,23 +4036,15 @@ app.get('/api/fleet-prices', async (req, res) => {
             : (ef?.timing_type === 'belt' || ef?.timing_type === 'wet_belt') ? 'belt'
             : null;
 
-          // Chain timing fallback if no ef_parts_data timing row
-          if (!efPrices['timing'] && efTimingDrive === 'chain') {
-            const tcLabour = Math.round(5.0 * efLabourRate);
-            efPrices['timing'] = { low: 600 + tcLabour, high: 1100 + tcLabour,
-              midpoint: 850 + tcLabour, partsLow: 600, partsHigh: 1100,
-              labourLow: tcLabour, labourHigh: tcLabour, labourHours: '5', indicative: true };
-          }
-
-          // Water pump fallback
-          if (!efPrices['water_pump']) {
-            const wpLabour = Math.round(2.0 * efLabourRate);
-            efPrices['water_pump'] = { low: 320 + 120 + 45 + wpLabour, high: 480 + 180 + 85 + wpLabour,
-              midpoint: 400 + 150 + 65 + wpLabour,
-              partsLow: 320 + 120 + 45, partsHigh: 480 + 180 + 85,
-              labourLow: wpLabour, labourHigh: wpLabour, labourHours: '2',
-              coolantLow: 45, coolantHigh: 85 };
-          }
+          // NOTE: No timing-chain or water-pump fabrication here.
+          // Timing chains have no scheduled replacement and both jobs are
+          // fault-diagnosis work with no reliable per-engine parts row, so we
+          // deliberately leave efPrices['timing'] / efPrices['water_pump'] unset
+          // when there's no real ef_parts_data row. The frontend renders any
+          // unpriced-but-offered service as a "precise quote within 1 business
+          // hour" card rather than showing an invented number.
+          // (Belt engines still get a real 'timing' price above from the
+          // cambelt_full / wet_belt_replacement ef_parts_data rows.)
 
           const wpMakesEF = ['volkswagen', 'vw', 'skoda', 'seat', 'audi', 'volvo', 'land rover', 'jaguar'];
           const efWPRec = efTimingDrive === 'belt'
@@ -4311,6 +4303,13 @@ app.get('/api/fleet-prices', async (req, res) => {
       Object.assign(prices['transmission'], (prices as any)['_trans_detail']);
       delete (prices as any)['_trans_detail'];
     }
+    // If we don't actually know this vehicle's transmission fluid type/spec, we
+    // cannot price it honestly — route it to a precise 1-business-hour quote
+    // instead of guessing a fluid + capacity. (Removes "type confirmed by
+    // workshop" fabricated transmission prices, e.g. BMW 320i.)
+    if (prices['transmission'] && !transFluidKnown) {
+      delete prices['transmission'];
+    }
     // Merge oil detail into oil service price
     if ((prices as any)['_oil_detail']) {
       if (prices['oil']) Object.assign(prices['oil'], (prices as any)['_oil_detail']);
@@ -4340,16 +4339,11 @@ app.get('/api/fleet-prices', async (req, res) => {
       Object.assign(prices['coolant_flush'], { fluidType: 'OAT Coolant', fluidCapacityL: coolantCapacityL, sundries: 10 });
     }
 
-    // Timing chain: if chain-driven but no parts_data entry, add an indicative range
-    if (!prices['timing'] && timingDrive === 'chain') {
-      const tcLabour = Math.round(5.0 * NZD_LABOUR_RATE);
-      prices['timing'] = { low: 600 + tcLabour, high: 1100 + tcLabour,
-        midpoint: 850 + tcLabour, partsLow: 600, partsHigh: 1100,
-        labourLow: tcLabour, labourHigh: tcLabour, labourHours: '5',
-        indicative: true };
-    }
-
-    const waterPumpHasPartsData = !!prices['water_pump'];
+    // NOTE: No timing-chain fabrication. Chain-driven engines have no scheduled
+    // cambelt replacement; "timing chain" work is fault diagnosis with no
+    // reliable flat price, so we leave prices['timing'] unset for chains and let
+    // the frontend offer a precise 1-business-hour quote. Belt engines still get
+    // a real 'timing' price from parts_data (cambelt) above.
 
     // Water pump always includes thermostat housing + coolant drain/refill.
     // Also add coolantLow/coolantHigh breakdown fields for the UI to display.
@@ -4374,16 +4368,9 @@ app.get('/api/fleet-prices', async (req, res) => {
       // Suppress thermostat_housing as a separate priced item (it's bundled into water_pump)
       delete prices['thermostat_housing'];
     }
-    if (!prices['water_pump']) {
-      // Fallback: pump + thermostat housing ($320-480) + coolant + 2hrs labour
-      const wpFallbackLabour = Math.round(2.0 * NZD_LABOUR_RATE);
-      prices['water_pump'] = { low: 320 + WP_THERMO_LOW + WP_COOLANT_LOW + wpFallbackLabour,
-        high: 480 + WP_THERMO_HIGH + WP_COOLANT_HIGH + wpFallbackLabour,
-        midpoint: 400 + 150 + 65 + wpFallbackLabour,
-        partsLow: 320 + WP_THERMO_LOW + WP_COOLANT_LOW, partsHigh: 480 + WP_THERMO_HIGH + WP_COOLANT_HIGH,
-        labourLow: wpFallbackLabour, labourHigh: wpFallbackLabour, labourHours: '2',
-        coolantLow: WP_COOLANT_LOW, coolantHigh: WP_COOLANT_HIGH };
-    }
+    // NOTE: No water-pump fabrication. Without a real parts_data row we can't
+    // price a pump job honestly (huge variance by engine/access), so we leave
+    // prices['water_pump'] unset and the frontend offers a 1-business-hour quote.
     if (!prices['full']) {
       // Full service: oil + filter + extras + 2.5hrs labour
       const fsOilMid = Math.round(oilCapacity * 20);

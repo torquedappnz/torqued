@@ -1658,6 +1658,16 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
     return SERVICES.find(s => s.id === id)?.basePrice || 0;
   };
 
+  // Have the real per-vehicle prices arrived from /api/fleet-prices yet?
+  const fleetPricesLoaded = Object.keys(fleetPricesRaw).length > 0;
+  // A service that is offered but has no real instant price. We never invent a
+  // number — these route to a precise quote the workshop returns within 1
+  // business hour. (e.g. timing chain, water pump, unknown-fluid transmission.)
+  const isQuoteJob = (id: string) =>
+    fleetPricesLoaded && !fleetPricesRaw[id] && !(SERVICES.find(s => s.id === id)?.basePrice);
+  // Services currently selected that will be sent as a precise-quote request.
+  const selectedQuoteJobs = selectedServices.filter(id => id !== 'thermostat_housing' && isQuoteJob(id));
+
   // Calculate total price based on selected services (per-vehicle pricing)
   const totalPrice = useMemo(() => {
     let t = selectedServices.reduce((sum, id) => sum + priceFor(id), 0);
@@ -2608,6 +2618,37 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
       setEvQuoteConcern('');
     }
 
+    // Precise-quote jobs: any selected service with no instant price (timing
+    // chain, water pump, unknown-fluid transmission, etc). These do NOT go
+    // through payment — they fire a quote request the workshop returns within
+    // 1 business hour, alongside (or instead of) the paid booking.
+    if (selectedQuoteJobs.length > 0) {
+      const quoteNames = selectedQuoteJobs
+        .map(id => serviceDisplayName(id, SERVICES.find(s => s.id === id)?.name || id))
+        .join(', ');
+      const quoteReqId = (crypto as any).randomUUID ? crypto.randomUUID() : `q_${Date.now()}`;
+      fetch('/api/bookings/persist', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          bookingData: {
+            id: quoteReqId,
+            mechanicId: selectedMechanic.id,
+            vehicleId: vehicle?.rego || rego,
+            serviceIds: selectedQuoteJobs,
+            totalPrice: 0,
+            paymentMethod: 'TBD',
+            paymentStatus: 'pending',
+            status: 'pending',
+            date: null,
+            customerName: userName || '',
+            email: customerEmail || '',
+            description: `[Quote Request — respond within 1 business hour] ${quoteNames} for ${vehicle?.year || ''} ${vehicle?.make || ''} ${vehicle?.model || ''}`.trim(),
+          },
+          userId: user?.id ?? customerOwnerId ?? null,
+        }),
+      }).catch(e => console.error('Failed to save precise-quote request alongside booking:', e));
+    }
+
     const isFinanceNow = paymentMethod === 'Finance Now';
     const isImmediatePayment = ['Afterpay', 'Klarna', 'Latitude', 'Q Card', 'Credit / Debit', 'Credit or Debit Card'].includes(paymentMethod);
 
@@ -2618,10 +2659,14 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
     // Total price is discounted on confirmation if promo code is applied
     const finalCalculatedPrice = calculatedPrice;
 
+    // The paid booking covers only jobs with a real instant price. Precise-quote
+    // jobs are handled by the separate quote request created above.
+    const pricedServiceIds = selectedServices.filter(id => !isQuoteJob(id));
+
     const newJob: Job = {
       id: Math.random().toString(36).substr(2, 9),
       vehicleId: vehicle?.id || 'v1',
-      serviceIds: selectedServices,
+      serviceIds: pricedServiceIds.length > 0 ? pricedServiceIds : selectedServices,
       mechanicId: selectedMechanic.id,
       mechanicName: selectedMechanic.name,
       mechanicAddress: (selectedMechanic as any).address || undefined,
@@ -3254,7 +3299,11 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                         <div className="flex flex-col items-center gap-1 w-full text-center">
                           <span className="text-2xl">{service.icon}</span>
                           <span className="text-xs font-bold uppercase tracking-tight leading-tight">{serviceDisplayName(service.id, service.name)}</span>
-                          {fp && <span className="text-[10px] text-muted">${fp.high}</span>}
+                          {fp
+                            ? <span className="text-[10px] text-muted">${fp.high}</span>
+                            : fleetPricesLoaded
+                              ? <span className="text-[10px] text-amber-500 font-semibold">Quote · ~1 hr</span>
+                              : null}
                         </div>
                       </button>
                     );
@@ -3432,28 +3481,24 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                 {(totalPrice > 0 || selectedServices.length > 0) && (
                   <div className="p-4 bg-card rounded-xl border border-border space-y-2">
                     {(() => {
-                      const INDICATIVE: Record<string, number> = {
-                        oil: 180, wof: 65, full: 350, brakes_front_pads: 220, brakes_front_rotors: 580,
-                        brakes_rear_pads: 190, brakes_rear_rotors: 480, timing: 1200, transmission: 480,
-                        battery: 280, diag_inspection: 99, spark_plugs: 240, cabin_filter: 110,
-                        brake_fluid: 145, coolant_flush: 220, ignition_coils: 350, water_pump: 695,
-                        thermostat_housing: 380, alignment: 130, ac_regas: 180, wiper_blades: 60,
-                        power_steering_fluid: 120,
-                      };
+                      // No invented numbers: a service is either priced from real
+                      // per-vehicle data, or it's a precise-quote job (workshop
+                      // responds within 1 business hour).
                       const hasTH = selectedServices.includes('thermostat_housing');
                       const displayServices = selectedServices.filter(id => id !== 'thermostat_housing');
                       return displayServices.map(id => {
                         const fp = fleetPricesRaw[id];
                         const svc = SERVICES.find(s => s.id === id);
                         if (!svc) return null;
-                        const price = fp?.high ?? INDICATIVE[id];
-                        const combinedPrice = (id === 'water_pump' && hasTH)
-                          ? (fp?.high ?? INDICATIVE['water_pump']) + (fleetPricesRaw['thermostat_housing']?.high ?? INDICATIVE['thermostat_housing'])
-                          : price;
+                        const combinedPrice = (id === 'water_pump' && hasTH && fp)
+                          ? fp.high + (fleetPricesRaw['thermostat_housing']?.high ?? 0)
+                          : fp?.high;
                         return (
                           <div key={id} className="flex justify-between text-xs text-muted">
                             <span>{id === 'water_pump' && hasTH ? 'Water Pump & Thermostat Housing' : serviceDisplayName(id, svc.name)}</span>
-                            <span>{combinedPrice ? `$${combinedPrice}` : 'Quoted by workshop'}</span>
+                            {combinedPrice
+                              ? <span>${combinedPrice}</span>
+                              : <span className="text-amber-500">Precise quote · ~1 business hr</span>}
                           </div>
                         );
                       });
@@ -3471,9 +3516,20 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                       </div>
                     )}
                     <div className="flex justify-between items-center pt-2 border-t border-border">
-                      <span className="text-xs font-bold uppercase text-muted">Estimated Total</span>
+                      <span className="text-xs font-bold uppercase text-muted">
+                        {selectedQuoteJobs.length > 0 && totalPrice > 0 ? 'Estimated Total (priced jobs)' : 'Estimated Total'}
+                      </span>
                       <span className="text-xl font-bold text-torqued-red">${totalPrice}</span>
                     </div>
+                    {selectedQuoteJobs.length > 0 && (
+                      <div className="flex items-start gap-2 pt-2 mt-1 border-t border-border/60">
+                        <Clock size={13} className="text-amber-500 mt-0.5 shrink-0" />
+                        <p className="text-[11px] text-muted leading-relaxed">
+                          {selectedQuoteJobs.map(id => serviceDisplayName(id, SERVICES.find(s => s.id === id)?.name || id)).join(', ')}
+                          {selectedQuoteJobs.length === 1 ? ' needs' : ' need'} a precise quote — your workshop confirms the exact price within <span className="text-foreground font-semibold">1 business hour</span>, before any work starts. You can still book your priced jobs now.
+                        </p>
+                      </div>
+                    )}
                   </div>
                 )}
                 {isEV && (
@@ -4336,8 +4392,13 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                       <div key={id} className="space-y-3 bg-background/50 p-4 rounded-2xl border border-border">
                         <div className="flex justify-between items-center text-foreground">
                           <span className="text-sm font-semibold">{matchedPkg ? matchedPkg.name : serviceDisplayName(id, service.name)}</span>
-                          <span className="text-sm font-semibold">{displayPrice > 0 ? `$${displayPrice}` : <span className="text-muted text-xs">Quoted by workshop</span>}</span>
+                          <span className="text-sm font-semibold">{displayPrice > 0 ? `$${displayPrice}` : <span className="text-amber-500 text-xs font-semibold">Precise quote · ~1 business hr</span>}</span>
                         </div>
+                        {displayPrice === 0 && !matchedPkg && isQuoteJob(id) && (
+                          <p className="text-[11px] text-muted leading-relaxed border-t border-border/50 pt-3">
+                            No fixed menu price for this job on your vehicle. Your workshop reviews it and sends a precise, itemised quote within <span className="text-foreground font-semibold">1 business hour</span> — you approve it before any work begins. Nothing is charged for this line today.
+                          </p>
+                        )}
                         {matchedPkg ? (
                           <div className="border-t border-border/50 pt-3 space-y-1.5">
                             {matchedPkg.base_fee != null && (
@@ -4394,7 +4455,13 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                                   <span className="text-xs text-foreground font-medium">{fp.oilCapacityL}L · Manufacturer Approved {fp.oilType || 'Engine Oil'}</span>
                                 </div>
                               )}
-                              {isFluid && fp.fluidType && (
+                              {id === 'transmission' && (
+                                <div className="flex justify-between text-xs text-muted">
+                                  <span>Transmission fluid{fp.fluidCapacityL ? ` (~${fp.fluidCapacityL}L` : ''}{fp.fluidType ? ` ${fp.fluidType}` : ' — type confirmed by workshop'}{fp.fluidCapacityL ? ')' : ''}</span>
+                                  <span>${fp.fluidCostHigh ?? Math.round((fp.fluidCapacityL ?? 4) * 30)}</span>
+                                </div>
+                              )}
+                              {id !== 'transmission' && isFluid && fp.fluidType && (
                                 <div className="flex justify-between text-xs text-muted">
                                   <span>Fluid ({fp.fluidType}{fp.fluidCapacityL ? ` · ${fp.fluidCapacityL}L` : ''})</span>
                                   <span>${fp.fluidCostHigh ?? fp.partsHigh}</span>
@@ -4402,7 +4469,7 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                               )}
                               {id === 'transmission' && fp.partsHigh > 0 && (
                                 <div className="flex justify-between text-xs text-muted">
-                                  <span>Filter / gasket kit</span>
+                                  <span>Transmission filter & gasket kit</span>
                                   <span>${fp.partsHigh}</span>
                                 </div>
                               )}
