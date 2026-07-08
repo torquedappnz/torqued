@@ -6508,6 +6508,37 @@ function generateBookingEmailHtml(data: any): string {
     paymentOption, promoApplied, promoDiscount,
   } = data;
 
+  // Quote-request variant: no instant price was available, so this is a request
+  // for a precise quote (within 1 business hour), NOT a paid/confirmed booking.
+  if (data.isQuoteRequest) {
+    const quoteRows = (services || []).map((s: string) => `
+      <tr><td style="padding:10px 0;font-family:${EMAIL_BODY_FONT};font-size:13px;font-weight:700;color:#374151;border-bottom:1px solid #f0ede8;text-transform:uppercase;">${s}</td>
+      <td style="padding:10px 0;text-align:right;font-family:monospace;font-size:12px;font-weight:700;color:${EMAIL_MUTED};border-bottom:1px solid #f0ede8;">QUOTE PENDING</td></tr>`).join('');
+    return emailWrap(`<tr><td style="padding:36px 32px;">
+${emailTitle('Quote Requested')}
+${emailGreeting(customerName)}
+${emailPara(`Thanks — we've sent your request to <strong>${mechanicName}</strong>. This work needs a precise quote for your <strong>${vehicle}</strong>, so they'll send you an exact price <strong style="color:${EMAIL_RED};">within 1 business hour</strong>. No payment has been taken — you approve the quote before any work begins. Reference: <strong style="color:${EMAIL_RED};">#${bookingId}</strong>`)}
+
+<table width="100%" cellpadding="0" cellspacing="0" style="margin:20px 0;border-radius:12px;overflow:hidden;border:1px solid #e8e4df;">
+  <tr><td style="background:#f7f4f0;padding:14px 18px;">
+    <p style="margin:0;font-family:${EMAIL_BODY_FONT};font-size:10px;font-weight:700;color:${EMAIL_MUTED};text-transform:uppercase;letter-spacing:1px;">Vehicle</p>
+    <p style="margin:4px 0 0;font-family:${EMAIL_BODY_FONT};font-size:14px;font-weight:700;color:${EMAIL_DARK};">${vehicle} <span style="font-family:monospace;font-size:12px;background:${EMAIL_RED};color:#fff;padding:2px 7px;border-radius:4px;margin-left:6px;">${plate}</span></p>
+  </td></tr>
+  <tr><td style="background:#fff;padding:14px 18px;border-top:1px solid #e8e4df;">
+    <p style="margin:0;font-family:${EMAIL_BODY_FONT};font-size:10px;font-weight:700;color:${EMAIL_MUTED};text-transform:uppercase;letter-spacing:1px;">Workshop</p>
+    <p style="margin:4px 0 0;font-family:${EMAIL_BODY_FONT};font-size:14px;font-weight:700;color:${EMAIL_DARK};">${mechanicName}</p>
+    ${mechanicAddress ? `<p style="margin:2px 0 0;font-family:${EMAIL_BODY_FONT};font-size:12px;color:${EMAIL_MUTED};">📍 ${mechanicAddress}</p>` : ''}
+  </td></tr>
+</table>
+
+<p style="margin:0 0 8px;font-family:${EMAIL_BODY_FONT};font-size:10px;font-weight:700;color:${EMAIL_MUTED};text-transform:uppercase;letter-spacing:1px;">Work requested</p>
+<table width="100%" cellpadding="0" cellspacing="0" style="margin-bottom:16px;">
+  ${quoteRows}
+  <tr><td colspan="2" style="padding-top:12px;"><span style="background:${EMAIL_DARK};color:#fff;padding:6px 12px;border-radius:6px;font-family:${EMAIL_BODY_FONT};font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:1px;">Precise quote on its way — within 1 business hour</span></td></tr>
+</table>
+</td></tr>`);
+  }
+
   const finalPrice = promoApplied ? Math.max(0, parseFloat(price) - parseFloat(promoDiscount)) : parseFloat(price);
   const serviceRows = (services || []).map((s: string) => `
     <tr><td style="padding:10px 0;font-family:${EMAIL_BODY_FONT};font-size:13px;font-weight:700;color:#374151;border-bottom:1px solid #f0ede8;text-transform:uppercase;">${s}</td>
@@ -6577,6 +6608,38 @@ function generateMechanicEmailHtml(data: any): string {
     promoApplied,
     promoDiscount
   } = data;
+
+  // Quote-request variant: no instant price was offered to the customer, so no
+  // payment has been taken. The mechanic must send a manual quote (customer told
+  // to expect it within 1 business hour). Never show "payment confirmed" here.
+  if (data.isQuoteRequest) {
+    const quoteRows = (services || []).map((s: string) => `
+      <tr><td style="padding:10px 0;font-family:${EMAIL_BODY_FONT};font-size:13px;font-weight:700;color:#374151;border-bottom:1px solid #f0ede8;text-transform:uppercase;">🛠 ${s}</td>
+      <td style="padding:10px 0;text-align:right;font-family:monospace;font-size:12px;font-weight:700;color:${EMAIL_RED};border-bottom:1px solid #f0ede8;">QUOTE</td></tr>`).join('');
+    return emailWrap(`<tr><td style="padding:36px 32px;">
+${emailTitle(`Quote Request: #${bookingId}`)}
+${emailGreeting(mechanicName)}
+${emailPara(`A customer has requested a price for the work below. <strong>No instant price was available for their vehicle, so no payment has been taken.</strong> Please review and send them a precise quote — they've been told to expect it <strong style="color:${EMAIL_RED};">within 1 business hour</strong>. They approve your quote before any work begins.`)}
+
+<table width="100%" cellpadding="0" cellspacing="0" style="margin:20px 0;border-radius:12px;overflow:hidden;border:1px solid #e8e4df;">
+  <tr><td style="background:#f7f4f0;padding:14px 18px;">
+    <p style="margin:0;font-family:${EMAIL_BODY_FONT};font-size:10px;font-weight:700;color:${EMAIL_MUTED};text-transform:uppercase;letter-spacing:1px;">Vehicle</p>
+    <p style="margin:4px 0 0;font-family:${EMAIL_BODY_FONT};font-size:14px;font-weight:700;color:${EMAIL_DARK};">${vehicle} <span style="font-family:monospace;font-size:12px;background:${EMAIL_RED};color:#fff;padding:2px 7px;border-radius:4px;margin-left:6px;">${plate}</span></p>
+  </td></tr>
+  <tr><td style="background:#fff;padding:14px 18px;border-top:1px solid #e8e4df;">
+    <p style="margin:0;font-family:${EMAIL_BODY_FONT};font-size:10px;font-weight:700;color:${EMAIL_MUTED};text-transform:uppercase;letter-spacing:1px;">Client</p>
+    <p style="margin:4px 0 0;font-family:${EMAIL_BODY_FONT};font-size:14px;font-weight:700;color:${EMAIL_DARK};">${customerName}</p>
+    <p style="margin:2px 0 0;font-family:${EMAIL_BODY_FONT};font-size:12px;color:${EMAIL_MUTED};">${data.email || ''}</p>
+  </td></tr>
+</table>
+
+<p style="margin:0 0 8px;font-family:${EMAIL_BODY_FONT};font-size:10px;font-weight:700;color:${EMAIL_MUTED};text-transform:uppercase;letter-spacing:1px;">Work to quote</p>
+<table width="100%" cellpadding="0" cellspacing="0" style="margin-bottom:16px;">
+  ${quoteRows}
+  <tr><td colspan="2" style="padding-top:12px;"><span style="background:${EMAIL_RED};color:#fff;padding:6px 12px;border-radius:6px;font-family:${EMAIL_BODY_FONT};font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:1px;">Quote required — customer awaiting your price within 1 business hour</span></td></tr>
+</table>
+</td></tr>`);
+  }
 
   const serviceRows = (services || []).map((s: string) => `
     <tr><td style="padding:10px 0;font-family:${EMAIL_BODY_FONT};font-size:13px;font-weight:700;color:#374151;border-bottom:1px solid #f0ede8;text-transform:uppercase;">🛠 ${s}</td>
@@ -6908,11 +6971,18 @@ app.post('/api/email/confirm-booking', async (req, res) => {
       try {
         const fromAddress = process.env.SMTP_FROM || '"Torqued NZ" <no-reply@torqued.nz>';
         
+        const custSubject = data.isQuoteRequest
+          ? `Quote Requested: Ref #${data.bookingId} (${data.vehicle})`
+          : `Booking Confirmed: Ref #${data.bookingId} (${data.vehicle})`;
+        const mechSubject = data.isQuoteRequest
+          ? `[Torqued Quote Request] Ref #${data.bookingId} - ${data.vehicle} (${data.plate})`
+          : `[New Torqued Booking] Ref #${data.bookingId} - ${data.vehicle} (${data.plate})`;
+
         // Dispatch Customer Confirmation Email
         await transporter.sendMail({
           from: fromAddress,
           to: recipientEmail,
-          subject: `Booking Confirmed: Ref #${data.bookingId} (${data.vehicle})`,
+          subject: custSubject,
           html: emailHtmlHtml
         });
 
@@ -6928,7 +6998,7 @@ app.post('/api/email/confirm-booking', async (req, res) => {
             if (mp?.email) {
               await transporter.sendMail({
                 from: fromAddress, to: mp.email,
-                subject: `[New Torqued Booking] Ref #${data.bookingId} - ${data.vehicle} (${data.plate})`,
+                subject: mechSubject,
                 html: mechanicHtml,
               });
               mechanicEmailSent = mp.email;
@@ -6937,7 +7007,7 @@ app.post('/api/email/confirm-booking', async (req, res) => {
         } else if (realMechanicEmail) {
           await transporter.sendMail({
             from: fromAddress, to: realMechanicEmail,
-            subject: `[New Torqued Booking] Ref #${data.bookingId} - ${data.vehicle} (${data.plate})`,
+            subject: mechSubject,
             html: mechanicHtml,
           });
           mechanicEmailSent = realMechanicEmail;

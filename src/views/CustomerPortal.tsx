@@ -1342,6 +1342,12 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
       }
       const custName = userProfile?.name || userName || (job.email || userProfile?.email || user?.email || '').split('@')[0] || '';
 
+      // A booking is a quote request (not a paid booking) when every service on it
+      // has no instant price — the mechanic must send a manual quote within 1
+      // business hour, so the emails must NOT say "payment confirmed".
+      const isQuoteRequest = Array.isArray(job.serviceIds) && job.serviceIds.length > 0
+        && job.serviceIds.every((id: string) => isQuoteJob(id));
+
       const payload = {
         email: job.email || userProfile?.email || user?.email || customerEmail || 'customer@torqued.nz',
         customerName: custName,
@@ -1359,6 +1365,7 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
         price: job.totalPrice,
         paymentOption: paymentOption,
         depositPaid: job.depositPaid,
+        isQuoteRequest,
       };
 
       const res = await fetch('/api/email/confirm-booking', {
