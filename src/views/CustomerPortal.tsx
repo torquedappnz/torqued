@@ -900,6 +900,7 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
   const [fleetPricesRaw, setFleetPricesRaw] = useState<Record<string, any>>({});
   const [waterPumpInDB, setWaterPumpInDB] = useState(false);
   const [differentialInDB, setDifferentialInDB] = useState(false);
+  const [differentialApplicable, setDifferentialApplicable] = useState(false);
   const [vehicleTimingDrive, setVehicleTimingDrive] = useState<'belt' | 'chain' | 'na' | null>(null);
   const isEV = vehicle?.make?.toLowerCase() === 'tesla' ||
                !!vehicle?.fuelType?.toLowerCase()?.includes('electric') ||
@@ -1838,6 +1839,7 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
             setFleetPricesRaw(fp.prices);
             if (fp?.waterPumpInDB !== undefined) setWaterPumpInDB(!!fp.waterPumpInDB);
             if (fp?.differentialInDB !== undefined) setDifferentialInDB(!!fp.differentialInDB);
+            if (fp?.differentialApplicable !== undefined) setDifferentialApplicable(!!fp.differentialApplicable);
           }
         })
         .catch(() => {/* fleet prices are best-effort */});
@@ -2978,6 +2980,7 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                                         setFleetPricesRaw(fp.prices);
                                         if (fp?.waterPumpInDB !== undefined) setWaterPumpInDB(!!fp.waterPumpInDB);
             if (fp?.differentialInDB !== undefined) setDifferentialInDB(!!fp.differentialInDB);
+            if (fp?.differentialApplicable !== undefined) setDifferentialApplicable(!!fp.differentialApplicable);
                                       }
                                     }).catch(() => {});
                                 }
@@ -3310,6 +3313,7 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                                 setFleetPricesRaw(fp.prices);
                                 if (fp?.waterPumpInDB !== undefined) setWaterPumpInDB(!!fp.waterPumpInDB);
             if (fp?.differentialInDB !== undefined) setDifferentialInDB(!!fp.differentialInDB);
+            if (fp?.differentialApplicable !== undefined) setDifferentialApplicable(!!fp.differentialApplicable);
                               }
                             }).catch(() => {});
                         }
@@ -3345,6 +3349,7 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                   {SERVICES.filter(service => {
                     if (service.id === 'thermostat_housing') return false;
                     if (service.id === 'water_pump' && !waterPumpInDB) return false;
+                    if (service.id === 'differential' && !differentialApplicable) return false;
                     if (isEV) {
                       const EV_OK = new Set(['wof','brakes_front_pads','brakes_front_rotors','brakes_rear_pads','brakes_rear_rotors','diag_inspection','cabin_filter','brake_fluid','ppi']);
                       return EV_OK.has(service.id);
@@ -3474,7 +3479,7 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                   </motion.div>
                 )}
 
-                {/* Service comparison card — shown when Standard Service or Full Service is selected */}
+                {/* Service comparison card — shown when Standard Service or Gold Service is selected */}
                 {(selectedServices.includes('oil') || selectedServices.includes('full')) && (
                   <div className="p-4 bg-card border border-border rounded-xl space-y-3">
                     <p className="text-[10px] font-black uppercase tracking-widest text-muted">What's included</p>
@@ -3482,15 +3487,15 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                       <div className={cn("p-3 rounded-lg border space-y-2 transition-all", selectedServices.includes('oil') ? "border-torqued-red bg-torqued-red/5" : "border-border opacity-60")}>
                         <p className="text-xs font-black uppercase tracking-tight text-foreground">Standard Service</p>
                         <ul className="space-y-1">
-                          {['Oil & filter change', 'Check all fluid levels', 'Tyre pressure inspection', 'General safety inspection'].map(item => (
+                          {['Oil and filter change', 'Check coolant', 'Check brake fluid', 'Check wipers & top-up wiper fluid', 'Check tyre pressures'].map(item => (
                             <li key={item} className="text-[10px] text-muted flex items-start gap-1"><span className="text-torqued-red mt-0.5">✓</span>{item}</li>
                           ))}
                         </ul>
                       </div>
                       <div className={cn("p-3 rounded-lg border space-y-2 transition-all", selectedServices.includes('full') ? "border-torqued-red bg-torqued-red/5" : "border-border opacity-60")}>
-                        <p className="text-xs font-black uppercase tracking-tight text-foreground">Full Service</p>
+                        <p className="text-xs font-black uppercase tracking-tight text-foreground">Gold Service</p>
                         <ul className="space-y-1">
-                          {['Everything in Standard', 'Air filter inspection', 'Visual drive belt check', 'Cooling system check', '12V battery test', 'Test drive report'].map(item => (
+                          {['Everything in Standard Service', 'Check and test 12V battery', 'Check transmission fluid', 'Check diff. oil levels (if relevant)', 'Inspect drive belts', 'Clean air filter', 'Check all lights', 'Fully inspect brakes', 'Check exhaust system', 'Check wheel bearings', 'Scan computer / inspect sensors', 'Check clutch operation (if relevant)', 'Check spark plugs', 'Check suspension and steering'].map(item => (
                             <li key={item} className="text-[10px] text-muted flex items-start gap-1"><span className="text-torqued-red mt-0.5">✓</span>{item}</li>
                           ))}
                         </ul>
@@ -4527,31 +4532,46 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                           const fp = fleetPricesRaw[id];
                           if (!fp || (fp.partsLow === 0 && fp.labourLow === 0)) return null;
                           const isFluid = id === 'transmission' || id === 'brake_fluid' || id === 'coolant_flush';
-                          const isOilService = id === 'oil' || id === 'full';
+                          // oil/full(Gold)/transmission are consumable-based: real fluid cost
+                          // (capacity x $/L) + real filter cost + fixed labour + an explicit fee
+                          // (freight for oil/Gold, shop fee for transmission) — never a bundled guess.
+                          const isConsumableService = id === 'oil' || id === 'full' || id === 'transmission';
+                          if (isConsumableService && fp.filterCostHigh !== undefined) {
+                            return (
+                              <div className="border-t border-border/50 pt-3 space-y-1.5">
+                                {fp.fluidType && (
+                                  <div className="flex items-center gap-2 py-1 px-2 rounded-lg bg-torqued-red/5 border border-torqued-red/20">
+                                    <span className="text-[10px] font-black uppercase tracking-widest text-torqued-red">{id === 'transmission' ? 'Trans Fluid' : 'Oil Spec'}</span>
+                                    <span className="text-xs text-foreground font-medium">{fp.fluidCapacityL ? `${fp.fluidCapacityL}L · ` : ''}{fp.fluidType}</span>
+                                  </div>
+                                )}
+                                <div className="flex justify-between text-xs text-muted">
+                                  <span>{id === 'transmission' ? 'Transmission fluid' : 'Engine oil'}{fp.fluidCapacityL ? ` (${fp.fluidCapacityL}L)` : ''}</span>
+                                  <span>${fp.fluidCostHigh}</span>
+                                </div>
+                                <div className="flex justify-between text-xs text-muted">
+                                  <span>{fp.filterName || 'Filter'}</span>
+                                  <span>${fp.filterCostHigh}</span>
+                                </div>
+                                <div className="flex justify-between text-xs text-muted">
+                                  <span>Labour{fp.labourHours ? ` (${fp.labourHours} hrs)` : ''}</span>
+                                  <span>${fp.labourLow}</span>
+                                </div>
+                                {fp.feeAmount > 0 && (
+                                  <div className="flex justify-between text-xs text-muted">
+                                    <span>{fp.feeType === 'shop' ? 'Shop fee' : 'Freight'}</span>
+                                    <span>${fp.feeAmount}</span>
+                                  </div>
+                                )}
+                              </div>
+                            );
+                          }
                           return (
                             <div className="border-t border-border/50 pt-3 space-y-1.5">
-                              {isOilService && fp.oilCapacityL && (
-                                <div className="flex items-center gap-2 py-1 px-2 rounded-lg bg-torqued-red/5 border border-torqued-red/20">
-                                  <span className="text-[10px] font-black uppercase tracking-widest text-torqued-red">Oil Spec</span>
-                                  <span className="text-xs text-foreground font-medium">{fp.oilCapacityL}L · Manufacturer Approved {fp.oilType || 'Engine Oil'}</span>
-                                </div>
-                              )}
-                              {id === 'transmission' && (
-                                <div className="flex justify-between text-xs text-muted">
-                                  <span>Transmission fluid{fp.fluidCapacityL ? ` (~${fp.fluidCapacityL}L` : ''}{fp.fluidType ? ` ${fp.fluidType}` : ' — type confirmed by workshop'}{fp.fluidCapacityL ? ')' : ''}</span>
-                                  <span>${fp.fluidCostHigh ?? Math.round((fp.fluidCapacityL ?? 4) * 30)}</span>
-                                </div>
-                              )}
-                              {id !== 'transmission' && isFluid && fp.fluidType && (
+                              {isFluid && fp.fluidType && (
                                 <div className="flex justify-between text-xs text-muted">
                                   <span>Fluid ({fp.fluidType}{fp.fluidCapacityL ? ` · ${fp.fluidCapacityL}L` : ''})</span>
                                   <span>${fp.fluidCostHigh ?? fp.partsHigh}</span>
-                                </div>
-                              )}
-                              {id === 'transmission' && fp.partsHigh > 0 && (
-                                <div className="flex justify-between text-xs text-muted">
-                                  <span>Transmission filter & gasket kit</span>
-                                  <span>${fp.partsHigh}</span>
                                 </div>
                               )}
                               {!isFluid && fp.partsLow > 0 && (
@@ -4566,12 +4586,8 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                                   <span>${fp.labourLow}</span>
                                 </div>
                               )}
-                              {id === 'transmission' && (fp.freight || fp.sundries || fp.scanFee) && (
-                                <>
-                                  {fp.freight > 0 && <div className="flex justify-between text-xs text-muted"><span>Freight</span><span>${fp.freight}</span></div>}
-                                  {fp.sundries > 0 && <div className="flex justify-between text-xs text-muted"><span>Sundries</span><span>${fp.sundries}</span></div>}
-                                  {fp.scanFee > 0 && <div className="flex justify-between text-xs text-muted"><span>TCU adaptation scan</span><span>${fp.scanFee}</span></div>}
-                                </>
+                              {id === 'differential' && fp.shopFee > 0 && (
+                                <div className="flex justify-between text-xs text-muted"><span>Shop fee</span><span>${fp.shopFee}</span></div>
                               )}
                               {(id === 'brake_fluid' || id === 'coolant_flush') && fp.sundries > 0 && (
                                 <div className="flex justify-between text-xs text-muted"><span>Sundries</span><span>${fp.sundries}</span></div>

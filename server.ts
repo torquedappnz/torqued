@@ -1763,7 +1763,7 @@ async function getBookingContext(bookingId: string) {
 
 // Service id → display name (mirrors the app/website catalog) for emails built server-side.
 const SERVICE_NAMES: Record<string, string> = {
-  oil: 'Oil Change', wof: 'Warrant of Fitness', full: 'Full Service',
+  oil: 'Oil Change', wof: 'Warrant of Fitness', full: 'Gold Service',
   brakes_front_pads: 'Front Brake Pads', brakes_front_rotors: 'Front Rotors & Pads',
   brakes_rear_pads: 'Rear Brake Pads', brakes_rear_rotors: 'Rear Rotors & Pads',
   timing: 'Cambelt', transmission: 'DCT Transmission Service',
@@ -3758,6 +3758,16 @@ app.get('/api/mechanic/:mechanicId/package-price', async (req, res) => {
   }
 });
 
+// Transmission filter/gasket cost by fluid type (ex-GST) — genuinely cheaper than the
+// fluid itself for a typical drain-and-fill (the filter is a simple pan filter or, for
+// DSG/CVT, a mechatronic/valve-body filter + gasket kit — not a full rebuild kit).
+const TRANS_FILTER_COST_EX_GST: Record<string, { low: number; high: number }> = {
+  TRANS_ATF_CONVENTIONAL: { low: 25, high: 55 },
+  TRANS_CVT: { low: 35, high: 70 },
+  TRANS_DSG_DCT: { low: 45, high: 90 },
+  TRANS_MANUAL_GEAR: { low: 0, high: 15 },
+};
+
 // Differential fluid service — keyed per fleet_vehicles.vehicle_id (NOT engine_family_id: some
 // engine families are shared by a FWD sibling with no diff, e.g. VW_EA888_20_TSI = Golf GTI
 // FWD *and* Golf R AWD; Toyota E-Four hybrid AWD has no mechanical diff at all despite sharing
@@ -3857,6 +3867,7 @@ app.get('/api/fleet-prices', async (req, res) => {
 
     const mechanicId = req.query.mechanic ? String(req.query.mechanic) : null;
     const PLATFORM_LABOUR_FALLBACK = 130;
+    const PLATFORM_SHOP_FEE_FALLBACK = 25;
 
     let vmRows: any[] | null = null;
     let custVehicle: { make?: string; model?: string; year?: number } = {};
@@ -3926,7 +3937,7 @@ app.get('/api/fleet-prices', async (req, res) => {
         const fvFirstWord = String(custVehicle.model || '').split(' ')[0];
         const queryFV = async (modelPat: string, withYear: boolean, submodelPat?: string) => {
           let q = (supabase as any).from('fleet_vehicles')
-            .select('vehicle_id, engine_family_id, body_type')
+            .select('vehicle_id, engine_family_id, body_type, drivetrain')
             .ilike('make', custVehicle.make!)
             .ilike('model', modelPat);
           if (withYear && custVehicle.year)
@@ -3960,7 +3971,7 @@ app.get('/api/fleet-prices', async (req, res) => {
         if (!fvRows?.length) {
           const queryAlias = async (modelPat: string, withYear: boolean, submodelPat?: string) => {
             let q = (supabase as any).from('ef_vehicle_aliases')
-              .select('vehicle_id, fleet_vehicles!inner(engine_family_id, body_type)')
+              .select('vehicle_id, fleet_vehicles!inner(engine_family_id, body_type, drivetrain)')
               .ilike('alias_make', custVehicle.make!)
               .ilike('alias_model', modelPat);
             if (withYear && custVehicle.year)
@@ -3988,7 +3999,7 @@ app.get('/api/fleet-prices', async (req, res) => {
           const efFamilyId: string = fvRows[0].engine_family_id;
           const matchedVehicleId: string | undefined = (fvRows[0] as any).vehicle_id;
 
-          const [efFamilyRes, efPartsRes, efRateRes, tierPartsRes, jobTimesRes, bodyMultRes, exemptRes] = await Promise.all([
+          const [efFamilyRes, efPartsRes, efRateRes, tierPartsRes, jobTimesRes, bodyMultRes, exemptRes, efFluidsRes] = await Promise.all([
             supabase.from('engine_families')
               .select('timing_type, oil_capacity_l, oil_spec, segment_tier')
               .eq('family_id', efFamilyId).single(),
@@ -3997,15 +4008,30 @@ app.get('/api/fleet-prices', async (req, res) => {
               .eq('engine_family_id', efFamilyId),
             mechanicId
               ? supabase.from('profiles').select('labour_rate, shop_fee').eq('id', mechanicId).maybeSingle()
-              : supabase.from('profiles').select('labour_rate').eq('role', 'mechanic').eq('subscription_active', true).not('labour_rate', 'is', null),
+              : supabase.from('profiles').select('labour_rate, shop_fee').eq('role', 'mechanic').eq('subscription_active', true).not('labour_rate', 'is', null),
             supabase.from('tier_parts_reference').select('job_slug, tier, part_cost_low_ex_gst, part_cost_high_ex_gst'),
             supabase.from('job_times_reference').select('job_slug, tier, hours_low, hours_high'),
             supabase.from('body_type_multiplier').select('body_type, multiplier'),
             supabase.from('body_type_exempt_jobs').select('job_slug'),
+            supabase.from('engine_family_fluids')
+              .select('oil_fluid_id, trans_fluid_id')
+              .eq('engine_family_id', efFamilyId).maybeSingle(),
           ]);
 
           const ef = efFamilyRes.data as any;
           const efParts = (efPartsRes.data ?? []) as any[];
+          const efFluids = efFluidsRes.data as any;
+          const fluidIds = [efFluids?.oil_fluid_id, efFluids?.trans_fluid_id].filter(Boolean);
+          const [{ data: fluidPricingRows }, { data: efSchedule }] = await Promise.all([
+            fluidIds.length
+              ? supabase.from('fluid_pricing').select('fluid_id, spec, cost_per_litre_low, cost_per_litre_high').in('fluid_id', fluidIds)
+              : Promise.resolve({ data: [] as any[] }),
+            supabase.from('service_schedule').select('trans_capacity_l').eq('engine_family_id', efFamilyId).maybeSingle(),
+          ]);
+          const fluidPricingMap = new Map<string, any>((fluidPricingRows ?? []).map((r: any) => [r.fluid_id, r]));
+          const oilFluid = efFluids?.oil_fluid_id ? fluidPricingMap.get(efFluids.oil_fluid_id) : null;
+          const transFluid = efFluids?.trans_fluid_id ? fluidPricingMap.get(efFluids.trans_fluid_id) : null;
+          const transCapacityL = Number((efSchedule as any)?.trans_capacity_l) || null;
 
           let efLabourRate: number;
           if (mechanicId) {
@@ -4018,13 +4044,31 @@ app.get('/api/fleet-prices', async (req, res) => {
               : PLATFORM_LABOUR_FALLBACK;
           }
           const efShopFee = mechanicId ? (Number((efRateRes as any).data?.shop_fee) || null) : null;
+          // Resolved (never-null) shop fee for use IN price calculations (e.g. transmission
+          // service, which shows its shop fee as an explicit line item) — falls back to the
+          // average of active mechanics' configured fee, then a flat platform default.
+          let efShopFeeResolved: number;
+          if (mechanicId) {
+            efShopFeeResolved = Number((efRateRes as any).data?.shop_fee) || PLATFORM_SHOP_FEE_FALLBACK;
+          } else {
+            const fees = ((efRateRes as any).data as any[] | null) ?? [];
+            const validFees = fees.map((r: any) => Number(r.shop_fee)).filter(n => n > 0);
+            efShopFeeResolved = validFees.length
+              ? Math.round(validFees.reduce((a: number, b: number) => a + b, 0) / validFees.length)
+              : PLATFORM_SHOP_FEE_FALLBACK;
+          }
 
+          // NOTE: 'basic_service' (oil), 'comprehensive_service' (full/Gold), and
+          // 'transmission_service' are deliberately NOT mapped here — they're
+          // computed live below from real fluid capacity x cost/L + a real filter
+          // cost + fixed labour + an explicit fee, instead of an opaque bundled
+          // total, so the customer-facing breakdown is honest (was previously
+          // mixing a real bundled total with the frontend guessing a fake $120
+          // "fluid" line and mislabelling the remainder as "filter & gasket kit").
           const EF_SLUG_TO_SVC: Record<string, string> = {
             'brake_pads_front':            'brakes_front_pads',
             'brake_pads_rear':             'brakes_rear_pads',
             'brake_pads_and_rotors_front': 'brakes_front_rotors',
-            'basic_service':               'oil',
-            'comprehensive_service':       'full',
             'cambelt_full':                'timing',
             'wet_belt_replacement':        'timing',
             'timing_chain_replacement':    'timing',
@@ -4070,11 +4114,6 @@ app.get('/api/fleet-prices', async (req, res) => {
               efPrices[svcId].midpoint = Math.round((efPrices[svcId].low + efPrices[svcId].high) / 2);
             }
 
-            // Annotate service jobs with oil info from engine_family
-            if ((slug === 'basic_service' || slug === 'comprehensive_service') && ef) {
-              efPrices[svcId].oilType = ef.oil_spec || null;
-              efPrices[svcId].oilCapacityL = ef.oil_capacity_l || null;
-            }
           }
 
           // ── Generic tier-reference fallback ────────────────────────────────
@@ -4104,7 +4143,6 @@ app.get('/api/fleet-prices', async (req, res) => {
             cabin_filter:                'cabin_filter',
             '12v_battery':               'battery',
             ignition_coil:               'ignition_coils',
-            transmission_service:        'transmission',
           };
 
           for (const [jobSlug, svcId] of Object.entries(GENERIC_JOB_SLUG_TO_SVC)) {
@@ -4134,6 +4172,63 @@ app.get('/api/fleet-prices', async (req, res) => {
           // is a reasonable proxy (rear rotor+pad jobs are typically similar cost/labour).
           if (!efPrices['brakes_rear_rotors'] && efPrices['brakes_front_rotors']) {
             efPrices['brakes_rear_rotors'] = { ...efPrices['brakes_front_rotors'], approximated: true };
+          }
+
+          // ── Standard Service (oil), Gold Service (full), Transmission Service ──
+          // Consumables (real fluid type x capacity, GST-incl + real filter-tier cost)
+          // + fixed labour + an explicit fee — never an opaque bundled total, so the
+          // customer sees exactly what they're paying for.
+          const OIL_FREIGHT_FEE = 10;
+          const buildConsumableService = (
+            fluidCostLow: number, fluidCostHigh: number, filterCostLow: number, filterCostHigh: number,
+            labourHrs: number, feeType: 'freight' | 'shop', feeAmount: number,
+            fluidType: string | null, fluidCapacityL: number | null, filterName: string,
+          ) => {
+            const labour = Math.round(labourHrs * efLabourRate);
+            const partsLow = fluidCostLow + filterCostLow;
+            const partsHigh = fluidCostHigh + filterCostHigh;
+            return {
+              low: partsLow + labour + feeAmount, high: partsHigh + labour + feeAmount,
+              midpoint: Math.round((partsLow + partsHigh) / 2) + labour + feeAmount,
+              partsLow, partsHigh,
+              fluidCostLow, fluidCostHigh, fluidType, fluidCapacityL,
+              filterCostLow, filterCostHigh, filterName,
+              labourLow: labour, labourHigh: labour, labourHours: String(labourHrs),
+              feeType, feeAmount,
+              fromEngineFamily: true,
+            };
+          };
+
+          const oilFilterRow = tierPartsMap.get(`oil_filter|${tier}`) ?? tierPartsMap.get('oil_filter|mid');
+          const oilCapacityL = Number(ef?.oil_capacity_l) || 4.5;
+          const oilCostLow  = oilFluid ? Math.round(oilCapacityL * Number(oilFluid.cost_per_litre_low))  : Math.round(oilCapacityL * 18);
+          const oilCostHigh = oilFluid ? Math.round(oilCapacityL * Number(oilFluid.cost_per_litre_high)) : Math.round(oilCapacityL * 22);
+          const oilFilterLow  = oilFilterRow ? Math.round(Number(oilFilterRow.part_cost_low_ex_gst)  * 1.15) : 15;
+          const oilFilterHigh = oilFilterRow ? Math.round(Number(oilFilterRow.part_cost_high_ex_gst) * 1.15) : 35;
+          const oilTypeSpec = oilFluid?.spec || ef?.oil_spec || null;
+
+          efPrices['oil'] = buildConsumableService(
+            oilCostLow, oilCostHigh, oilFilterLow, oilFilterHigh, 0.75, 'freight', OIL_FREIGHT_FEE,
+            oilTypeSpec, oilCapacityL, 'Oil filter',
+          );
+          efPrices['full'] = buildConsumableService(
+            oilCostLow, oilCostHigh, oilFilterLow, oilFilterHigh, 2.0, 'freight', OIL_FREIGHT_FEE,
+            oilTypeSpec, oilCapacityL, 'Oil filter',
+          );
+
+          // Transmission service only offered when we know the real fluid type AND
+          // capacity — e.g. hybrid eCVT/power-split transmissions have no conventional
+          // drain-and-fill service, so we deliberately leave this unset rather than guess.
+          if (transFluid && transCapacityL) {
+            const transFilterSpec = TRANS_FILTER_COST_EX_GST[efFluids?.trans_fluid_id as string] ?? { low: 25, high: 60 };
+            const transCostLow  = Math.round(transCapacityL * Number(transFluid.cost_per_litre_low));
+            const transCostHigh = Math.round(transCapacityL * Number(transFluid.cost_per_litre_high));
+            const transFilterLow  = Math.round(transFilterSpec.low  * 1.15);
+            const transFilterHigh = Math.round(transFilterSpec.high * 1.15);
+            efPrices['transmission'] = buildConsumableService(
+              transCostLow, transCostHigh, transFilterLow, transFilterHigh, 1.5, 'shop', efShopFeeResolved,
+              transFluid.spec || null, transCapacityL, 'Transmission filter & gasket',
+            );
           }
 
           // Fixed-price services
@@ -4186,7 +4281,12 @@ app.get('/api/fleet-prices', async (req, res) => {
 
           // Differential fluid service — AWD/4WD only, keyed per exact matched
           // vehicle (see DIFFERENTIAL_SERVICE_BY_VEHICLE for why not per engine family).
-          const diffSpec = matchedVehicleId ? DIFFERENTIAL_SERVICE_BY_VEHICLE[matchedVehicleId] : undefined;
+          // A 2WD (fwd/rwd) vehicle has no differential fluid job to offer at all —
+          // the frontend hides the service entirely (not just leaving it unpriced)
+          // when differentialApplicable is false.
+          const vehicleDrivetrain = (fvRows[0] as any).drivetrain as string | undefined;
+          const differentialApplicable = vehicleDrivetrain === 'awd' || vehicleDrivetrain === '4wd';
+          const diffSpec = (differentialApplicable && matchedVehicleId) ? DIFFERENTIAL_SERVICE_BY_VEHICLE[matchedVehicleId] : undefined;
           if (diffSpec) {
             const diffLabour = Math.round(diffSpec.labourHrs * efLabourRate);
             const diffPartsLow = Math.round(diffSpec.capacityL * diffSpec.fluidLow);
@@ -4216,6 +4316,7 @@ app.get('/api/fleet-prices', async (req, res) => {
               low: 435 + 60 + wpEFLabour, high: 660 + 90 + wpEFLabour,
             } : null,
             differentialInDB: !!diffSpec,
+            differentialApplicable,
             fromEngineFamily: true,
             engineFamilyId: efFamilyId,
           });
@@ -4251,6 +4352,7 @@ app.get('/api/fleet-prices', async (req, res) => {
           },
           timingDrive: fallbackTimingDrive, vehicleId: null,
           waterPumpRecommended: false, waterPump: null,
+          differentialApplicable: false, differentialInDB: false,
         });
       }
     }
@@ -4267,7 +4369,8 @@ app.get('/api/fleet-prices', async (req, res) => {
       const wpL2 = 130; // platform fallback $/hr
       return res.json({ prices: {}, timingDrive, vehicleId,
         waterPumpRecommended: wpRec2,
-        waterPump: wpRec2 ? { partsLow: 280, partsHigh: 420, labourExtra: wpL2, low: 280 + wpL2, high: 420 + wpL2 } : null });
+        waterPump: wpRec2 ? { partsLow: 280, partsHigh: 420, labourExtra: wpL2, low: 280 + wpL2, high: 420 + wpL2 } : null,
+        differentialApplicable: false, differentialInDB: false });
     }
 
     const catIdToSlug: Record<number, string> = Object.fromEntries(cats.map((c: any) => [c.id, c.slug]));
@@ -4575,6 +4678,9 @@ app.get('/api/fleet-prices', async (req, res) => {
         ? { partsLow: wpPartsLow, partsHigh: wpPartsHigh, coolantLow: wpCoolantLow, coolantHigh: wpCoolantHigh, labourExtra: wpLabour,
             low: wpPartsLow + wpCoolantLow + wpLabour, high: wpPartsHigh + wpCoolantHigh + wpLabour }
         : null,
+      // Legacy vehicle_models/parts_data path doesn't have differential-service
+      // data — never show/offer it here (frontend hides the card when false).
+      differentialApplicable: false, differentialInDB: false,
     });
   } catch (err) {
     console.error('[fleet-prices]', err);
@@ -4625,7 +4731,7 @@ app.get('/api/services/search', async (req, res) => {
 // Indicative all-in Torqued prices (NZD) — mirrors the booking catalog, used for AI price guidance.
 const SERVICE_PRICES: Record<string, { name: string; price: number }> = {
   oil: { name: 'Standard Service', price: 180 }, wof: { name: 'Warrant of Fitness', price: 65 },
-  full: { name: 'Full Service', price: 350 }, brakes_front_pads: { name: 'Front Brake Pads', price: 220 },
+  full: { name: 'Gold Service', price: 350 }, brakes_front_pads: { name: 'Front Brake Pads', price: 220 },
   brakes_front_rotors: { name: 'Front Rotors & Pads', price: 580 }, brakes_rear_pads: { name: 'Rear Brake Pads', price: 190 },
   brakes_rear_rotors: { name: 'Rear Rotors & Pads', price: 480 }, timing: { name: 'Cambelt', price: 2289 },
   transmission: { name: 'Transmission Service', price: 621 }, battery: { name: 'Battery (12V)', price: 280 },

@@ -3,7 +3,7 @@ import { Mechanic, Service, Vehicle } from './types';
 export const SERVICES: Service[] = [
   { id: 'oil', name: 'Standard Service', icon: '🔧', basePrice: 0, category: 'maintenance' },
   { id: 'wof', name: 'Warrant of Fitness', icon: '📋', basePrice: 0, category: 'inspection' },
-  { id: 'full', name: 'Full Service', icon: '🚗', basePrice: 0, category: 'maintenance' },
+  { id: 'full', name: 'Gold Service', icon: '🚗', basePrice: 0, category: 'maintenance' },
   { id: 'brakes_front_pads', name: 'Front Brake Pads', icon: '🛑', basePrice: 0, category: 'repair' },
   { id: 'brakes_front_rotors', name: 'Front Rotors & Pads', icon: '🛑', basePrice: 0, category: 'repair' },
   { id: 'brakes_rear_pads', name: 'Rear Brake Pads', icon: '🛑', basePrice: 0, category: 'repair' },
