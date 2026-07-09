@@ -3758,6 +3758,80 @@ app.get('/api/mechanic/:mechanicId/package-price', async (req, res) => {
   }
 });
 
+// Differential fluid service — keyed per fleet_vehicles.vehicle_id (NOT engine_family_id: some
+// engine families are shared by a FWD sibling with no diff, e.g. VW_EA888_20_TSI = Golf GTI
+// FWD *and* Golf R AWD; Toyota E-Four hybrid AWD has no mechanical diff at all despite sharing
+// an engine family with genuine mechanical-AWD siblings). GST-incl 75W-90 GL-4/5 gear oil
+// (reuses TRANS_MANUAL_GEAR fluid pricing, $16-30/L). Recommend every 60,000km or per
+// manufacturer schedule, whichever comes first — separate from transmission service.
+const DIFFERENTIAL_SERVICE_BY_VEHICLE: Record<string, {
+  tier: 'rear only' | 'front+rear'; capacityL: number; fluidLow: number; fluidHigh: number;
+  labourHrs: number; shopFee: number;
+}> = {
+  'AUDI_A4_B8_30TDI_08_15': { tier: 'rear only', capacityL: 0.85, fluidLow: 16, fluidHigh: 30, labourHrs: 1.5, shopFee: 25 },
+  'AUDI_Q5_8R_30TDI_08_17': { tier: 'rear only', capacityL: 0.85, fluidLow: 16, fluidHigh: 30, labourHrs: 1.5, shopFee: 25 },
+  'AUDI_Q5_FY_20TFSI_17_NOW': { tier: 'rear only', capacityL: 0.85, fluidLow: 16, fluidHigh: 30, labourHrs: 1.5, shopFee: 25 },
+  'AUDI_Q7_4L_30TDI_05_15': { tier: 'rear only', capacityL: 0.85, fluidLow: 16, fluidHigh: 30, labourHrs: 1.5, shopFee: 25 },
+  'AUDI_S3_8V_13_20': { tier: 'rear only', capacityL: 0.85, fluidLow: 16, fluidHigh: 30, labourHrs: 1.5, shopFee: 25 },
+  'AUDI_S4_B9_EA839_16_NOW': { tier: 'rear only', capacityL: 0.85, fluidLow: 16, fluidHigh: 30, labourHrs: 1.5, shopFee: 25 },
+  'AUDI_S5_B9_EA839_16_NOW': { tier: 'rear only', capacityL: 0.85, fluidLow: 16, fluidHigh: 30, labourHrs: 1.5, shopFee: 25 },
+  'AUDI_SQ5_FY_EA839_17_NOW': { tier: 'rear only', capacityL: 0.85, fluidLow: 16, fluidHigh: 30, labourHrs: 1.5, shopFee: 25 },
+  'FORD_EVEREST_UA2_20_18_22': { tier: 'front+rear', capacityL: 2.2, fluidLow: 16, fluidHigh: 30, labourHrs: 1.5, shopFee: 25 },
+  'FORD_EVEREST_UA_32_15_22': { tier: 'front+rear', capacityL: 2.2, fluidLow: 16, fluidHigh: 30, labourHrs: 1.5, shopFee: 25 },
+  'FORD_RANGER_P703_20_22_NOW': { tier: 'front+rear', capacityL: 2.2, fluidLow: 16, fluidHigh: 30, labourHrs: 1.5, shopFee: 25 },
+  'FORD_RANGER_PX1_32_11_15': { tier: 'front+rear', capacityL: 2.2, fluidLow: 16, fluidHigh: 30, labourHrs: 1.5, shopFee: 25 },
+  'FORD_RANGER_PX2_32_15_18': { tier: 'front+rear', capacityL: 2.2, fluidLow: 16, fluidHigh: 30, labourHrs: 1.5, shopFee: 25 },
+  'FORD_RANGER_PX3_20_18_22': { tier: 'front+rear', capacityL: 2.2, fluidLow: 16, fluidHigh: 30, labourHrs: 1.5, shopFee: 25 },
+  'FORD_RANGER_PX3_32_18_22': { tier: 'front+rear', capacityL: 2.2, fluidLow: 16, fluidHigh: 30, labourHrs: 1.5, shopFee: 25 },
+  'FORD_TERRITORY_SY_40I6_04_11': { tier: 'rear only', capacityL: 0.85, fluidLow: 16, fluidHigh: 30, labourHrs: 1.5, shopFee: 25 },
+  'FORD_TERRITORY_SZ_40I6_11_16': { tier: 'rear only', capacityL: 0.85, fluidLow: 16, fluidHigh: 30, labourHrs: 1.5, shopFee: 25 },
+  'HON_CRV_RD_97_01': { tier: 'rear only', capacityL: 0.85, fluidLow: 16, fluidHigh: 30, labourHrs: 1.5, shopFee: 25 },
+  'HON_CRV_RE4_07_12': { tier: 'rear only', capacityL: 0.85, fluidLow: 16, fluidHigh: 30, labourHrs: 1.5, shopFee: 25 },
+  'HON_CRV_RM4_12_16': { tier: 'rear only', capacityL: 0.85, fluidLow: 16, fluidHigh: 30, labourHrs: 1.5, shopFee: 25 },
+  'HON_CRV_RW1_15T_17_22': { tier: 'rear only', capacityL: 0.85, fluidLow: 16, fluidHigh: 30, labourHrs: 1.5, shopFee: 25 },
+  'HON_LEGEND_KB1_35V6_04_12': { tier: 'rear only', capacityL: 0.85, fluidLow: 16, fluidHigh: 30, labourHrs: 1.5, shopFee: 25 },
+  'HON_STEPWAGON_RK_24_09_15': { tier: 'rear only', capacityL: 0.85, fluidLow: 16, fluidHigh: 30, labourHrs: 1.5, shopFee: 25 },
+  'NIS_NAVARA_D23_25_15_NOW': { tier: 'front+rear', capacityL: 2.2, fluidLow: 16, fluidHigh: 30, labourHrs: 1.5, shopFee: 25 },
+  'NIS_NAVARA_D40_25_05_15': { tier: 'front+rear', capacityL: 2.2, fluidLow: 16, fluidHigh: 30, labourHrs: 1.5, shopFee: 25 },
+  'NIS_PATHFINDER_R51_25D_05_13': { tier: 'front+rear', capacityL: 2.2, fluidLow: 16, fluidHigh: 30, labourHrs: 1.5, shopFee: 25 },
+  'NIS_PATROL_Y61_30_97_17': { tier: 'front+rear', capacityL: 2.2, fluidLow: 16, fluidHigh: 30, labourHrs: 1.5, shopFee: 25 },
+  'NIS_PATROL_Y62_56_10_NOW': { tier: 'front+rear', capacityL: 2.2, fluidLow: 16, fluidHigh: 30, labourHrs: 1.5, shopFee: 25 },
+  'NIS_STAGEA_M35_01_07': { tier: 'rear only', capacityL: 0.85, fluidLow: 16, fluidHigh: 30, labourHrs: 1.5, shopFee: 25 },
+  'NIS_XTRAIL_T30_25_00_07': { tier: 'rear only', capacityL: 0.85, fluidLow: 16, fluidHigh: 30, labourHrs: 1.5, shopFee: 25 },
+  'NIS_XTRAIL_T31_20_07_13': { tier: 'rear only', capacityL: 0.85, fluidLow: 16, fluidHigh: 30, labourHrs: 1.5, shopFee: 25 },
+  'NIS_XTRAIL_T31_25_07_13': { tier: 'rear only', capacityL: 0.85, fluidLow: 16, fluidHigh: 30, labourHrs: 1.5, shopFee: 25 },
+  'NIS_XTRAIL_T32_25_13_22': { tier: 'rear only', capacityL: 0.85, fluidLow: 16, fluidHigh: 30, labourHrs: 1.5, shopFee: 25 },
+  'NIS_XTRAIL_T33_22_NOW': { tier: 'rear only', capacityL: 0.85, fluidLow: 16, fluidHigh: 30, labourHrs: 1.5, shopFee: 25 },
+  'TOY_COROLLA_NZE124_00_07': { tier: 'front+rear', capacityL: 2.2, fluidLow: 16, fluidHigh: 30, labourHrs: 1.5, shopFee: 25 },
+  'TOY_HARRIER_MCU30_03_13': { tier: 'rear only', capacityL: 0.85, fluidLow: 16, fluidHigh: 30, labourHrs: 1.5, shopFee: 25 },
+  'TOY_HIGHLANDER_GSU50_13_19': { tier: 'rear only', capacityL: 0.85, fluidLow: 16, fluidHigh: 30, labourHrs: 1.5, shopFee: 25 },
+  'TOY_HILUX_GGN15_05_15': { tier: 'front+rear', capacityL: 2.2, fluidLow: 16, fluidHigh: 30, labourHrs: 1.5, shopFee: 25 },
+  'TOY_HILUX_GUN126_15_NOW': { tier: 'front+rear', capacityL: 2.2, fluidLow: 16, fluidHigh: 30, labourHrs: 1.5, shopFee: 25 },
+  'TOY_HILUX_KUN26_05_15': { tier: 'front+rear', capacityL: 2.2, fluidLow: 16, fluidHigh: 30, labourHrs: 1.5, shopFee: 25 },
+  'TOY_HILUX_LN167_97_05': { tier: 'front+rear', capacityL: 2.2, fluidLow: 16, fluidHigh: 30, labourHrs: 1.5, shopFee: 25 },
+  'TOY_KLUGER_GSU40_07_14': { tier: 'rear only', capacityL: 0.85, fluidLow: 16, fluidHigh: 30, labourHrs: 1.5, shopFee: 25 },
+  'TOY_KLUGER_MCU28_03_07': { tier: 'rear only', capacityL: 0.85, fluidLow: 16, fluidHigh: 30, labourHrs: 1.5, shopFee: 25 },
+  'TOY_LC105_HZJ105_98_07': { tier: 'front+rear', capacityL: 2.2, fluidLow: 16, fluidHigh: 30, labourHrs: 1.5, shopFee: 25 },
+  'TOY_LC80_HZJ80_90_98': { tier: 'front+rear', capacityL: 2.2, fluidLow: 16, fluidHigh: 30, labourHrs: 1.5, shopFee: 25 },
+  'TOY_PRADO_GDJ150_15_NOW': { tier: 'front+rear', capacityL: 2.2, fluidLow: 16, fluidHigh: 30, labourHrs: 1.5, shopFee: 25 },
+  'TOY_PRADO_GRJ120_02_09': { tier: 'front+rear', capacityL: 2.2, fluidLow: 16, fluidHigh: 30, labourHrs: 1.5, shopFee: 25 },
+  'TOY_PRADO_GRJ150_09_NOW': { tier: 'front+rear', capacityL: 2.2, fluidLow: 16, fluidHigh: 30, labourHrs: 1.5, shopFee: 25 },
+  'TOY_PRADO_KDJ120_02_09': { tier: 'front+rear', capacityL: 2.2, fluidLow: 16, fluidHigh: 30, labourHrs: 1.5, shopFee: 25 },
+  'TOY_PRADO_KDJ150_09_15': { tier: 'front+rear', capacityL: 2.2, fluidLow: 16, fluidHigh: 30, labourHrs: 1.5, shopFee: 25 },
+  'TOY_PRADO_KZJ95_96_02': { tier: 'front+rear', capacityL: 2.2, fluidLow: 16, fluidHigh: 30, labourHrs: 1.5, shopFee: 25 },
+  'TOY_PRADO_VZJ95_96_02': { tier: 'front+rear', capacityL: 2.2, fluidLow: 16, fluidHigh: 30, labourHrs: 1.5, shopFee: 25 },
+  'TOY_RAV4_ACA21_00_05': { tier: 'rear only', capacityL: 0.85, fluidLow: 16, fluidHigh: 30, labourHrs: 1.5, shopFee: 25 },
+  'TOY_RAV4_ACA38_05_12': { tier: 'rear only', capacityL: 0.85, fluidLow: 16, fluidHigh: 30, labourHrs: 1.5, shopFee: 25 },
+  'TOY_RAV4_ASA44_13_18': { tier: 'rear only', capacityL: 0.85, fluidLow: 16, fluidHigh: 30, labourHrs: 1.5, shopFee: 25 },
+  'TOY_RAV4_AXAA54_18_NOW': { tier: 'rear only', capacityL: 0.85, fluidLow: 16, fluidHigh: 30, labourHrs: 1.5, shopFee: 25 },
+  'VW_GOLF_MK7_R_13_20': { tier: 'rear only', capacityL: 0.85, fluidLow: 16, fluidHigh: 30, labourHrs: 1.5, shopFee: 25 },
+  'VW_TIGUAN_5N_14TSI_08_16': { tier: 'rear only', capacityL: 0.85, fluidLow: 16, fluidHigh: 30, labourHrs: 1.5, shopFee: 25 },
+  'VW_TIGUAN_5N_TDI_08_16': { tier: 'rear only', capacityL: 0.85, fluidLow: 16, fluidHigh: 30, labourHrs: 1.5, shopFee: 25 },
+  'VW_TIGUAN_AD1_14TSI_16_NOW': { tier: 'rear only', capacityL: 0.85, fluidLow: 16, fluidHigh: 30, labourHrs: 1.5, shopFee: 25 },
+  'VW_TIGUAN_R_AD1_21_NOW': { tier: 'rear only', capacityL: 0.85, fluidLow: 16, fluidHigh: 30, labourHrs: 1.5, shopFee: 25 },
+  'VW_TROC_R_A1_19_NOW': { tier: 'rear only', capacityL: 0.85, fluidLow: 16, fluidHigh: 30, labourHrs: 1.5, shopFee: 25 },
+};
+
 // GET /api/fleet-prices?rego=ABC123 — return parts_data low/high/midpoint for every catalog service
 // for the matched vehicle. Uses vehicle_aliases make/model match. Falls back to {} if unknown.
 const FLEET_SERVICE_TO_SLUG: Record<string, string> = {
@@ -3786,17 +3860,22 @@ app.get('/api/fleet-prices', async (req, res) => {
 
     let vmRows: any[] | null = null;
     let custVehicle: { make?: string; model?: string; year?: number } = {};
+    // When the customer confirms an exact variant via the submodel picker, this
+    // disambiguates which of several same-make/model fleet_vehicles rows is
+    // theirs (e.g. "Golf" alone matches GTI/TSI/GTE/R/TDI across 5 generations).
+    let confirmedSubmodel: string | null = null;
 
     if (vehicleModelIdParam) {
       // Fast path — customer confirmed their exact variant, skip the fuzzy lookup
       const { data: vm } = await supabase
         .from('vehicle_models')
-        .select('id, timing_drive, make, model')
+        .select('id, timing_drive, make, model, submodel, year_from')
         .eq('id', vehicleModelIdParam)
         .single();
       if (vm) {
         vmRows = [vm];
-        custVehicle = { make: vm.make, model: vm.model };
+        custVehicle = { make: vm.make, model: vm.model, year: vm.year_from ?? undefined };
+        confirmedSubmodel = vm.submodel || null;
       }
     }
 
@@ -3834,21 +3913,40 @@ app.get('/api/fleet-prices', async (req, res) => {
         vmRows = await queryVM(firstWord + '%', false);
     }
 
-    if (!vmRows?.length) {
+    {
       // ── Try engine-family path via fleet_vehicles → ef_parts_data ──────────
+      // Tried BEFORE falling back to legacy vmRows/parts_data below, even when a
+      // legacy vehicle_models row also matched: that legacy table is small and
+      // its parts_data is sparse (e.g. Golf/GTI/R, Corolla, RAV4, Civic all have
+      // legacy rows with almost no seeded pricing), so a make/model that happens
+      // to exist there was being routed to worse data than the rich
+      // fleet_vehicles/ef_parts_data + tier-reference pricing built up this
+      // session — even for an exact-variant match via the submodel picker.
       if (custVehicle.make) {
         const fvFirstWord = String(custVehicle.model || '').split(' ')[0];
-        const queryFV = async (modelPat: string, withYear: boolean) => {
+        const queryFV = async (modelPat: string, withYear: boolean, submodelPat?: string) => {
           let q = (supabase as any).from('fleet_vehicles')
-            .select('engine_family_id, body_type')
+            .select('vehicle_id, engine_family_id, body_type')
             .ilike('make', custVehicle.make!)
             .ilike('model', modelPat);
           if (withYear && custVehicle.year)
             q = q.lte('year_from', custVehicle.year).or(`year_to.is.null,year_to.gte.${custVehicle.year}`);
+          if (submodelPat) q = q.ilike('submodel', submodelPat);
           const { data } = await q.limit(1);
           return data as any[] | null;
         };
-        let fvRows = await queryFV(String(custVehicle.model || ''), true);
+        // A model name alone (e.g. "Golf") can match a dozen fleet_vehicles rows
+        // across generations/trims with wildly different engines — if the
+        // customer confirmed an exact submodel via the picker, use it to
+        // disambiguate FIRST, before falling back to the generic tiers.
+        let fvRows: any[] | null = null;
+        if (confirmedSubmodel) {
+          fvRows = await queryFV(String(custVehicle.model || ''), true, confirmedSubmodel + '%');
+          if (!fvRows?.length)
+            fvRows = await queryFV(String(custVehicle.model || ''), false, confirmedSubmodel + '%');
+        }
+        if (!fvRows?.length)
+          fvRows = await queryFV(String(custVehicle.model || ''), true);
         if (!fvRows?.length && fvFirstWord !== custVehicle.model)
           fvRows = await queryFV(fvFirstWord + '%', true);
         if (!fvRows?.length)
@@ -3860,17 +3958,24 @@ app.get('/api/fleet-prices', async (req, res) => {
         // (trim names like "Cross Polo", or a chassis code returned as the model
         // by some rego lookups) joined back to its real fleet_vehicles row.
         if (!fvRows?.length) {
-          const queryAlias = async (modelPat: string, withYear: boolean) => {
+          const queryAlias = async (modelPat: string, withYear: boolean, submodelPat?: string) => {
             let q = (supabase as any).from('ef_vehicle_aliases')
-              .select('fleet_vehicles!inner(engine_family_id, body_type)')
+              .select('vehicle_id, fleet_vehicles!inner(engine_family_id, body_type)')
               .ilike('alias_make', custVehicle.make!)
               .ilike('alias_model', modelPat);
             if (withYear && custVehicle.year)
               q = q.lte('year_from', custVehicle.year).or(`year_to.is.null,year_to.gte.${custVehicle.year}`);
+            if (submodelPat) q = q.ilike('alias_variant', submodelPat);
             const { data } = await q.limit(1);
-            return (data as any[] | null)?.map(r => r.fleet_vehicles) ?? null;
+            return (data as any[] | null)?.map(r => ({ ...r.fleet_vehicles, vehicle_id: r.vehicle_id })) ?? null;
           };
-          fvRows = await queryAlias(String(custVehicle.model || ''), true);
+          if (confirmedSubmodel) {
+            fvRows = await queryAlias(String(custVehicle.model || ''), true, confirmedSubmodel + '%');
+            if (!fvRows?.length)
+              fvRows = await queryAlias(String(custVehicle.model || ''), false, confirmedSubmodel + '%');
+          }
+          if (!fvRows?.length)
+            fvRows = await queryAlias(String(custVehicle.model || ''), true);
           if (!fvRows?.length && fvFirstWord !== custVehicle.model)
             fvRows = await queryAlias(fvFirstWord + '%', true);
           if (!fvRows?.length)
@@ -3881,6 +3986,7 @@ app.get('/api/fleet-prices', async (req, res) => {
 
         if (fvRows?.length) {
           const efFamilyId: string = fvRows[0].engine_family_id;
+          const matchedVehicleId: string | undefined = (fvRows[0] as any).vehicle_id;
 
           const [efFamilyRes, efPartsRes, efRateRes, tierPartsRes, jobTimesRes, bodyMultRes, exemptRes] = await Promise.all([
             supabase.from('engine_families')
@@ -4078,6 +4184,24 @@ app.get('/api/fleet-prices', async (req, res) => {
             && wpMakesEF.some(m => (custVehicle.make || '').toLowerCase().includes(m));
           const wpEFLabour = Math.round(1.0 * efLabourRate);
 
+          // Differential fluid service — AWD/4WD only, keyed per exact matched
+          // vehicle (see DIFFERENTIAL_SERVICE_BY_VEHICLE for why not per engine family).
+          const diffSpec = matchedVehicleId ? DIFFERENTIAL_SERVICE_BY_VEHICLE[matchedVehicleId] : undefined;
+          if (diffSpec) {
+            const diffLabour = Math.round(diffSpec.labourHrs * efLabourRate);
+            const diffPartsLow = Math.round(diffSpec.capacityL * diffSpec.fluidLow);
+            const diffPartsHigh = Math.round(diffSpec.capacityL * diffSpec.fluidHigh);
+            efPrices['differential'] = {
+              low: diffPartsLow + diffLabour + diffSpec.shopFee,
+              high: diffPartsHigh + diffLabour + diffSpec.shopFee,
+              midpoint: Math.round((diffPartsLow + diffPartsHigh) / 2) + diffLabour + diffSpec.shopFee,
+              partsLow: diffPartsLow, partsHigh: diffPartsHigh,
+              labourLow: diffLabour, labourHigh: diffLabour, labourHours: String(diffSpec.labourHrs),
+              shopFee: diffSpec.shopFee, fluidType: '75W-90 GL-4/5', fluidCapacityL: diffSpec.capacityL,
+              tier: diffSpec.tier,
+            };
+          }
+
           return res.json({
             prices: efPrices,
             timingDrive: efTimingDrive,
@@ -4091,36 +4215,44 @@ app.get('/api/fleet-prices', async (req, res) => {
               labourExtra: wpEFLabour,
               low: 435 + 60 + wpEFLabour, high: 660 + 90 + wpEFLabour,
             } : null,
+            differentialInDB: !!diffSpec,
             fromEngineFamily: true,
             engineFamilyId: efFamilyId,
           });
         }
       }
 
-      // ── No vehicle_models OR fleet_vehicles match — try timing drive from vehicle_specs
-      const { data: specFallback } = await supabase.from('vehicle_specs')
-        .select('cambelt_or_chain').eq('rego', rego).maybeSingle();
-      let fallbackTimingDrive: string | null = null;
-      if (specFallback?.cambelt_or_chain) {
-        const raw = String(specFallback.cambelt_or_chain).toLowerCase();
-        if (raw.includes('belt')) fallbackTimingDrive = 'belt';
-        else if (raw.includes('chain')) fallbackTimingDrive = 'chain';
-        else fallbackTimingDrive = 'na';
+      // No fleet_vehicles/alias match. If a legacy vehicle_models row ALSO didn't
+      // match, this vehicle is entirely unknown to us — fall back to the
+      // fixed-services-only safety net. If a legacy vehicle_models row DID match
+      // (vmRows), skip this and fall through to the older parts_data-based
+      // pricing system below instead — sparse, but better than nothing.
+      if (!vmRows?.length) {
+        // ── No vehicle_models OR fleet_vehicles match — try timing drive from vehicle_specs
+        const { data: specFallback } = await supabase.from('vehicle_specs')
+          .select('cambelt_or_chain').eq('rego', rego).maybeSingle();
+        let fallbackTimingDrive: string | null = null;
+        if (specFallback?.cambelt_or_chain) {
+          const raw = String(specFallback.cambelt_or_chain).toLowerCase();
+          if (raw.includes('belt')) fallbackTimingDrive = 'belt';
+          else if (raw.includes('chain')) fallbackTimingDrive = 'chain';
+          else fallbackTimingDrive = 'na';
+        }
+        // No engine-family or vehicle_models match. We can't price vehicle-specific
+        // work, but WOF / diagnostic / PPI are vehicle-independent standard services
+        // — always offer those instantly so the customer never hits an empty screen.
+        // Everything else becomes a precise 1-business-hour quote on the frontend
+        // (no invented numbers).
+        return res.json({
+          prices: {
+            wof:             { low: 55, high: 75, midpoint: 65, partsLow: 0, partsHigh: 0, labourLow: 65, labourHigh: 65, labourHours: '0.5' },
+            diag_inspection: { low: 99, high: 99, midpoint: 99, partsLow: 0, partsHigh: 0, labourLow: 99, labourHigh: 99, labourHours: '1' },
+            ppi:             { low: 199, high: 199, midpoint: 199, partsLow: 0, partsHigh: 0, labourLow: 199, labourHigh: 199, labourHours: '2' },
+          },
+          timingDrive: fallbackTimingDrive, vehicleId: null,
+          waterPumpRecommended: false, waterPump: null,
+        });
       }
-      // No engine-family or vehicle_models match. We can't price vehicle-specific
-      // work, but WOF / diagnostic / PPI are vehicle-independent standard services
-      // — always offer those instantly so the customer never hits an empty screen.
-      // Everything else becomes a precise 1-business-hour quote on the frontend
-      // (no invented numbers).
-      return res.json({
-        prices: {
-          wof:             { low: 55, high: 75, midpoint: 65, partsLow: 0, partsHigh: 0, labourLow: 65, labourHigh: 65, labourHours: '0.5' },
-          diag_inspection: { low: 99, high: 99, midpoint: 99, partsLow: 0, partsHigh: 0, labourLow: 99, labourHigh: 99, labourHours: '1' },
-          ppi:             { low: 199, high: 199, midpoint: 199, partsLow: 0, partsHigh: 0, labourLow: 199, labourHigh: 199, labourHours: '2' },
-        },
-        timingDrive: fallbackTimingDrive, vehicleId: null,
-        waterPumpRecommended: false, waterPump: null,
-      });
     }
     const vehicleId: string = vmRows[0].id;
     let timingDrive: string | null = vmRows[0].timing_drive ?? null;

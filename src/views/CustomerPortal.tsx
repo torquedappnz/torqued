@@ -899,6 +899,7 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
   const [fleetVehicleId, setFleetVehicleId] = useState<string | null>(null);
   const [fleetPricesRaw, setFleetPricesRaw] = useState<Record<string, any>>({});
   const [waterPumpInDB, setWaterPumpInDB] = useState(false);
+  const [differentialInDB, setDifferentialInDB] = useState(false);
   const [vehicleTimingDrive, setVehicleTimingDrive] = useState<'belt' | 'chain' | 'na' | null>(null);
   const isEV = vehicle?.make?.toLowerCase() === 'tesla' ||
                !!vehicle?.fuelType?.toLowerCase()?.includes('electric') ||
@@ -1836,6 +1837,7 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
             setVehiclePrices({ ...legacyPrices, ...fleetHighs });
             setFleetPricesRaw(fp.prices);
             if (fp?.waterPumpInDB !== undefined) setWaterPumpInDB(!!fp.waterPumpInDB);
+            if (fp?.differentialInDB !== undefined) setDifferentialInDB(!!fp.differentialInDB);
           }
         })
         .catch(() => {/* fleet prices are best-effort */});
@@ -2975,6 +2977,7 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                                         setVehiclePrices(prev => ({ ...prev, ...highs }));
                                         setFleetPricesRaw(fp.prices);
                                         if (fp?.waterPumpInDB !== undefined) setWaterPumpInDB(!!fp.waterPumpInDB);
+            if (fp?.differentialInDB !== undefined) setDifferentialInDB(!!fp.differentialInDB);
                                       }
                                     }).catch(() => {});
                                 }
@@ -3306,6 +3309,7 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                                 setVehiclePrices(prev => ({ ...prev, ...highs }));
                                 setFleetPricesRaw(fp.prices);
                                 if (fp?.waterPumpInDB !== undefined) setWaterPumpInDB(!!fp.waterPumpInDB);
+            if (fp?.differentialInDB !== undefined) setDifferentialInDB(!!fp.differentialInDB);
                               }
                             }).catch(() => {});
                         }

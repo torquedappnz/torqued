@@ -20,6 +20,7 @@ export const SERVICES: Service[] = [
   { id: 'water_pump', name: 'Water Pump Replacement', icon: '💧', basePrice: 0, category: 'repair' },
   { id: 'thermostat_housing', name: 'Thermostat Housing Replacement', icon: '🌡️', basePrice: 0, category: 'repair' },
   { id: 'ppi', name: 'Pre-Purchase Inspection', icon: '🔎', basePrice: 199, category: 'inspection' },
+  { id: 'differential', name: 'Differential Fluid Service', icon: '⚙️', basePrice: 0, category: 'maintenance' },
 ];
 
 export const MOCK_MECHANICS: Mechanic[] = [];
