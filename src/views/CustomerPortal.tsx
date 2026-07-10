@@ -1802,10 +1802,15 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
           .then(r => r.ok ? r.json() : null)
           .then((d: any) => {
             const results = d?.results ?? [];
+            // Always keep the full candidate list, even when exactly one matched and
+            // got auto-selected — otherwise clicking "change" later has nothing to
+            // show (vehicleModelOptions stayed empty), and a single coarse match
+            // (e.g. only a performance "R" trim on file for that year) gets silently
+            // locked in with no way to correct it to the actual variant.
+            setVehicleModelOptions(results);
             if (results.length === 1) {
               setVehicleModelSpec(results[0]);
             } else if (results.length > 1) {
-              setVehicleModelOptions(results);
               setShowSubmodelPicker(true);
             }
           }).catch(() => {});
