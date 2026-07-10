@@ -4387,11 +4387,8 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
 
               <div className="space-y-3">
                 <h2 className="text-3xl sm:text-5xl font-black tracking-tighter uppercase text-foreground leading-none">
-                  Mechanic Portal <span className="text-torqued-red font-normal text-3xl sm:text-5xl">Hub</span>
+                  Mechanic Sign-In
                 </h2>
-                <p className="text-sm sm:text-base text-muted">
-                  Unlock automated parts diagnostics, custom quotes, invoice management, and direct high-value diesel and euro leads.
-                </p>
               </div>
 
               {mechSignupSent ? (
