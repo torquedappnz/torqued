@@ -333,7 +333,7 @@ export const MechanicDemo: React.FC<{ onBack?: () => void }> = ({ onBack }) => {
 
   const renderVehicleHealth = () => (
     <div className="space-y-6">
-      <div><h2 className="text-2xl font-black tracking-tight text-foreground">Vehicle Health Lookup</h2><p className="text-sm text-muted">Demo vehicle — {DEMO_VEHICLE.rego} · {DEMO_VEHICLE.vehicle}</p></div>
+      <p className="text-sm text-muted">Demo vehicle — {DEMO_VEHICLE.rego} · {DEMO_VEHICLE.vehicle}</p>
       <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
         {DEMO_HEALTH.map((h, i) => (
           <Card key={i} className={cn('p-4 flex items-start gap-3', severityStyle[h.severity])}>
