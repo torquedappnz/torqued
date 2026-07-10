@@ -526,7 +526,7 @@ export const MechanicDemo: React.FC<{ onBack?: () => void }> = ({ onBack }) => {
             <p className="font-black text-sm text-foreground">Reclaim your time with Torqued.</p>
             <p className="text-[11px] text-muted leading-relaxed">Torqued turns a rego plate into an itemised quote in seconds — based on your labour rates and market-backed parts' pricing.</p>
             <Button fullWidth size="sm" className="bg-torqued-red hover:bg-red-700 text-white text-[10px]" onClick={() => { window.location.href = '/mechanic'; }}>
-              Create a Real Account — 90-Day Free Trial
+              Create a Real Account — 90-Day Risk-Free Trial
             </Button>
           </div>
           {onBack && (
