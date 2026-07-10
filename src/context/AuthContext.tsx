@@ -13,6 +13,7 @@ interface UserProfile {
   vehicles?: Vehicle[];
   subscriptionActive?: boolean;
   stripeSubscriptionId?: string;
+  reviewStatus?: 'pending' | 'approved' | 'rejected';
 }
 
 interface AuthContextType {
@@ -56,6 +57,7 @@ function fromDbRow(row: any): UserProfile {
     homeLocation: row.home_location ?? undefined,
     subscriptionActive: row.subscription_active ?? undefined,
     stripeSubscriptionId: row.stripe_subscription_id ?? undefined,
+    reviewStatus: row.review_status ?? undefined,
     vehicles: [],
   };
 }

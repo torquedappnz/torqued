@@ -175,6 +175,8 @@ export const AdminPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) => {
   const [adminLabourRateMsg, setAdminLabourRateMsg] = useState<string | null>(null);
   const [wofBusy, setWofBusy] = useState(false);
   const [wofMsg, setWofMsg] = useState<string | null>(null);
+  const [approveBusy, setApproveBusy] = useState(false);
+  const [approveMsg, setApproveMsg] = useState<string | null>(null);
   const [adminName, setAdminName] = useState('');
   const [adminNameBusy, setAdminNameBusy] = useState(false);
   const [adminNameMsg, setAdminNameMsg] = useState<string | null>(null);
@@ -749,6 +751,7 @@ export const AdminPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) => {
               const live = m.subscription_active && m.onboarding_complete;
               const pending: string[] = [];
               if (!m.agreement_signed_at) pending.push('contract');
+              if (m.onboarding_complete && m.review_status && m.review_status !== 'approved') pending.push('review');
               if (!m.subscription_active) pending.push('subscription');
               if (!m.onboarding_complete) pending.push('profile');
               return (
@@ -1054,6 +1057,47 @@ export const AdminPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) => {
                     </div>
                     {adminLabourRateMsg && <p className={`text-[10px] font-bold ${adminLabourRateMsg.startsWith('✓') ? 'text-emerald-500' : 'text-torqued-red'}`}>{adminLabourRateMsg}</p>}
                   </div>
+
+                  {/* Account Review — new signups sit pending until an admin approves them */}
+                  {p.onboarding_complete && (
+                    <div className="bg-background rounded-xl p-3 border border-border space-y-2">
+                      <div className="flex items-center justify-between gap-3">
+                        <div className="min-w-0">
+                          <p className="text-[10px] uppercase font-black text-muted">Account Review</p>
+                          <p className="text-xs text-muted mt-0.5">
+                            {p.review_status === 'approved' ? 'Approved — mechanic can activate billing and log in.' : 'Pending review — mechanic is waiting to hear back.'}
+                          </p>
+                          {p.wants_wof && (
+                            <p className="text-[10px] font-bold text-amber-500 mt-1">Wants to offer WoF — needs Authority scan (use Request Documents below).</p>
+                          )}
+                        </div>
+                        {p.review_status !== 'approved' && (
+                          <Button
+                            size="sm"
+                            disabled={approveBusy}
+                            className="bg-emerald-600 hover:bg-emerald-700 text-white text-[10px] shrink-0"
+                            onClick={async () => {
+                              setApproveBusy(true); setApproveMsg(null);
+                              try {
+                                const r = await fetch('/api/admin/approve-mechanic', {
+                                  method: 'POST', headers: { 'Content-Type': 'application/json' },
+                                  body: JSON.stringify({ key, mechanicId: p.id }),
+                                });
+                                const d = await r.json();
+                                if (r.ok) {
+                                  setMechDetail((prev: any) => prev ? { ...prev, profile: { ...prev.profile, review_status: 'approved' } } : prev);
+                                  setApproveMsg('✓ Approved — email sent');
+                                  loadAll(key);
+                                } else { setApproveMsg(d.error || 'Failed'); }
+                              } catch { setApproveMsg('Could not connect.'); }
+                              finally { setApproveBusy(false); }
+                            }}
+                          >{approveBusy ? 'Approving…' : 'Approve & Email'}</Button>
+                        )}
+                      </div>
+                      {approveMsg && <p className={`text-[10px] font-bold ${approveMsg.startsWith('✓') ? 'text-emerald-500' : 'text-torqued-red'}`}>{approveMsg}</p>}
+                    </div>
+                  )}
 
                   {/* WoF Servicing — disable for workshops without a WoF Authority */}
                   <div className="bg-background rounded-xl p-3 border border-border space-y-2">

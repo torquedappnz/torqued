@@ -37,7 +37,9 @@ import {
   Camera,
   Sparkles,
   HeartPulse,
-  LogOut
+  LogOut,
+  Link2,
+  Copy
 } from 'lucide-react';
 import { Logo } from '../components/Logo';
 import { Button } from '../components/Button';
@@ -198,7 +200,7 @@ function jobSummaryTitle(j: any): string {
 
 export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) => {
   const { theme, setTheme } = useTheme();
-  const { user, userProfile, loginMechanic, signUpMechanic, resendMechanicLink, markSubscriptionActive, logout, updateProfile } = useAuth();
+  const { user, userProfile, isAuthReady, loginMechanic, signUpMechanic, resendMechanicLink, markSubscriptionActive, logout, updateProfile } = useAuth();
   const [mechEmail, setMechEmail] = useState('');
   const [mechPassword, setMechPassword] = useState('');
   const [mechName, setMechName] = useState('');
@@ -221,13 +223,13 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
     owner_name: string; owner_phone: string; years_in_trade: string; bio: string;
     bank_account_name: string; bank_account_number: string; labour_rate: number;
     technicians: number; parts_lead_days: number; billing_start_date: string;
-    signer_title: string; gst_number: string;
+    signer_title: string; gst_number: string; wants_wof: boolean;
   }>({
     name: '', legal_name: '', nzbn: '', address: '', phone: '', owner_name: '', owner_phone: '',
     years_in_trade: '', bio: '',
     bank_account_name: '', bank_account_number: '', labour_rate: 145, technicians: 1, parts_lead_days: 1,
     billing_start_date: (() => { const d = new Date(); d.setDate(d.getDate() + 1); return d.toISOString().slice(0, 10); })(),
-    signer_title: '', gst_number: '',
+    signer_title: '', gst_number: '', wants_wof: false,
   });
   // OTP email verification (step 0)
   const [obEmail, setObEmail] = useState('');
@@ -1056,6 +1058,7 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
   const [showProcurement, setShowProcurement] = useState(false);
   const [selectedJobForProcurement, setSelectedJobForProcurement] = useState<string | null>(null);
   const [procurementSelections, setProcurementSelections] = useState<Record<string, string>>({});
+  const [bookingLinkCopied, setBookingLinkCopied] = useState(false);
   const [profileData, setProfileData] = useState({
     name: '',
     nzbn: '',
@@ -2021,6 +2024,46 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
               </div>
             </div>
           </div>
+        </Card>
+
+        <Card className="p-6 space-y-4 bg-card border-border">
+          <div className="flex items-center gap-2 border-b border-border pb-4">
+            <Link2 size={20} className="text-torqued-red" />
+            <h3 className="text-xl text-foreground">Public Booking Link</h3>
+          </div>
+          <p className="text-sm text-muted leading-relaxed">
+            Share this link on social media, your website, or directly with a customer. It opens straight to your profile with a <span className="text-foreground font-semibold">Book with {profileData.name || 'Your Workshop'}</span> button — they go through the normal booking flow, but pricing and the job always come to you. No workshop-browsing, no other mechanics shown.
+          </p>
+          {user?.id ? (
+            <div className="flex flex-col sm:flex-row gap-2">
+              <div className="flex-1 min-w-0 bg-background border border-border rounded-xl px-4 py-3 text-sm text-foreground font-mono truncate">
+                {`https://torqued-psi.vercel.app/customer?book=${user.id}`}
+              </div>
+              <div className="flex gap-2 shrink-0">
+                <Button
+                  size="sm"
+                  className="bg-torqued-red text-white h-auto px-5"
+                  onClick={() => {
+                    navigator.clipboard.writeText(`https://torqued-psi.vercel.app/customer?book=${user.id}`);
+                    setBookingLinkCopied(true);
+                    setTimeout(() => setBookingLinkCopied(false), 2000);
+                  }}
+                >
+                  <Copy size={14} className="mr-1.5" /> {bookingLinkCopied ? 'Copied!' : 'Copy Link'}
+                </Button>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="border-border text-foreground hover:bg-background h-auto px-5"
+                  onClick={() => window.open(`https://torqued-psi.vercel.app/customer?book=${user.id}`, '_blank')}
+                >
+                  Preview
+                </Button>
+              </div>
+            </div>
+          ) : (
+            <p className="text-xs text-muted italic">Save your profile to activate your booking link.</p>
+          )}
         </Card>
 
         <Card className="p-6 space-y-4 bg-card border-border">
@@ -4075,6 +4118,17 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
     );
   }
 
+  // Wait for auth + onboarding-status to fully resolve before deciding what to render —
+  // otherwise the paywall/login gate below briefly flashes while userProfile/onboardingComplete
+  // are still their initial null values.
+  if (!isAuthReady || (user && onboardingComplete === null)) {
+    return (
+      <div className="min-h-screen bg-background flex items-center justify-center">
+        <div className="w-10 h-10 border-4 border-border border-t-torqued-red rounded-full animate-spin" />
+      </div>
+    );
+  }
+
   // Onboarding wizard — shown after login, before subscription, until completed
   if (user && onboardingComplete === false) {
     const obInput = "w-full bg-card border border-border rounded-xl px-4 h-12 text-sm text-foreground placeholder:text-muted focus:outline-none focus:border-torqued-red";
@@ -4195,6 +4249,26 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                   value={ob.bio} onChange={e => { const words = e.target.value.split(/\s+/).filter(Boolean); if (words.length <= 250) setOb({...ob, bio: e.target.value}); }} />
                 <p className="text-[10px] text-muted mt-1">{ob.bio.split(/\s+/).filter(Boolean).length} / 250 words</p>
               </div>
+              <div className="bg-card border border-border rounded-xl p-4 space-y-2">
+                <div className="flex items-center justify-between gap-3">
+                  <div className="min-w-0">
+                    <p className="text-sm font-bold text-foreground">Offer Warrant of Fitness (WoF) inspections?</p>
+                    <p className="text-xs text-muted mt-0.5">You'll need to hold a WoF Authority to offer these.</p>
+                  </div>
+                  <button
+                    type="button"
+                    role="switch"
+                    aria-checked={ob.wants_wof}
+                    onClick={() => setOb({ ...ob, wants_wof: !ob.wants_wof })}
+                    className={`shrink-0 w-12 h-7 rounded-full transition-all relative ${ob.wants_wof ? 'bg-emerald-500' : 'bg-border'}`}
+                  >
+                    <span className={`absolute top-1 w-5 h-5 bg-white rounded-full transition-all ${ob.wants_wof ? 'left-6' : 'left-1'}`} />
+                  </button>
+                </div>
+                {ob.wants_wof && (
+                  <p className="text-xs text-muted">Great — we'll follow up by email for a scan of your WoF Authority before this goes live.</p>
+                )}
+              </div>
               <div className="flex gap-3">
                 <Button variant="outline" className="border-border text-white" onClick={()=>setObStep(0)}>Back</Button>
                 <Button fullWidth className="bg-torqued-red text-white" disabled={!ob.name || !ob.nzbn || !ob.years_in_trade || !ob.address || !ob.phone || !ob.owner_name || !ob.bio} onClick={()=>setObStep(2)}>Continue</Button>
@@ -4271,7 +4345,7 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                       const pdfBase64 = generateContractPdf(ob.signer_title || 'Owner');
                       await fetch('/api/mechanic/email-contract', {
                         method: 'POST', headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ mechanicId: user.id, pdfBase64, email: user.email, workshopName: ob.legal_name || ob.name }),
+                        body: JSON.stringify({ mechanicId: user.id, pdfBase64, email: user.email, workshopName: ob.legal_name || ob.name, ownerName: ob.owner_name }),
                       });
                     } catch (e) { console.error('Contract email failed (non-blocking):', e); }
                     setOnboardingComplete(true);
@@ -4286,28 +4360,22 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
     );
   }
 
-  if (!user || (!userProfile?.subscriptionActive && !justActivated)) {
+  if (!user) {
     return (
       <div className="min-h-screen bg-background text-foreground flex flex-col">
 {/* Navigation */}
         <nav className="p-4 md:px-8 flex justify-between items-center bg-background/80 border-b border-border backdrop-blur-sm">
           <Logo />
-          {user ? (
-            <Button size="sm" variant="outline" className="border-border" onClick={() => { setIncomingJobs([]); setCustomers([]); setBilling(null); setJobNotes({}); setVehiclePhotos({}); setProfileData({ name: '', nzbn: '', phone: '', address: '', serviceAreas: [], diagnosticTools: [], certifications: [], labourRate: 145, shopFee: 25, offersPpi: false, bannerImage: '' }); logout(); }}>
-              Sign Out
-            </Button>
-          ) : (
-            <Button size="sm" className="bg-torqued-red text-white" onClick={() => setMechAuthMode('login')}>
-              Sign In
-            </Button>
-          )}
+          <Button size="sm" className="bg-torqued-red text-white" onClick={() => setMechAuthMode('login')}>
+            Sign In
+          </Button>
         </nav>
 
         <main className="flex-1 flex items-center justify-center p-6 py-20 relative overflow-hidden">
           {/* Subtle background glow */}
           <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-96 h-96 bg-torqued-red/10 blur-[120px] rounded-full -z-10" />
 
-          <motion.div 
+          <motion.div
             initial={{ opacity: 0, y: 30 }}
             animate={{ opacity: 1, y: 0 }}
             className="w-full max-w-xl bg-card border border-border shadow-2xl rounded-3xl p-8 sm:p-12 space-y-8 text-center"
@@ -4325,7 +4393,7 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
               </p>
             </div>
 
-            {!user && mechSignupSent ? (
+            {mechSignupSent ? (
               <div className="space-y-5 text-center">
                 <div className="w-16 h-16 mx-auto rounded-2xl bg-emerald-500/10 border border-emerald-500/20 flex items-center justify-center text-emerald-400 text-3xl">✉️</div>
                 <div className="space-y-2">
@@ -4361,7 +4429,7 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                   Back to Login
                 </Button>
               </div>
-            ) : !user ? (
+            ) : (
               <div className="space-y-4 text-left">
                 <div className="flex rounded-xl overflow-hidden border border-border">
                   <button
@@ -4481,74 +4549,159 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                   </button>
                 )}
               </div>
-            ) : (
-              <div className="space-y-6">
-                <div className="p-4 bg-card border border-border rounded-2xl text-left flex items-center gap-4">
-                  <div className="w-10 h-10 rounded-full bg-torqued-red/10 border border-torqued-red/20 flex items-center justify-center text-torqued-red font-bold text-sm overflow-hidden">
-                    {(user.user_metadata?.full_name ?? user.email ?? '?').charAt(0).toUpperCase()}
-                  </div>
-                  <div className="flex-1 min-w-0">
-                    <p className="text-xs font-bold text-foreground truncate">{user.user_metadata?.full_name ?? user.email}</p>
-                    <p className="text-[10px] text-white/50 truncate font-mono">{user.email}</p>
-                  </div>
+            )}
+
+            {onBack && (
+              <button
+                className="text-[10px] font-bold text-white/40 hover:text-white tracking-widest uppercase block mx-auto pt-2"
+                onClick={onBack}
+              >
+                ← Back to Landing Page
+              </button>
+            )}
+          </motion.div>
+        </main>
+      </div>
+    );
+  }
+
+  // New signups land here after signing the onboarding agreement, until an admin
+  // reviews and approves the account — no Stripe/paywall step until then.
+  if (userProfile?.reviewStatus !== 'approved') {
+    return (
+      <div className="min-h-screen bg-background text-foreground flex flex-col">
+        <nav className="p-4 md:px-8 flex justify-between items-center bg-background/80 border-b border-border backdrop-blur-sm">
+          <Logo />
+          <Button size="sm" variant="outline" className="border-border" onClick={() => { setIncomingJobs([]); setCustomers([]); setBilling(null); setJobNotes({}); setVehiclePhotos({}); setProfileData({ name: '', nzbn: '', phone: '', address: '', serviceAreas: [], diagnosticTools: [], certifications: [], labourRate: 145, shopFee: 25, offersPpi: false, bannerImage: '' }); logout(); }}>
+            Sign Out
+          </Button>
+        </nav>
+
+        <main className="flex-1 flex items-center justify-center p-6 py-20 relative overflow-hidden">
+          <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-96 h-96 bg-torqued-red/10 blur-[120px] rounded-full -z-10" />
+
+          <motion.div
+            initial={{ opacity: 0, y: 30 }}
+            animate={{ opacity: 1, y: 0 }}
+            className="w-full max-w-xl bg-card border border-border shadow-2xl rounded-3xl p-8 sm:p-12 space-y-6 text-center"
+          >
+            <div className="w-20 h-20 bg-torqued-red/10 border border-torqued-red/20 text-torqued-red rounded-2xl flex items-center justify-center mx-auto shadow-inner">
+              <Clock size={38} />
+            </div>
+
+            <div className="space-y-3">
+              <h2 className="text-3xl sm:text-4xl font-black tracking-tighter uppercase text-foreground leading-none">
+                Application Under Review
+              </h2>
+              <p className="text-sm sm:text-base text-muted">
+                Thanks for signing up — we're reviewing your account and will be in touch if we need anything else from you. Keep an eye on your inbox.
+              </p>
+            </div>
+          </motion.div>
+        </main>
+      </div>
+    );
+  }
+
+  if (!userProfile?.subscriptionActive && !justActivated) {
+    return (
+      <div className="min-h-screen bg-background text-foreground flex flex-col">
+{/* Navigation */}
+        <nav className="p-4 md:px-8 flex justify-between items-center bg-background/80 border-b border-border backdrop-blur-sm">
+          <Logo />
+          <Button size="sm" variant="outline" className="border-border" onClick={() => { setIncomingJobs([]); setCustomers([]); setBilling(null); setJobNotes({}); setVehiclePhotos({}); setProfileData({ name: '', nzbn: '', phone: '', address: '', serviceAreas: [], diagnosticTools: [], certifications: [], labourRate: 145, shopFee: 25, offersPpi: false, bannerImage: '' }); logout(); }}>
+            Sign Out
+          </Button>
+        </nav>
+
+        <main className="flex-1 flex items-center justify-center p-6 py-20 relative overflow-hidden">
+          {/* Subtle background glow */}
+          <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-96 h-96 bg-torqued-red/10 blur-[120px] rounded-full -z-10" />
+
+          <motion.div
+            initial={{ opacity: 0, y: 30 }}
+            animate={{ opacity: 1, y: 0 }}
+            className="w-full max-w-xl bg-card border border-border shadow-2xl rounded-3xl p-8 sm:p-12 space-y-8 text-center"
+          >
+            <div className="w-20 h-20 bg-torqued-red/10 border border-torqued-red/20 text-torqued-red rounded-2xl flex items-center justify-center mx-auto shadow-inner">
+              <Wrench size={38} className="animate-pulse" />
+            </div>
+
+            <div className="space-y-3">
+              <h2 className="text-3xl sm:text-5xl font-black tracking-tighter uppercase text-foreground leading-none">
+                Mechanic Portal <span className="text-torqued-red font-normal text-3xl sm:text-5xl">Hub</span>
+              </h2>
+              <p className="text-sm sm:text-base text-muted">
+                Unlock automated parts diagnostics, custom quotes, invoice management, and direct high-value diesel and euro leads.
+              </p>
+            </div>
+
+            <div className="space-y-6">
+              <div className="p-4 bg-card border border-border rounded-2xl text-left flex items-center gap-4">
+                <div className="w-10 h-10 rounded-full bg-torqued-red/10 border border-torqued-red/20 flex items-center justify-center text-torqued-red font-bold text-sm overflow-hidden">
+                  {(user.user_metadata?.full_name ?? user.email ?? '?').charAt(0).toUpperCase()}
                 </div>
-
-                <div className="space-y-4 border-t border-border pt-6">
-                  <div className="flex justify-between text-left items-center">
-                    <div>
-                      <p className="font-bold text-sm text-foreground">Torqued Garage Portal Plan</p>
-                      <p className="text-[10px] text-muted">Unlimited leads + 4% commission on jobs</p>
-                    </div>
-                    <span className="font-black italic text-torqued-red text-lg">$99.00 <span className="text-[9px] block font-normal text-muted not-italic text-right">/ month</span></span>
-                  </div>
-
-                  <Button
-                     fullWidth
-                     disabled={isSubscriptionLoading}
-                     size="lg"
-                     className="bg-torqued-red hover:bg-red-700 text-white font-black uppercase text-xs tracking-widest h-14 flex items-center justify-center gap-2"
-                     onClick={async () => {
-                       if (!user) return;
-                       setIsSubscriptionLoading(true);
-                       try {
-                         const response = await fetch('/api/stripe/create-subscription', {
-                           method: 'POST',
-                           headers: { 'Content-Type': 'application/json' },
-                           body: JSON.stringify({
-                             email: user.email,
-                             mechanicId: user.id,
-                           })
-                         });
-                         const session = await response.json();
-                         if (session.url && !session.isMock) {
-                           // Redirect straight to Stripe's hosted subscription checkout
-                           window.location.href = session.url;
-                         } else if (session.url) {
-                           setStripeSubscriptionUrl(session.url);
-                           setStripeFormStep('input');
-                           setShowStripeSubscriptionModal(true);
-                         } else {
-                           alert(session.error || 'Could not start checkout. Please try again.');
-                         }
-                       } catch (err) {
-                         console.error('Subscription session creation failed:', err);
-                         alert('Could not connect to the payment gateway. Please try again.');
-                       } finally {
-                         setIsSubscriptionLoading(false);
-                       }
-                     }}
-                  >
-                    Activate Garage Hub via Stripe
-                  </Button>
+                <div className="flex-1 min-w-0">
+                  <p className="text-xs font-bold text-foreground truncate">{user.user_metadata?.full_name ?? user.email}</p>
+                  <p className="text-[10px] text-white/50 truncate font-mono">{user.email}</p>
                 </div>
               </div>
-            )}
-            
+
+              <div className="space-y-4 border-t border-border pt-6">
+                <div className="flex justify-between text-left items-center">
+                  <div>
+                    <p className="font-bold text-sm text-foreground">Torqued Garage Portal Plan</p>
+                    <p className="text-[10px] text-muted">Unlimited leads + 4% commission on jobs</p>
+                  </div>
+                  <span className="font-black italic text-torqued-red text-lg">$99.00 <span className="text-[9px] block font-normal text-muted not-italic text-right">/ month</span></span>
+                </div>
+
+                <Button
+                   fullWidth
+                   disabled={isSubscriptionLoading}
+                   size="lg"
+                   className="bg-torqued-red hover:bg-red-700 text-white font-black uppercase text-xs tracking-widest h-14 flex items-center justify-center gap-2"
+                   onClick={async () => {
+                     if (!user) return;
+                     setIsSubscriptionLoading(true);
+                     try {
+                       const response = await fetch('/api/stripe/create-subscription', {
+                         method: 'POST',
+                         headers: { 'Content-Type': 'application/json' },
+                         body: JSON.stringify({
+                           email: user.email,
+                           mechanicId: user.id,
+                         })
+                       });
+                       const session = await response.json();
+                       if (session.url && !session.isMock) {
+                         // Redirect straight to Stripe's hosted subscription checkout
+                         window.location.href = session.url;
+                       } else if (session.url) {
+                         setStripeSubscriptionUrl(session.url);
+                         setStripeFormStep('input');
+                         setShowStripeSubscriptionModal(true);
+                       } else {
+                         alert(session.error || 'Could not start checkout. Please try again.');
+                       }
+                     } catch (err) {
+                       console.error('Subscription session creation failed:', err);
+                       alert('Could not connect to the payment gateway. Please try again.');
+                     } finally {
+                       setIsSubscriptionLoading(false);
+                     }
+                   }}
+                >
+                  Activate Garage Hub via Stripe
+                </Button>
+              </div>
+            </div>
+
             {/* Premium Integrated Stripe Elements Sheet */}
             <AnimatePresence>
               {showStripeSubscriptionModal && (
                 <div className="fixed inset-0 z-[110] flex items-center justify-center p-4 overflow-y-auto bg-black/80">
-                  <motion.div 
+                  <motion.div
                     initial={{ opacity: 0 }}
                     animate={{ opacity: 1 }}
                     exit={{ opacity: 0 }}
@@ -4559,7 +4712,7 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                     }}
                     className="absolute inset-0 bg-background/50 backdrop-blur-sm"
                   />
-                  <motion.div 
+                  <motion.div
                     initial={{ opacity: 0, scale: 0.95, y: 30 }}
                     animate={{ opacity: 1, scale: 1, y: 0 }}
                     exit={{ opacity: 0, scale: 0.95, y: 30 }}
@@ -4650,7 +4803,7 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                                 // Transition to processing/polling check screen
                                 setStripeFormStep('processing');
                                 setStripeLoadingMessage('Awaiting completed payment confirmation from Stripe secure webhook...');
-                                
+
                                 // Since we don't have webhook setup on high-velocity client side in local dev, let's auto-verify after 6 seconds to trigger completion!
                                 setTimeout(() => {
                                   setStripeLoadingMessage('Stripe signature validated. Authorizing Garage Hub subscription...');
@@ -4760,9 +4913,9 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                 </div>
               )}
             </AnimatePresence>
-            
+
             {onBack && (
-              <button 
+              <button
                 className="text-[10px] font-bold text-white/40 hover:text-white tracking-widest uppercase block mx-auto pt-2"
                 onClick={onBack}
               >

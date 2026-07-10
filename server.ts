@@ -260,6 +260,42 @@ app.get('/api/mechanics', async (_req, res) => {
   }
 });
 
+// GET /api/mechanic/public/:id — whitelisted public profile for a mechanic's own
+// shareable direct-booking link (?book=<id> on the customer portal). Only active,
+// subscribed mechanics resolve — a cancelled/inactive mechanic's old link goes dead
+// rather than silently accepting bookings no one will service.
+app.get('/api/mechanic/public/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const supabase = getSupabaseAdmin();
+    if (!supabase) return res.status(404).json({ error: 'Not found' });
+    let data: any;
+    const first = await supabase
+      .from('profiles')
+      .select('id, name, address, phone, banner_image, labour_rate, technicians, parts_lead_days, rating, review_count, latitude, longitude, offers_ppi, wof_disabled, service_areas, diagnostic_tools, certifications')
+      .eq('role', 'mechanic')
+      .eq('subscription_active', true)
+      .eq('id', id)
+      .maybeSingle();
+    data = first.data;
+    if (first.error && /wof_disabled/.test(first.error.message || '')) {
+      const second = await supabase
+        .from('profiles')
+        .select('id, name, address, phone, banner_image, labour_rate, technicians, parts_lead_days, rating, review_count, latitude, longitude, offers_ppi, service_areas, diagnostic_tools, certifications')
+        .eq('role', 'mechanic')
+        .eq('subscription_active', true)
+        .eq('id', id)
+        .maybeSingle();
+      data = second.data;
+    }
+    if (!data) return res.status(404).json({ error: 'Mechanic not found or not currently accepting bookings' });
+    res.json({ mechanic: data });
+  } catch (err) {
+    console.error('[mechanic/public]', err);
+    res.status(500).json({ error: 'Could not load mechanic profile' });
+  }
+});
+
 // POST /api/mechanic/update-job-status — persist a job status change (service role)
 app.post('/api/mechanic/update-job-status', async (req, res) => {
   try {
@@ -2617,7 +2653,7 @@ app.get('/api/admin/mechanics', async (req, res) => {
   // Prefer the richer onboarding fields, but degrade gracefully if a column is
   // missing (e.g. migration 028 not yet applied) so the list never comes back empty.
   const rich = await supabase.from('profiles')
-    .select('id, name, email, address, subscription_active, onboarding_complete, agreement_signed_at, billing_start_date, rating, review_count, created_at')
+    .select('id, name, email, address, subscription_active, onboarding_complete, agreement_signed_at, billing_start_date, rating, review_count, created_at, review_status, wants_wof')
     .eq('role', 'mechanic').order('created_at', { ascending: false });
   let mechanics: any[] = rich.data ?? [];
   if (rich.error) {
@@ -2863,6 +2899,72 @@ app.post('/api/admin/set-subscription', async (req, res) => {
   const { error } = await supabase.from('profiles').update({ subscription_active: !!active }).eq('id', mechanicId);
   if (error) return res.status(500).json({ error: error.message });
   res.json({ success: true });
+});
+
+// POST /api/admin/approve-mechanic — admin has finished reviewing a new signup (and any
+// requested documents); marks the account approved and emails the mechanic the final
+// two steps (Stripe billing + set-password) to go live.
+app.post('/api/admin/approve-mechanic', async (req, res) => {
+  if (!adminOk(req)) return res.status(401).json({ error: 'Unauthorized' });
+  try {
+    const { mechanicId } = req.body;
+    if (!mechanicId) return res.status(400).json({ error: 'mechanicId required' });
+    const supabase = getSupabaseAdmin();
+    if (!supabase) return res.status(500).json({ error: 'Database not configured' });
+
+    const { data: profile } = await supabase.from('profiles').select('email, name, owner_name').eq('id', mechanicId).single();
+    if (!profile?.email) return res.status(404).json({ error: 'Mechanic not found' });
+
+    const { error } = await supabase.from('profiles').update({ review_status: 'approved' }).eq('id', mechanicId);
+    if (error) return res.status(500).json({ error: error.message });
+
+    const origin = getOrigin(req);
+    const setPasswordLink = buildResetLink(origin, profile.email);
+    const sub = await makeSubscriptionCheckout(profile.email, mechanicId, origin);
+    const billingLink = sub.url || '';
+
+    const transporter = getMailTransporter();
+    if (transporter) {
+      const stepBtn = (href: string, label: string, dark = false) =>
+        `<a href="${href}" style="display:inline-block;background:${dark ? EMAIL_DARK : EMAIL_RED};color:#fff;font-family:${EMAIL_BODY_FONT};font-size:11px;font-weight:900;text-transform:uppercase;letter-spacing:1px;text-decoration:none;padding:11px 22px;border-radius:9px;">${label}</a>`;
+      const step = (n: number, title: string, body: string) =>
+        `<tr><td style="padding:0 0 18px;">
+          <table cellpadding="0" cellspacing="0"><tr>
+            <td valign="top" style="width:30px;"><div style="width:24px;height:24px;border-radius:50%;background:${EMAIL_RED};color:#fff;font-family:${EMAIL_BODY_FONT};font-size:12px;font-weight:900;text-align:center;line-height:24px;">${n}</div></td>
+            <td valign="top" style="padding-left:10px;">
+              <p style="margin:0 0 6px;font-family:${EMAIL_BODY_FONT};font-size:14px;font-weight:800;color:${EMAIL_DARK};">${title}</p>
+              ${body}
+            </td>
+          </tr></table>
+        </td></tr>`;
+      const steps = [
+        step(1, 'Activate your subscription',
+          `<p style="margin:0 0 9px;font-family:${EMAIL_BODY_FONT};font-size:13px;color:#555;">$99/mo. This puts your workshop live to receive leads.</p>${stepBtn(billingLink || `${origin}/mechanic`, 'Set up Stripe billing')}`),
+        step(2, 'Set your password & log in',
+          `<p style="margin:0 0 9px;font-family:${EMAIL_BODY_FONT};font-size:13px;color:#555;">Then start accepting jobs and writing quotes in record time.</p>${stepBtn(setPasswordLink, 'Set my password')}`),
+      ];
+      const html = emailWrap(`<tr><td style="padding:36px 32px;">
+${emailTitle("You're approved — let's finish setting up")}
+${emailGreeting(profile.owner_name || profile.name)}
+${emailPara("Good news — we've reviewed your account and you're good to go. Just two steps left:")}
+<table width="100%" cellpadding="0" cellspacing="0" style="margin:18px 0 0;">
+${steps.join('\n')}
+</table>
+${emailPara('Need a hand? Just reply to this email and our team will help you get set up.')}
+</td></tr>`);
+      await transporter.sendMail({
+        from: process.env.SMTP_FROM || '"Torqued" <torquedapp.nz@gmail.com>',
+        to: profile.email,
+        subject: 'Finish setting up your Torqued Mechanic account',
+        html,
+      }).catch(e => console.warn('Approve-mechanic email failed (non-blocking):', e?.message));
+    }
+
+    res.json({ success: true, setPasswordLink, billingLink });
+  } catch (err) {
+    console.error('[admin/approve-mechanic]', err);
+    res.status(500).json({ error: 'Could not approve mechanic' });
+  }
 });
 
 // POST /api/admin/apply-promo — apply free months or a percentage discount to a mechanic's subscription
@@ -3132,6 +3234,7 @@ app.post('/api/admin/onboard-mechanic', async (req, res) => {
       latitude, longitude,
       subscription_active: compActivate,
       onboarding_complete: true,
+      review_status: 'approved',
     }, { onConflict: 'id' });
 
     // Build the Stripe subscription checkout link (unless comped)
@@ -3211,10 +3314,10 @@ app.post('/api/mechanic/save-onboarding', async (req, res) => {
     const supabase = getSupabaseAdmin();
     if (!supabase) return res.status(500).json({ error: 'Database not configured' });
 
-    const allowed = ['name','legal_name','nzbn','address','phone','owner_name','owner_phone','years_in_trade','bio','bank_account_name','bank_account_number','labour_rate','shop_fee','technicians','parts_lead_days','service_areas','diagnostic_tools','certifications','banner_image','cancellation_notice_hours','cancellation_partial_refund_pct','billing_start_date','agreement_signed_at','agreement_signed_by','offers_ppi'];
+    const allowed = ['name','legal_name','nzbn','address','phone','owner_name','owner_phone','years_in_trade','bio','bank_account_name','bank_account_number','labour_rate','shop_fee','technicians','parts_lead_days','service_areas','diagnostic_tools','certifications','banner_image','cancellation_notice_hours','cancellation_partial_refund_pct','billing_start_date','agreement_signed_at','agreement_signed_by','offers_ppi','wants_wof'];
     const update: Record<string, any> = {};
     for (const k of allowed) if (fields[k] !== undefined) update[k] = fields[k];
-    if (complete) update.onboarding_complete = true;
+    if (complete) { update.onboarding_complete = true; update.review_status = 'pending'; }
 
     let { error } = await supabase.from('profiles').update(update).eq('id', mechanicId);
     // If migration 012 hasn't been run yet, the cancellation columns won't exist — retry without them
@@ -3229,6 +3332,12 @@ app.post('/api/mechanic/save-onboarding', async (req, res) => {
       delete update.offers_ppi;
       ({ error } = await supabase.from('profiles').update(update).eq('id', mechanicId));
     }
+    // Pre-migration 050: wants_wof/review_status columns may not exist yet — retry without them.
+    if (error && /wants_wof|review_status/.test(error.message || '')) {
+      delete update.wants_wof;
+      delete update.review_status;
+      ({ error } = await supabase.from('profiles').update(update).eq('id', mechanicId));
+    }
     if (error) return res.status(500).json({ error: error.message });
     res.json({ success: true });
   } catch (err) {
@@ -3240,7 +3349,7 @@ app.post('/api/mechanic/save-onboarding', async (req, res) => {
 // POST /api/mechanic/email-contract — email the signed partnership agreement PDF to the mechanic
 app.post('/api/mechanic/email-contract', async (req, res) => {
   try {
-    const { mechanicId, pdfBase64, email, workshopName } = req.body;
+    const { mechanicId, pdfBase64, email, workshopName, ownerName } = req.body;
     if (!mechanicId || !pdfBase64 || !email) return res.status(400).json({ error: 'mechanicId, pdfBase64, and email are required' });
     const transporter = getMailTransporter();
     if (!transporter) {
@@ -3249,17 +3358,19 @@ app.post('/api/mechanic/email-contract', async (req, res) => {
     }
     const html = emailWrap(`
       <tr><td style="padding:36px 32px;">
-        ${emailTitle('Your Torqued Onboarding Contract')}
-        ${emailGreeting(workshopName || null)}
-        ${emailPara('Thank you for joining the Torqued platform. Your signed onboarding contract is attached to this email. Please keep it for your records.')}
-        ${emailPara(`If you have any questions about the contract, please contact us at <a href="mailto:torquedapp.nz@gmail.com" style="color:${EMAIL_RED};font-weight:700;">torquedapp.nz@gmail.com</a>.`)}
-        ${emailPara('We look forward to working with you.')}
+        ${emailTitle("We've received your Torqued application")}
+        ${emailGreeting(ownerName || workshopName || null)}
+        ${emailPara('Thank you for signing up to Torqued. Please allow us a few business hours to review your account sign-up.')}
+        ${emailPara("Make sure to keep an eye out on your emails, as we may need some documents from you.")}
+        ${emailPara("We look forward to working with you, to maximise your workshop's potential.")}
+        ${emailPara(`Attached is the Legal Jargon (Terms and Conditions) you are agreeing to — if you have any questions, please contact us at <a href="mailto:torquedapp.nz@gmail.com" style="color:${EMAIL_RED};font-weight:700;">torquedapp.nz@gmail.com</a>.`)}
+        ${emailPara('Thanks for choosing Torqued.')}
       </td></tr>
     `);
     await transporter.sendMail({
       from: `"Torqued" <${process.env.SMTP_USER}>`,
       to: email,
-      subject: 'Your Torqued Onboarding Contract',
+      subject: "We've received your Torqued application",
       html,
       attachments: [{
         filename: 'Torqued-Onboarding-Contract.pdf',

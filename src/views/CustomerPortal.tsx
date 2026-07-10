@@ -607,6 +607,38 @@ const ProfileView: React.FC<ProfileViewProps> = (props) => {
   );
 };
 
+// Maps a raw /api/mechanics (or /api/mechanic/public/:id) record into the shape
+// used throughout the booking flow. Shared by the mechanic-list fetch and the
+// direct-booking-link landing screen so both paths behave identically.
+function mapMechanicRecord(m: any): Mechanic {
+  return {
+    id: m.id,
+    name: m.name || 'Workshop',
+    logo: `https://ui-avatars.com/api/?name=${encodeURIComponent(m.name || 'W')}&background=FF1800&color=fff&bold=true`,
+    suburb: m.address ? String(m.address).split(',').slice(-1)[0].trim() : 'NZ',
+    address: m.address || undefined,
+    mapsUrl: m.latitude && m.longitude
+      ? `https://www.google.com/maps?q=${m.latitude},${m.longitude}`
+      : m.address
+        ? `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(m.address)}`
+        : undefined,
+    distance: 999,
+    rating: m.rating || 5.0,
+    reviews: m.review_count || 0,
+    labourRate: m.labour_rate || undefined,
+    specialisations: ['General Service', 'Diagnostics'],
+    nextAvailable: 'Tomorrow, 8am',
+    isFeatured: true,
+    estimatedPrice: 0,
+    technicians: m.technicians || 1,
+    partsLeadDays: m.parts_lead_days ?? 1,
+    latitude: m.latitude ?? undefined,
+    longitude: m.longitude ?? undefined,
+    offersPpi: !!m.offers_ppi,
+    wofDisabled: !!m.wof_disabled,
+  } as any;
+}
+
 export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) => {
   const { theme, setTheme } = useTheme();
   const { user, userProfile, logout, checkPlateExists, registerVehicle, updateProfile } = useAuth();
@@ -945,33 +977,7 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
     fetch('/api/mechanics')
       .then(r => r.json())
       .then(d => {
-        const mapped: Mechanic[] = (d.mechanics || []).map((m: any) => ({
-          id: m.id,
-          name: m.name || 'Workshop',
-          logo: `https://ui-avatars.com/api/?name=${encodeURIComponent(m.name || 'W')}&background=FF1800&color=fff&bold=true`,
-          suburb: m.address ? String(m.address).split(',').slice(-1)[0].trim() : 'NZ',
-          address: m.address || undefined,
-          mapsUrl: m.latitude && m.longitude
-            ? `https://www.google.com/maps?q=${m.latitude},${m.longitude}`
-            : m.address
-              ? `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(m.address)}`
-              : undefined,
-          distance: 999,
-          rating: m.rating || 5.0,
-          reviews: m.review_count || 0,
-          labourRate: m.labour_rate || undefined,
-          specialisations: ['General Service', 'Diagnostics'],
-          nextAvailable: 'Tomorrow, 8am',
-          isFeatured: true,
-          estimatedPrice: 0,
-          technicians: m.technicians || 1,
-          partsLeadDays: m.parts_lead_days ?? 1,
-          latitude: m.latitude ?? undefined,
-          longitude: m.longitude ?? undefined,
-          offersPpi: !!m.offers_ppi,
-          wofDisabled: !!m.wof_disabled,
-        }) as any);
-        setRealMechanics(mapped);
+        setRealMechanics((d.mechanics || []).map(mapMechanicRecord));
         setMechanicsLoading(false);
       })
       .catch(() => { setMechanicsLoading(false); });
@@ -1180,6 +1186,24 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
   const [quoteReview, setQuoteReview] = useState<any | null>(null);
   const [quotePaying, setQuotePaying] = useState(false);
   const [quoteOnlyMode, setQuoteOnlyMode] = useState(() => !!new URLSearchParams(window.location.search).get('quote'));
+
+  // Direct-booking link (?book=<mechanicId>) — a mechanic's own shareable link.
+  // Shows a standalone "Book with [Name]" landing screen; once confirmed, the
+  // customer goes through the normal flow but the mechanic-choice step is
+  // skipped entirely and every price/booking is locked to this one mechanic.
+  const [directBookMechanicIdParam] = useState(() => new URLSearchParams(window.location.search).get('book'));
+  const [directBookProfile, setDirectBookProfile] = useState<Mechanic | null>(null);
+  const [directBookConfirmed, setDirectBookConfirmed] = useState(false);
+  const [directBookError, setDirectBookError] = useState(false);
+  useEffect(() => {
+    if (!directBookMechanicIdParam) return;
+    window.history.replaceState({}, document.title, window.location.pathname);
+    fetch(`/api/mechanic/public/${encodeURIComponent(directBookMechanicIdParam)}`)
+      .then(r => r.json())
+      .then(d => { if (d?.mechanic) setDirectBookProfile(mapMechanicRecord(d.mechanic)); else setDirectBookError(true); })
+      .catch(() => setDirectBookError(true));
+  }, [directBookMechanicIdParam]);
+
   useEffect(() => {
     // Load transfer claim info if arriving via invite link
     if (claimToken) {
@@ -2550,6 +2574,44 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
     }, 800);
     return () => clearTimeout(timer);
   }, [faultCode, vehicle]);
+
+  // Select a mechanic and fetch their custom packages/pricing for this vehicle,
+  // then advance to scheduling. Shared by the normal mechanic-list step and the
+  // direct-booking-link flow (?book=<mechanicId>), which auto-invokes this with
+  // the locked mechanic instead of showing the mechanic-choice step at all.
+  const chooseMechanic = (mechanic: Mechanic) => {
+    setSelectedMechanic({ ...mechanic, estimatedPrice: totalPrice });
+    setMechanicPackages([]);
+    fetch(`/api/mechanic/${mechanic.id}/package-price${vehicle?.rego ? `?rego=${vehicle.rego}` : ''}`)
+      .then(r => r.json())
+      .then(d => {
+        const pkgs: any[] = d.packages || [];
+        setMechanicPackages(pkgs);
+        if (!pkgs.length) return;
+        const hasTransmission = selectedServices.includes('transmission');
+        const standardServices = selectedServices.filter(s => s !== 'transmission');
+        const standardPkgs = pkgs.filter((p: any) => p.pkg_type === 'standard');
+        const transPkgs = pkgs.filter((p: any) => p.pkg_type === 'transmission');
+        let pkgTotal = 0;
+        if (standardServices.length && standardPkgs.length) pkgTotal += Math.min(...standardPkgs.map((p: any) => p.calculatedPrice || p.price || 0));
+        else if (standardServices.length) pkgTotal += totalPrice;
+        if (hasTransmission && transPkgs.length) pkgTotal += transPkgs[0].calculatedPrice || transPkgs[0].price || 0;
+        else if (hasTransmission) pkgTotal += SERVICES.find(s => s.id === 'transmission')?.basePrice || 0;
+        if (pkgTotal > 0) setSelectedMechanic(prev => prev ? { ...prev, estimatedPrice: pkgTotal } : null);
+      })
+      .catch(() => {});
+    setStep(5);
+  };
+
+  // Direct-booking link: whenever the flow would normally reach the mechanic-
+  // choice step, silently lock in the mechanic behind the link instead of ever
+  // rendering the list of workshops. Fires regardless of which button/path led
+  // into step 4, so no individual "continue" handler needs to know about this.
+  useEffect(() => {
+    if (step === 4 && directBookConfirmed && directBookProfile) {
+      chooseMechanic(directBookProfile);
+    }
+  }, [step, directBookConfirmed, directBookProfile]);
 
   const toggleService = (id: string) => {
     setSelectedServices(prev => {
@@ -4014,6 +4076,16 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
         );
 
       case 4: {
+        // Direct-booking link: the useEffect above fires after this renders, so
+        // without this guard the full mechanic list (competitors included) would
+        // flash for a frame before jumping to step 5. Render a spinner instead.
+        if (directBookConfirmed && directBookProfile) {
+          return (
+            <div className="flex items-center justify-center h-64">
+              <div className="w-8 h-8 border-4 border-border border-t-torqued-red rounded-full animate-spin" />
+            </div>
+          );
+        }
         // Workshops without a WoF Authority can be excluded from WoF jobs by an admin.
         const needsWof = selectedServices.includes('wof');
         const wofFiltered = needsWof
@@ -4148,31 +4220,7 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                       </div>
                       <div className="flex gap-2 w-full sm:w-auto">
                         <Button variant="outline" size="sm" className="flex-1 sm:flex-initial border-border text-foreground hover:bg-card h-10 px-6 font-bold uppercase tracking-widest text-[10px]">Profile</Button>
-                        <Button size="sm" className="flex-[2] sm:flex-initial bg-torqued-red hover:bg-red-700 text-white h-10 px-8 font-bold uppercase tracking-widest text-[10px] shadow-lg shadow-torqued-red/20" onClick={() => {
-                          setSelectedMechanic({ ...mechanic, estimatedPrice: totalPrice });
-                          setMechanicPackages([]);
-                          // Fetch this mechanic's packages and recalculate price for the customer's vehicle
-                          fetch(`/api/mechanic/${mechanic.id}/package-price${vehicle?.rego ? `?rego=${vehicle.rego}` : ''}`)
-                            .then(r => r.json())
-                            .then(d => {
-                              const pkgs: any[] = d.packages || [];
-                              setMechanicPackages(pkgs);
-                              if (!pkgs.length) return;
-                              const hasTransmission = selectedServices.includes('transmission');
-                              const standardServices = selectedServices.filter(s => s !== 'transmission');
-                              const standardPkgs = pkgs.filter((p: any) => p.pkg_type === 'standard');
-                              const transPkgs = pkgs.filter((p: any) => p.pkg_type === 'transmission');
-                              let pkgTotal = 0;
-                              if (standardServices.length && standardPkgs.length) pkgTotal += Math.min(...standardPkgs.map((p: any) => p.calculatedPrice || p.price || 0));
-                              else if (standardServices.length) pkgTotal += totalPrice;
-                              if (hasTransmission && transPkgs.length) pkgTotal += transPkgs[0].calculatedPrice || transPkgs[0].price || 0;
-                              else if (hasTransmission) pkgTotal += SERVICES.find(s => s.id === 'transmission')?.basePrice || 0;
-                              if (pkgTotal > 0) setSelectedMechanic(prev => prev ? { ...prev, estimatedPrice: pkgTotal } : null);
-                            })
-                            .catch(() => {});
-                          // Diagnostic is booked & paid like any other service — the mechanic quotes after inspecting.
-                          setStep(5);
-                        }}>{selectedServices.includes('diag_inspection') ? 'Book Diagnostic' : 'Select & Schedule'}</Button>
+                        <Button size="sm" className="flex-[2] sm:flex-initial bg-torqued-red hover:bg-red-700 text-white h-10 px-8 font-bold uppercase tracking-widest text-[10px] shadow-lg shadow-torqued-red/20" onClick={() => chooseMechanic(mechanic)}>{selectedServices.includes('diag_inspection') ? 'Book Diagnostic' : 'Select & Schedule'}</Button>
                       </div>
                     </div>
                   </Card>
@@ -6112,6 +6160,63 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
               <h2 className="text-2xl font-black tracking-tight">Couldn't confirm</h2>
               <p className="text-sm text-muted">This reschedule link may have expired or already been used. Please contact your workshop directly.</p>
               <Button fullWidth variant="outline" className="border-border text-foreground mt-2" onClick={() => { window.location.href = '/customer'; }}>Go to My Garage</Button>
+            </div>
+          )}
+        </div>
+      </div>
+    );
+  }
+
+  // Full-screen standalone direct-booking-link landing page — no portal chrome.
+  // A mechanic's own shareable link (?book=<mechanicId>): shows their public
+  // profile with a single "Book with [Name]" CTA. Confirming it proceeds into
+  // the normal Step 1 flow with the mechanic-choice step silently skipped.
+  if (directBookMechanicIdParam && !directBookConfirmed) {
+    return (
+      <div className="min-h-screen bg-background text-foreground flex flex-col items-center justify-center p-6">
+        <div className="w-full max-w-md space-y-6">
+          <Logo />
+          {directBookError ? (
+            <div className="bg-card border border-border rounded-3xl p-8 space-y-4 shadow-xl text-center">
+              <div className="w-14 h-14 mx-auto rounded-2xl bg-torqued-red/10 border border-torqued-red/20 flex items-center justify-center text-torqued-red"><X size={26} /></div>
+              <h2 className="text-2xl font-black tracking-tight">Link unavailable</h2>
+              <p className="text-sm text-muted">This booking link isn't active right now. You can still book with any Torqued workshop below.</p>
+              <Button fullWidth className="bg-torqued-red text-white mt-2" onClick={() => setDirectBookError(false)}>Browse All Workshops</Button>
+            </div>
+          ) : !directBookProfile ? (
+            <div className="text-center space-y-3">
+              <div className="w-10 h-10 border-4 border-torqued-red border-t-transparent rounded-full animate-spin mx-auto" />
+              <p className="text-sm text-muted font-bold">Loading workshop profile…</p>
+            </div>
+          ) : (
+            <div className="bg-card border border-border rounded-3xl overflow-hidden shadow-xl">
+              <div className="h-28 bg-gradient-to-br from-torqued-red/20 to-background" />
+              <div className="px-7 pb-7 -mt-12 space-y-5">
+                <img src={directBookProfile.logo} alt={directBookProfile.name} className="w-20 h-20 rounded-2xl object-cover ring-4 ring-card shadow-lg" />
+                <div className="space-y-1">
+                  <h2 className="text-2xl font-black tracking-tight">{directBookProfile.name}</h2>
+                  {directBookProfile.address && (
+                    <p className="text-xs text-muted flex items-center gap-1"><MapPin size={12} className="text-torqued-red shrink-0" />{directBookProfile.address}</p>
+                  )}
+                  <div className="flex items-center gap-1.5 pt-1">
+                    <Star size={13} className="text-yellow-400 fill-current" />
+                    <span className="text-sm font-bold">{directBookProfile.rating}</span>
+                    <span className="text-xs text-muted">({directBookProfile.reviews} reviews)</span>
+                  </div>
+                </div>
+                <p className="text-xs text-muted leading-relaxed border-t border-border pt-4">
+                  You've been invited to book directly with <span className="text-foreground font-semibold">{directBookProfile.name}</span>. Your quote and job will go straight to this workshop — no need to choose from a list.
+                </p>
+                <Button fullWidth size="lg" className="bg-torqued-red text-white h-14 rounded-2xl shadow-xl shadow-torqued-red/10" onClick={() => setDirectBookConfirmed(true)}>
+                  Book with {directBookProfile.name} →
+                </Button>
+                <button
+                  className="w-full text-center text-xs text-muted hover:text-foreground underline"
+                  onClick={() => setDirectBookProfile(null)}
+                >
+                  Not what you're after? Browse all workshops instead
+                </button>
+              </div>
             </div>
           )}
         </div>
