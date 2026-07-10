@@ -204,10 +204,10 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
   const [mechEmail, setMechEmail] = useState('');
   const [mechPassword, setMechPassword] = useState('');
   const [mechName, setMechName] = useState('');
-  const [mechAuthMode, setMechAuthMode] = useState<'login' | 'signup'>('login');
   const [mechAuthError, setMechAuthError] = useState<string | null>(null);
   const [mechAuthLoading, setMechAuthLoading] = useState(false);
   const [mechSignupSent, setMechSignupSent] = useState(false);
+  const [showSignupModal, setShowSignupModal] = useState(false);
   const [subPromo, setSubPromo] = useState('');
   const [subPromoError, setSubPromoError] = useState<string | null>(null);
   const [subPromoLoading, setSubPromoLoading] = useState(false);
@@ -4366,113 +4366,93 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
 {/* Navigation */}
         <nav className="p-4 md:px-8 flex justify-between items-center bg-background/80 border-b border-border backdrop-blur-sm">
           <Logo />
-          <Button size="sm" className="bg-torqued-red text-white" onClick={() => setMechAuthMode('login')}>
+          <Button size="sm" className="bg-torqued-red text-white" onClick={() => { setShowSignupModal(false); setMechSignupSent(false); }}>
             Sign In
           </Button>
         </nav>
 
-        <main className="flex-1 flex items-center justify-center p-6 py-20 relative overflow-hidden">
+        <main className="flex-1 flex items-center justify-center p-6 py-20 relative overflow-y-auto">
           {/* Subtle background glow */}
           <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-96 h-96 bg-torqued-red/10 blur-[120px] rounded-full -z-10" />
 
-          <motion.div
-            initial={{ opacity: 0, y: 30 }}
-            animate={{ opacity: 1, y: 0 }}
-            className="w-full max-w-xl bg-card border border-border shadow-2xl rounded-3xl p-8 sm:p-12 space-y-8 text-center"
-          >
-            <div className="w-20 h-20 bg-torqued-red/10 border border-torqued-red/20 text-torqued-red rounded-2xl flex items-center justify-center mx-auto shadow-inner">
-              <Wrench size={38} className="animate-pulse" />
-            </div>
-
-            <div className="space-y-3">
-              <h2 className="text-3xl sm:text-5xl font-black tracking-tighter uppercase text-foreground leading-none">
-                Mechanic Portal <span className="text-torqued-red font-normal text-3xl sm:text-5xl">Hub</span>
-              </h2>
-              <p className="text-sm sm:text-base text-muted">
-                Unlock automated parts diagnostics, custom quotes, invoice management, and direct high-value diesel and euro leads.
-              </p>
-            </div>
-
-            {mechSignupSent ? (
-              <div className="space-y-5 text-center">
-                <div className="w-16 h-16 mx-auto rounded-2xl bg-emerald-500/10 border border-emerald-500/20 flex items-center justify-center text-emerald-400 text-3xl">✉️</div>
-                <div className="space-y-2">
-                  <h3 className="text-xl font-black text-foreground">Check your email</h3>
-                  <p className="text-sm text-muted">
-                    We've sent a confirmation link to <span className="text-foreground font-bold">{mechEmail}</span>. Click it to activate your workshop account, then log in.
-                  </p>
-                </div>
-
-                {mechResendMsg && (
-                  <p className="text-xs font-bold text-emerald-400">{mechResendMsg}</p>
-                )}
-
-                <button
-                  disabled={mechResendCooldown > 0}
-                  onClick={async () => {
-                    setMechResendMsg(null);
-                    const err = await resendMechanicLink(mechEmail);
-                    if (err) { setMechResendMsg(err); }
-                    else { setMechResendMsg('Link resent — check your inbox.'); setMechResendCooldown(30); }
-                  }}
-                  className="text-xs font-bold text-torqued-red hover:text-red-400 disabled:text-muted disabled:cursor-not-allowed transition-colors"
-                >
-                  {mechResendCooldown > 0 ? `Resend link in ${mechResendCooldown}s` : "Didn't get it? Resend link"}
-                </button>
-
-                <Button
-                  fullWidth
-                  variant="outline"
-                  className="border-border text-foreground"
-                  onClick={() => { setMechSignupSent(false); setMechAuthMode('login'); setMechPassword(''); setMechResendMsg(null); }}
-                >
-                  Back to Login
-                </Button>
+          <div className="w-full max-w-xl space-y-6">
+            <motion.div
+              initial={{ opacity: 0, y: 30 }}
+              animate={{ opacity: 1, y: 0 }}
+              className="w-full bg-card border border-border shadow-2xl rounded-3xl p-8 sm:p-12 space-y-8 text-center"
+            >
+              <div className="w-20 h-20 bg-torqued-red/10 border border-torqued-red/20 text-torqued-red rounded-2xl flex items-center justify-center mx-auto shadow-inner">
+                <Wrench size={38} className="animate-pulse" />
               </div>
-            ) : (
-              <div className="space-y-4 text-left">
-                <div className="flex rounded-xl overflow-hidden border border-border">
-                  <button
-                    onClick={() => { setMechAuthMode('login'); setMechAuthError(null); }}
-                    className={`flex-1 py-2.5 text-xs font-black uppercase tracking-wider transition-all ${mechAuthMode === 'login' ? 'bg-torqued-red text-white' : 'text-muted hover:text-foreground'}`}
-                  >Login</button>
-                  <button
-                    onClick={() => { setMechAuthMode('signup'); setMechAuthError(null); }}
-                    className={`flex-1 py-2.5 text-xs font-black uppercase tracking-wider transition-all ${mechAuthMode === 'signup' ? 'bg-torqued-red text-white' : 'text-muted hover:text-foreground'}`}
-                  >Register</button>
-                </div>
 
-                <div className="space-y-3">
-                  {mechAuthMode === 'signup' && (
+              <div className="space-y-3">
+                <h2 className="text-3xl sm:text-5xl font-black tracking-tighter uppercase text-foreground leading-none">
+                  Mechanic Portal <span className="text-torqued-red font-normal text-3xl sm:text-5xl">Hub</span>
+                </h2>
+                <p className="text-sm sm:text-base text-muted">
+                  Unlock automated parts diagnostics, custom quotes, invoice management, and direct high-value diesel and euro leads.
+                </p>
+              </div>
+
+              {mechSignupSent ? (
+                <div className="space-y-5 text-center">
+                  <div className="w-16 h-16 mx-auto rounded-2xl bg-emerald-500/10 border border-emerald-500/20 flex items-center justify-center text-emerald-400 text-3xl">✉️</div>
+                  <div className="space-y-2">
+                    <h3 className="text-xl font-black text-foreground">Check your email</h3>
+                    <p className="text-sm text-muted">
+                      We've sent a confirmation link to <span className="text-foreground font-bold">{mechEmail}</span>. Click it to activate your workshop account, then log in.
+                    </p>
+                  </div>
+
+                  {mechResendMsg && (
+                    <p className="text-xs font-bold text-emerald-400">{mechResendMsg}</p>
+                  )}
+
+                  <button
+                    disabled={mechResendCooldown > 0}
+                    onClick={async () => {
+                      setMechResendMsg(null);
+                      const err = await resendMechanicLink(mechEmail);
+                      if (err) { setMechResendMsg(err); }
+                      else { setMechResendMsg('Link resent — check your inbox.'); setMechResendCooldown(30); }
+                    }}
+                    className="text-xs font-bold text-torqued-red hover:text-red-400 disabled:text-muted disabled:cursor-not-allowed transition-colors"
+                  >
+                    {mechResendCooldown > 0 ? `Resend link in ${mechResendCooldown}s` : "Didn't get it? Resend link"}
+                  </button>
+
+                  <Button
+                    fullWidth
+                    variant="outline"
+                    className="border-border text-foreground"
+                    onClick={() => { setMechSignupSent(false); setMechPassword(''); setMechResendMsg(null); }}
+                  >
+                    Back to Login
+                  </Button>
+                </div>
+              ) : (
+                <div className="space-y-4 text-left">
+                  <div className="space-y-3">
                     <input
-                      type="text"
-                      placeholder="Workshop / Business Name"
-                      value={mechName}
-                      onChange={e => setMechName(e.target.value)}
+                      type="email"
+                      placeholder="Email address"
+                      value={mechEmail}
+                      onChange={e => setMechEmail(e.target.value)}
                       className="w-full bg-card border border-border rounded-xl px-4 h-12 text-sm text-foreground placeholder:text-muted focus:outline-none focus:border-torqued-red"
                     />
+                    <input
+                      type="password"
+                      placeholder="Password"
+                      value={mechPassword}
+                      onChange={e => setMechPassword(e.target.value)}
+                      className="w-full bg-card border border-border rounded-xl px-4 h-12 text-sm text-foreground placeholder:text-muted focus:outline-none focus:border-torqued-red"
+                    />
+                  </div>
+
+                  {mechAuthError && (
+                    <p className="text-xs text-torqued-red font-bold">{mechAuthError}</p>
                   )}
-                  <input
-                    type="email"
-                    placeholder="Email address"
-                    value={mechEmail}
-                    onChange={e => setMechEmail(e.target.value)}
-                    className="w-full bg-card border border-border rounded-xl px-4 h-12 text-sm text-foreground placeholder:text-muted focus:outline-none focus:border-torqued-red"
-                  />
-                  <input
-                    type="password"
-                    placeholder="Password"
-                    value={mechPassword}
-                    onChange={e => setMechPassword(e.target.value)}
-                    className="w-full bg-card border border-border rounded-xl px-4 h-12 text-sm text-foreground placeholder:text-muted focus:outline-none focus:border-torqued-red"
-                  />
-                </div>
 
-                {mechAuthError && (
-                  <p className="text-xs text-torqued-red font-bold">{mechAuthError}</p>
-                )}
-
-                {mechAuthMode === 'login' && (
                   <div className="text-right -mt-1">
                     <button
                       type="button"
@@ -4496,78 +4476,172 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                       Forgot password?
                     </button>
                   </div>
-                )}
-                {mechResendMsg && <p className="text-xs text-emerald-500 font-bold">{mechResendMsg}</p>}
+                  {mechResendMsg && <p className="text-xs text-emerald-500 font-bold">{mechResendMsg}</p>}
 
-                <Button
-                  fullWidth
-                  size="lg"
-                  disabled={mechAuthLoading}
-                  className="bg-torqued-red hover:bg-red-700 text-white font-black uppercase text-xs tracking-widest h-14"
-                  onClick={async () => {
-                    setMechAuthError(null);
-                    setMechAuthLoading(true);
-                    try {
-                      if (mechAuthMode === 'login') {
+                  <Button
+                    fullWidth
+                    size="lg"
+                    disabled={mechAuthLoading}
+                    className="bg-torqued-red hover:bg-red-700 text-white font-black uppercase text-xs tracking-widest h-14"
+                    onClick={async () => {
+                      setMechAuthError(null);
+                      setMechAuthLoading(true);
+                      try {
                         await loginMechanic(mechEmail, mechPassword);
                         // Offer a passkey only if this account doesn't already have one.
                         if (passkeysSupported() && mechEmail && !(await hasPasskey('mechanic', mechEmail)) && window.confirm('Set up a passkey for faster sign-in? You\'ll use passkey instead of your password next time.')) {
                           try { await registerPasskey('mechanic', mechEmail); window.alert('Passkey added.'); } catch {}
                         }
-                      } else {
+                      } catch (e: any) {
+                        setMechAuthError(e.message || 'Authentication failed');
+                      } finally {
+                        setMechAuthLoading(false);
+                      }
+                    }}
+                  >
+                    {mechAuthLoading ? 'Please wait...' : 'Log In'}
+                  </Button>
+
+                  {passkeysSupported() && (
+                    <button
+                      onClick={async () => {
+                        setMechAuthError(null); setMechAuthLoading(true);
+                        try {
+                          const r = await authPasskey('mechanic', mechEmail || undefined);
+                          if (!r.tokenHash) throw new Error('Could not establish session — use password.');
+                          const { error } = await supabase.auth.verifyOtp({ type: 'magiclink', token_hash: r.tokenHash });
+                          if (error) throw new Error(error.message);
+                          // AuthContext picks up the session via onAuthStateChange
+                        } catch (e: any) {
+                          setMechAuthError(e?.message || 'Passkey sign-in failed');
+                        } finally { setMechAuthLoading(false); }
+                      }}
+                      className="w-full text-xs font-bold text-muted hover:text-foreground border border-border rounded-xl h-12 flex items-center justify-center gap-2"
+                    >
+                      <span aria-hidden>🔑</span> Sign in with passkey
+                    </button>
+                  )}
+                </div>
+              )}
+
+              {onBack && (
+                <button
+                  className="text-[10px] font-bold text-white/40 hover:text-white tracking-widest uppercase block mx-auto pt-2"
+                  onClick={onBack}
+                >
+                  ← Back to Landing Page
+                </button>
+              )}
+            </motion.div>
+
+            {!mechSignupSent && (
+              <motion.div
+                initial={{ opacity: 0, y: 30 }}
+                animate={{ opacity: 1, y: 0 }}
+                transition={{ delay: 0.1 }}
+                className="w-full bg-card border border-border rounded-3xl p-6 sm:p-8 text-center space-y-3"
+              >
+                <h3 className="text-xl sm:text-2xl font-black tracking-tight text-foreground">Join Torqued.</h3>
+                <p className="text-sm text-muted">Reclaim your time.</p>
+                <Button
+                  fullWidth
+                  className="bg-torqued-red hover:bg-red-700 text-white"
+                  onClick={() => { setMechAuthError(null); setShowSignupModal(true); }}
+                >
+                  Sign Up
+                </Button>
+              </motion.div>
+            )}
+          </div>
+        </main>
+
+        {/* Workshop signup popup */}
+        <AnimatePresence>
+          {showSignupModal && (
+            <div className="fixed inset-0 z-[110] flex items-center justify-center p-4 overflow-y-auto bg-black/80">
+              <motion.div
+                initial={{ opacity: 0 }}
+                animate={{ opacity: 1 }}
+                exit={{ opacity: 0 }}
+                onClick={() => setShowSignupModal(false)}
+                className="absolute inset-0 bg-background/50 backdrop-blur-sm"
+              />
+              <motion.div
+                initial={{ opacity: 0, scale: 0.95, y: 30 }}
+                animate={{ opacity: 1, scale: 1, y: 0 }}
+                exit={{ opacity: 0, scale: 0.95, y: 30 }}
+                className="relative w-full max-w-md bg-card border border-border shadow-2xl rounded-3xl p-6 sm:p-8 space-y-5"
+              >
+                <div className="space-y-1.5 text-left">
+                  <h3 className="text-2xl font-black tracking-tight text-foreground">Join Torqued</h3>
+                  <p className="text-sm text-muted">Set up your workshop account — you'll verify your workshop email next.</p>
+                </div>
+
+                <div className="space-y-3 text-left">
+                  <input
+                    type="text"
+                    placeholder="Workshop / Business Name"
+                    value={mechName}
+                    onChange={e => setMechName(e.target.value)}
+                    className="w-full bg-background border border-border rounded-xl px-4 h-12 text-sm text-foreground placeholder:text-muted focus:outline-none focus:border-torqued-red"
+                  />
+                  <input
+                    type="email"
+                    placeholder="Email address"
+                    value={mechEmail}
+                    onChange={e => setMechEmail(e.target.value)}
+                    className="w-full bg-background border border-border rounded-xl px-4 h-12 text-sm text-foreground placeholder:text-muted focus:outline-none focus:border-torqued-red"
+                  />
+                  <input
+                    type="password"
+                    placeholder="Password"
+                    value={mechPassword}
+                    onChange={e => setMechPassword(e.target.value)}
+                    className="w-full bg-background border border-border rounded-xl px-4 h-12 text-sm text-foreground placeholder:text-muted focus:outline-none focus:border-torqued-red"
+                  />
+                </div>
+
+                {mechAuthError && (
+                  <p className="text-xs text-torqued-red font-bold">{mechAuthError}</p>
+                )}
+
+                <div className="flex gap-3">
+                  <Button variant="outline" className="border-border text-foreground" onClick={() => setShowSignupModal(false)}>Cancel</Button>
+                  <Button
+                    fullWidth
+                    disabled={mechAuthLoading}
+                    className="bg-torqued-red hover:bg-red-700 text-white font-black uppercase text-xs tracking-widest h-12"
+                    onClick={async () => {
+                      setMechAuthError(null);
+                      setMechAuthLoading(true);
+                      try {
                         const result = await signUpMechanic(mechEmail, mechPassword, mechName);
                         if (result.error) setMechAuthError(result.error);
-                        else if (result.needsConfirmation) setMechSignupSent(true);
-                      }
-                    } catch (e: any) {
-                      setMechAuthError(e.message || 'Authentication failed');
-                    } finally {
-                      setMechAuthLoading(false);
-                    }
-                  }}
-                >
-                  {mechAuthLoading ? 'Please wait...' : mechAuthMode === 'login' ? 'Log In' : 'Create Account'}
-                </Button>
-
-                {mechAuthMode === 'login' && passkeysSupported() && (
-                  <button
-                    onClick={async () => {
-                      setMechAuthError(null); setMechAuthLoading(true);
-                      try {
-                        const r = await authPasskey('mechanic', mechEmail || undefined);
-                        if (!r.tokenHash) throw new Error('Could not establish session — use password.');
-                        const { error } = await supabase.auth.verifyOtp({ type: 'magiclink', token_hash: r.tokenHash });
-                        if (error) throw new Error(error.message);
-                        // AuthContext picks up the session via onAuthStateChange
+                        else if (result.needsConfirmation) { setShowSignupModal(false); setMechSignupSent(true); }
                       } catch (e: any) {
-                        setMechAuthError(e?.message || 'Passkey sign-in failed');
-                      } finally { setMechAuthLoading(false); }
+                        setMechAuthError(e.message || 'Authentication failed');
+                      } finally {
+                        setMechAuthLoading(false);
+                      }
                     }}
-                    className="w-full text-xs font-bold text-muted hover:text-foreground border border-border rounded-xl h-12 flex items-center justify-center gap-2"
                   >
-                    <span aria-hidden>🔑</span> Sign in with passkey
-                  </button>
-                )}
-              </div>
-            )}
-
-            {onBack && (
-              <button
-                className="text-[10px] font-bold text-white/40 hover:text-white tracking-widest uppercase block mx-auto pt-2"
-                onClick={onBack}
-              >
-                ← Back to Landing Page
-              </button>
-            )}
-          </motion.div>
-        </main>
+                    {mechAuthLoading ? 'Please wait...' : 'Create Account'}
+                  </Button>
+                </div>
+              </motion.div>
+            </div>
+          )}
+        </AnimatePresence>
       </div>
     );
   }
 
   // New signups land here after signing the onboarding agreement, until an admin
   // reviews and approves the account — no Stripe/paywall step until then.
-  if (userProfile?.reviewStatus !== 'approved') {
+  // Only gate on an EXPLICIT pending/rejected status — missing/undefined (accounts
+  // created before this column existed, or before migration 050 has been run) must
+  // never be treated as "not approved", or every existing mechanic gets locked out.
+  if (userProfile?.reviewStatus === 'pending' || userProfile?.reviewStatus === 'rejected') {
     return (
       <div className="min-h-screen bg-background text-foreground flex flex-col">
         <nav className="p-4 md:px-8 flex justify-between items-center bg-background/80 border-b border-border backdrop-blur-sm">
