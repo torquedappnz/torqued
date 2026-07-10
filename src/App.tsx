@@ -2,13 +2,15 @@ import React, { useState, useEffect, useCallback } from 'react';
 import { Landing } from './views/Landing';
 import { CustomerPortal } from './views/CustomerPortal';
 import { MechanicPortal } from './views/MechanicPortal';
+import { MechanicDemo } from './views/MechanicDemo';
 import { AdminPortal } from './views/AdminPortal';
 import { useAuth } from './context/AuthContext';
 
-type View = 'landing' | 'customer' | 'mechanic' | 'admin';
+type View = 'landing' | 'customer' | 'mechanic' | 'mechanic-demo' | 'admin';
 
 function pathToView(path: string): View | null {
   if (path.startsWith('/customer')) return 'customer';
+  if (path.startsWith('/mechanic-demo')) return 'mechanic-demo';
   if (path.startsWith('/mechanic')) return 'mechanic';
   if (path.startsWith('/admin')) return 'admin';
   if (path === '/' || path === '') return 'landing';
@@ -70,6 +72,8 @@ export default function App() {
         return <CustomerPortal onBack={() => navigateTo('landing')} />;
       case 'mechanic':
         return <MechanicPortal onBack={() => navigateTo('landing')} />;
+      case 'mechanic-demo':
+        return <MechanicDemo onBack={() => navigateTo('landing')} />;
       case 'admin':
         return <AdminPortal onBack={() => navigateTo('landing')} />;
       default:
