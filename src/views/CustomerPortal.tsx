@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
-import { Search, MapPin, ChevronRight, Info, Lock, CheckCircle2, Star, Calendar, CreditCard, Car, History, Wrench, AlertTriangle, Plus, Edit2, ArrowLeft, Clock, Sun, Moon, Monitor, Download, Ticket, Mail, Send, Smartphone, X, Upload, Sparkles, Camera, Settings, Trash2 } from 'lucide-react';
+import { Search, MapPin, ChevronRight, Info, Lock, CheckCircle2, Star, Calendar, CreditCard, Car, History, Wrench, AlertTriangle, Plus, Edit2, ArrowLeft, Clock, Sun, Moon, Monitor, Download, Ticket, Mail, Send, Smartphone, X, Upload, Sparkles, Camera, Settings, Trash2, Repeat } from 'lucide-react';
 import { jsPDF } from 'jspdf';
 import { Logo } from '../components/Logo';
 import { Button } from '../components/Button';
@@ -4831,12 +4831,12 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                   <label className="text-[11px] font-black uppercase tracking-widest text-muted block">Direct Secure Payments (Via Stripe)</label>
                   <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
                     {[
-                      { name: 'Credit or Debit Card', icon: <CreditCard size={18} />, color: 'bg-blue-600', internalName: 'Credit or Debit Card' },
-                      { name: 'Afterpay', icon: <span className="text-[10px] font-black italic leading-none">ap</span>, color: 'bg-emerald-400', internalName: 'Afterpay' },
-                      { name: 'Klarna', icon: <span className="text-[10px] font-black italic leading-none">K.</span>, color: 'bg-pink-400', internalName: 'Klarna' },
+                      { name: 'Credit or Debit Card', label: 'Credit or Debit Card', icon: <CreditCard size={18} />, color: 'bg-blue-600', internalName: 'Credit or Debit Card' },
+                      { name: 'Afterpay', label: 'Pay in 4 Today', icon: <Repeat size={20} strokeWidth={2.5} />, color: 'bg-[#B2FCE4]', iconText: 'text-black', internalName: 'Afterpay' },
+                      { name: 'Klarna', label: 'Pay in 4 Today', icon: <span className="text-base font-black italic leading-none">K.</span>, color: 'bg-[#FFB3C7]', iconText: 'text-black', internalName: 'Klarna' },
                     ].map(method => (
-                      <button 
-                        key={method.name} 
+                      <button
+                        key={method.name}
                         type="button"
                         onClick={() => setPaymentMethod(method.internalName)}
                         className={cn(
@@ -4845,40 +4845,14 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                         )}
                       >
                         <div className={cn(
-                          "w-10 h-10 rounded-xl flex items-center justify-center shadow-lg transition-transform group-hover:scale-110",
-                          paymentMethod === method.internalName ? "bg-white text-torqued-red" : `${method.color} text-white`
+                          "w-12 h-12 rounded-2xl flex items-center justify-center shadow-lg transition-transform group-hover:scale-110",
+                          paymentMethod === method.internalName ? "bg-white text-torqued-red" : `${method.color} ${method.iconText || 'text-white'}`
                         )}>
                           {method.icon}
                         </div>
-                        <span className="text-[10px] font-black uppercase tracking-tight text-center">{method.name}</span>
+                        <span className="text-[10px] font-black uppercase tracking-tight text-center">{method.label}</span>
                         {paymentMethod === method.internalName && <div className="absolute top-2 right-2"><CheckCircle2 size={12} /></div>}
                       </button>
-                    ))}
-                  </div>
-                </div>
-
-                <div className="space-y-3 pt-2">
-                  <label className="text-[11px] font-black uppercase tracking-widest text-muted block">Financing Options</label>
-                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-                    {[
-                      { name: 'Finance Now', icon: <span className="text-[10px] font-black leading-none">FN</span> },
-                      { name: 'Latitude', icon: <span className="text-[10px] font-black leading-none">L</span> },
-                      { name: 'Q Card', icon: <span className="text-[10px] font-black leading-none">Q</span> },
-                    ].map(method => (
-                      <div 
-                        key={method.name} 
-                        className="p-5 border border-dashed border-border/80 bg-background/30 rounded-2xl flex flex-col items-center justify-center gap-2.5 relative select-none opacity-50 cursor-not-allowed"
-                      >
-                        <div className="w-10 h-10 rounded-xl flex items-center justify-center text-muted border border-border bg-muted/20">
-                          {method.icon}
-                        </div>
-                        <div className="text-center">
-                          <p className="text-[10px] font-bold uppercase tracking-tight text-muted">{method.name}</p>
-                          <span className="inline-block mt-1 text-[8px] bg-foreground/10 text-muted px-1.5 py-0.5 rounded font-black uppercase tracking-widest leading-none">
-                            Coming Soon
-                          </span>
-                        </div>
-                      </div>
                     ))}
                   </div>
                 </div>
