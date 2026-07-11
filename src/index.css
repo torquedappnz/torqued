@@ -65,7 +65,7 @@ html[data-display-type="oled"] .dark {
   }
   
   h1, h2, h3, h4, h5, h6 {
-    font-family: "Syne", sans-serif;
+    font-family: "Raleway", sans-serif;
     @apply font-black uppercase tracking-tighter text-foreground;
   }
 
