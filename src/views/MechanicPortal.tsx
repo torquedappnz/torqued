@@ -504,8 +504,8 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
     doc.setFont('Helvetica', 'bold'); doc.text('CUSTOMER', 85, 44);
     doc.setFont('Helvetica', 'normal');
     const custName = job.customer_name && job.customer_name !== job.vehicle_rego ? job.customer_name : '';
-    const custEmail = job.email || job.customer_email || '';
-    const custPhone = job.customer_phone || '';
+    const custEmail = job.email || '';
+    const custPhone = job.customer_phone || qi.customerPhone || '';
     let cy = 50;
     if (custName) { doc.text(custName, 85, cy); cy += 5; }
     if (custEmail) { doc.text(custEmail, 85, cy); cy += 5; }
@@ -514,7 +514,7 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
     doc.setFont('Helvetica', 'bold'); doc.text('VEHICLE', 155, 44);
     doc.setFont('Helvetica', 'normal');
     const rego = job.vehicle_rego || '';
-    const vehicleDesc = job.vehicle_label || (job.vehicle_make ? `${job.vehicle_year ? job.vehicle_year + ' ' : ''}${job.vehicle_make}${job.vehicle_model ? ' ' + job.vehicle_model : ''}`.trim() : '');
+    const vehicleDesc = job.vehicle_label || (job.vehicle_make ? `${job.vehicle_year ? job.vehicle_year + ' ' : ''}${job.vehicle_make}${job.vehicle_model ? ' ' + job.vehicle_model : ''}`.trim() : '') || qi.vehicleLabel || '';
     if (vehicleDesc) { doc.text(vehicleDesc, 155, 50); doc.text(rego, 155, 55); }
     else if (rego) { doc.text(rego, 155, 50); }
     if (job.mileage_in) doc.text(`${Number(job.mileage_in).toLocaleString()} km`, 155, vehicleDesc ? 60 : 55);

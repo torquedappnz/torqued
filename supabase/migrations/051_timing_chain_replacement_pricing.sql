@@ -1,0 +1,106 @@
+-- ============================================================
+-- TORQUED — Migration 051: Full Timing Chain Replacement pricing (chain engines)
+-- Chain-driven engines have no scheduled cambelt interval, so the customer flow
+-- has always shown them a "Quote · ~1 hr" diagnostic pathway with no priced
+-- replacement option. This seeds engine-family-specific NZ GST-INCLUSIVE pricing
+-- for a FULL timing chain job so chain cars can be offered a concrete price in
+-- addition to the diagnostic quote.
+--
+-- Scope of the job (per NZ workshop practice, reflected in the price): timing
+-- chain(s) + guides + tensioner + sprockets + camshaft/crankshaft oil seals +
+-- timing cover gasket + other seals/gaskets + accessory/serpentine belt.
+--
+-- Uses the existing 'timing_chain_replacement' part_categories slug (migration
+-- 037). total_job = parts (GST-incl) + hours_high * 130 (platform ref rate),
+-- matching the ef_parts_data convention; the endpoint re-derives parts at the
+-- mechanic's own labour rate. Tier + cylinder-count + fuel scaled. confidence=2
+-- (chain-job labour varies by engine access — estimate, refine on inspection).
+--
+-- REQUIRES companion server.ts change: EF_SLUG_TO_SVC must map
+-- 'timing_chain_replacement' -> 'timing_chain_full' (a NEW service id, distinct
+-- from 'timing' so chain cars keep BOTH the diagnostic quote and this priced
+-- full-replacement option). Idempotent (ON CONFLICT DO NOTHING).
+-- ============================================================
+
+-- Timing chain — full replacement (chain families) -> category 'timing_chain_replacement'
+INSERT INTO ef_parts_data (engine_family_id, category_id, total_job_low, total_job_high, hours_low, hours_high, source_anchor, confidence, notes)
+SELECT v.* FROM (VALUES
+  ('AUDI_30_TDI_V6', (SELECT id FROM part_categories WHERE slug='timing_chain_replacement'), 3835, 4820, 17.5, 20, 'moat_nz_gst_incl', 2, 'Chain+guides+tensioner+sprockets+cam/crank seals+timing cover gasket+accessory belt; luxury V6/V8 diesel; NZ GST-incl'),
+  ('BMW_B47_20_DIESEL', (SELECT id FROM part_categories WHERE slug='timing_chain_replacement'), 3360, 4145, 12.5, 18.5, 'moat_nz_gst_incl', 2, 'Chain+guides+tensioner+sprockets+cam/crank seals+timing cover gasket+accessory belt; luxury diesel; NZ GST-incl'),
+  ('BMW_B48_20_TURBO', (SELECT id FROM part_categories WHERE slug='timing_chain_replacement'), 2875, 3540, 11.0, 16.0, 'moat_nz_gst_incl', 2, 'Chain+guides+tensioner+sprockets+cam/crank seals+timing cover gasket+accessory belt; luxury; NZ GST-incl'),
+  ('BMW_N20_20_TURBO', (SELECT id FROM part_categories WHERE slug='timing_chain_replacement'), 2875, 3540, 11.0, 16.0, 'moat_nz_gst_incl', 2, 'Chain+guides+tensioner+sprockets+cam/crank seals+timing cover gasket+accessory belt; luxury; NZ GST-incl'),
+  ('DAI_KF_KEI', (SELECT id FROM part_categories WHERE slug='timing_chain_replacement'), 1280, 1590, 5.0, 7.0, 'moat_nz_gst_incl', 2, 'Chain+guides+tensioner+sprockets+cam/crank seals+timing cover gasket+accessory belt; economy; NZ GST-incl'),
+  ('FORD_BARRA_40_I6', (SELECT id FROM part_categories WHERE slug='timing_chain_replacement'), 2225, 2715, 8.5, 12.5, 'moat_nz_gst_incl', 2, 'Chain+guides+tensioner+sprockets+cam/crank seals+timing cover gasket+accessory belt; mid V6/V8; NZ GST-incl'),
+  ('FORD_YN2S_20_BITURBO', (SELECT id FROM part_categories WHERE slug='timing_chain_replacement'), 2575, 3195, 9.0, 14.0, 'moat_nz_gst_incl', 2, 'Chain+guides+tensioner+sprockets+cam/crank seals+timing cover gasket+accessory belt; premium diesel; NZ GST-incl'),
+  ('GWM_4N20_20_TURBO', (SELECT id FROM part_categories WHERE slug='timing_chain_replacement'), 1645, 2040, 6.0, 9.0, 'moat_nz_gst_incl', 2, 'Chain+guides+tensioner+sprockets+cam/crank seals+timing cover gasket+accessory belt; mid; NZ GST-incl'),
+  ('HKM_D4HA_20_DIESEL', (SELECT id FROM part_categories WHERE slug='timing_chain_replacement'), 1935, 2400, 7.0, 10.5, 'moat_nz_gst_incl', 2, 'Chain+guides+tensioner+sprockets+cam/crank seals+timing cover gasket+accessory belt; mid diesel; NZ GST-incl'),
+  ('HKM_G4FG_G4NA_CHAIN', (SELECT id FROM part_categories WHERE slug='timing_chain_replacement'), 1280, 1590, 5.0, 7.0, 'moat_nz_gst_incl', 2, 'Chain+guides+tensioner+sprockets+cam/crank seals+timing cover gasket+accessory belt; economy; NZ GST-incl'),
+  ('HKM_LAMBDA_V6', (SELECT id FROM part_categories WHERE slug='timing_chain_replacement'), 3010, 3660, 11.0, 17.0, 'moat_nz_gst_incl', 2, 'Chain+guides+tensioner+sprockets+cam/crank seals+timing cover gasket+accessory belt; premium V6/V8; NZ GST-incl'),
+  ('HKM_SMARTSTREAM_16_HYBRID', (SELECT id FROM part_categories WHERE slug='timing_chain_replacement'), 1645, 2040, 6.0, 9.0, 'moat_nz_gst_incl', 2, 'Chain+guides+tensioner+sprockets+cam/crank seals+timing cover gasket+accessory belt; hybrid; NZ GST-incl'),
+  ('HKM_THETA_II_20_24', (SELECT id FROM part_categories WHERE slug='timing_chain_replacement'), 1645, 2040, 6.0, 9.0, 'moat_nz_gst_incl', 2, 'Chain+guides+tensioner+sprockets+cam/crank seals+timing cover gasket+accessory belt; mid; NZ GST-incl'),
+  ('HOL_ALLOYTEC_36_V6', (SELECT id FROM part_categories WHERE slug='timing_chain_replacement'), 2225, 2715, 8.5, 12.5, 'moat_nz_gst_incl', 2, 'Chain+guides+tensioner+sprockets+cam/crank seals+timing cover gasket+accessory belt; mid V6/V8; NZ GST-incl'),
+  ('HOL_ECOTEC_38_V6', (SELECT id FROM part_categories WHERE slug='timing_chain_replacement'), 2225, 2715, 8.5, 12.5, 'moat_nz_gst_incl', 2, 'Chain+guides+tensioner+sprockets+cam/crank seals+timing cover gasket+accessory belt; mid V6/V8; NZ GST-incl'),
+  ('HOL_LS_V8', (SELECT id FROM part_categories WHERE slug='timing_chain_replacement'), 3010, 3660, 11.0, 17.0, 'moat_nz_gst_incl', 2, 'Chain+guides+tensioner+sprockets+cam/crank seals+timing cover gasket+accessory belt; premium V6/V8; NZ GST-incl'),
+  ('HON_K20_20', (SELECT id FROM part_categories WHERE slug='timing_chain_replacement'), 1645, 2040, 6.0, 9.0, 'moat_nz_gst_incl', 2, 'Chain+guides+tensioner+sprockets+cam/crank seals+timing cover gasket+accessory belt; mid; NZ GST-incl'),
+  ('HON_K24_24', (SELECT id FROM part_categories WHERE slug='timing_chain_replacement'), 1645, 2040, 6.0, 9.0, 'moat_nz_gst_incl', 2, 'Chain+guides+tensioner+sprockets+cam/crank seals+timing cover gasket+accessory belt; mid; NZ GST-incl'),
+  ('HON_L13_L15_13_15', (SELECT id FROM part_categories WHERE slug='timing_chain_replacement'), 1280, 1590, 5.0, 7.0, 'moat_nz_gst_incl', 2, 'Chain+guides+tensioner+sprockets+cam/crank seals+timing cover gasket+accessory belt; economy; NZ GST-incl'),
+  ('HON_L15B_15T', (SELECT id FROM part_categories WHERE slug='timing_chain_replacement'), 1645, 2040, 6.0, 9.0, 'moat_nz_gst_incl', 2, 'Chain+guides+tensioner+sprockets+cam/crank seals+timing cover gasket+accessory belt; mid; NZ GST-incl'),
+  ('HON_LDA_IMA_HYBRID', (SELECT id FROM part_categories WHERE slug='timing_chain_replacement'), 1645, 2040, 6.0, 9.0, 'moat_nz_gst_incl', 2, 'Chain+guides+tensioner+sprockets+cam/crank seals+timing cover gasket+accessory belt; hybrid; NZ GST-incl'),
+  ('HON_LEB_15_IDCD_HYBRID', (SELECT id FROM part_categories WHERE slug='timing_chain_replacement'), 1645, 2040, 6.0, 9.0, 'moat_nz_gst_incl', 2, 'Chain+guides+tensioner+sprockets+cam/crank seals+timing cover gasket+accessory belt; hybrid; NZ GST-incl'),
+  ('HON_R18A_18', (SELECT id FROM part_categories WHERE slug='timing_chain_replacement'), 1280, 1590, 5.0, 7.0, 'moat_nz_gst_incl', 2, 'Chain+guides+tensioner+sprockets+cam/crank seals+timing cover gasket+accessory belt; economy; NZ GST-incl'),
+  ('ISU_4JJ1_30_DIESEL', (SELECT id FROM part_categories WHERE slug='timing_chain_replacement'), 1935, 2400, 7.0, 10.5, 'moat_nz_gst_incl', 2, 'Chain+guides+tensioner+sprockets+cam/crank seals+timing cover gasket+accessory belt; mid diesel; NZ GST-incl'),
+  ('LDV_MAXUS_DIESEL', (SELECT id FROM part_categories WHERE slug='timing_chain_replacement'), 1935, 2400, 7.0, 10.5, 'moat_nz_gst_incl', 2, 'Chain+guides+tensioner+sprockets+cam/crank seals+timing cover gasket+accessory belt; mid diesel; NZ GST-incl'),
+  ('LEX_2GRFSE_35_D4S', (SELECT id FROM part_categories WHERE slug='timing_chain_replacement'), 3610, 4430, 15.5, 20, 'moat_nz_gst_incl', 2, 'Chain+guides+tensioner+sprockets+cam/crank seals+timing cover gasket+accessory belt; luxury V6/V8; NZ GST-incl'),
+  ('LEX_2URGSE_50_V8', (SELECT id FROM part_categories WHERE slug='timing_chain_replacement'), 3610, 4430, 15.5, 20, 'moat_nz_gst_incl', 2, 'Chain+guides+tensioner+sprockets+cam/crank seals+timing cover gasket+accessory belt; luxury V6/V8; NZ GST-incl'),
+  ('MAZ_SKYACTIVD_22', (SELECT id FROM part_categories WHERE slug='timing_chain_replacement'), 1935, 2400, 7.0, 10.5, 'moat_nz_gst_incl', 2, 'Chain+guides+tensioner+sprockets+cam/crank seals+timing cover gasket+accessory belt; mid diesel; NZ GST-incl'),
+  ('MAZ_SKYACTIVG_15', (SELECT id FROM part_categories WHERE slug='timing_chain_replacement'), 1280, 1590, 5.0, 7.0, 'moat_nz_gst_incl', 2, 'Chain+guides+tensioner+sprockets+cam/crank seals+timing cover gasket+accessory belt; economy; NZ GST-incl'),
+  ('MAZ_SKYACTIVG_20', (SELECT id FROM part_categories WHERE slug='timing_chain_replacement'), 1645, 2040, 6.0, 9.0, 'moat_nz_gst_incl', 2, 'Chain+guides+tensioner+sprockets+cam/crank seals+timing cover gasket+accessory belt; mid; NZ GST-incl'),
+  ('MAZ_SKYACTIVG_25', (SELECT id FROM part_categories WHERE slug='timing_chain_replacement'), 1645, 2040, 6.0, 9.0, 'moat_nz_gst_incl', 2, 'Chain+guides+tensioner+sprockets+cam/crank seals+timing cover gasket+accessory belt; mid; NZ GST-incl'),
+  ('MAZ_ZY_VE_15', (SELECT id FROM part_categories WHERE slug='timing_chain_replacement'), 1280, 1590, 5.0, 7.0, 'moat_nz_gst_incl', 2, 'Chain+guides+tensioner+sprockets+cam/crank seals+timing cover gasket+accessory belt; economy; NZ GST-incl'),
+  ('MB_M271_18_FORCED', (SELECT id FROM part_categories WHERE slug='timing_chain_replacement'), 2875, 3540, 11.0, 16.0, 'moat_nz_gst_incl', 2, 'Chain+guides+tensioner+sprockets+cam/crank seals+timing cover gasket+accessory belt; luxury; NZ GST-incl'),
+  ('MB_M274_20_TURBO', (SELECT id FROM part_categories WHERE slug='timing_chain_replacement'), 2875, 3540, 11.0, 16.0, 'moat_nz_gst_incl', 2, 'Chain+guides+tensioner+sprockets+cam/crank seals+timing cover gasket+accessory belt; luxury; NZ GST-incl'),
+  ('MB_OM651_21_DIESEL', (SELECT id FROM part_categories WHERE slug='timing_chain_replacement'), 3360, 4145, 12.5, 18.5, 'moat_nz_gst_incl', 2, 'Chain+guides+tensioner+sprockets+cam/crank seals+timing cover gasket+accessory belt; luxury diesel; NZ GST-incl'),
+  ('MG_SAIC_15_TURBO', (SELECT id FROM part_categories WHERE slug='timing_chain_replacement'), 1280, 1590, 5.0, 7.0, 'moat_nz_gst_incl', 2, 'Chain+guides+tensioner+sprockets+cam/crank seals+timing cover gasket+accessory belt; economy; NZ GST-incl'),
+  ('MIT_3A92_3B20_10_12', (SELECT id FROM part_categories WHERE slug='timing_chain_replacement'), 1280, 1590, 5.0, 7.0, 'moat_nz_gst_incl', 2, 'Chain+guides+tensioner+sprockets+cam/crank seals+timing cover gasket+accessory belt; economy; NZ GST-incl'),
+  ('MIT_4B11_4B12_20_24', (SELECT id FROM part_categories WHERE slug='timing_chain_replacement'), 1645, 2040, 6.0, 9.0, 'moat_nz_gst_incl', 2, 'Chain+guides+tensioner+sprockets+cam/crank seals+timing cover gasket+accessory belt; mid; NZ GST-incl'),
+  ('MIT_4M41_32_DIESEL', (SELECT id FROM part_categories WHERE slug='timing_chain_replacement'), 1935, 2400, 7.0, 10.5, 'moat_nz_gst_incl', 2, 'Chain+guides+tensioner+sprockets+cam/crank seals+timing cover gasket+accessory belt; mid diesel; NZ GST-incl'),
+  ('MIT_4N15_24_DIESEL', (SELECT id FROM part_categories WHERE slug='timing_chain_replacement'), 1935, 2400, 7.0, 10.5, 'moat_nz_gst_incl', 2, 'Chain+guides+tensioner+sprockets+cam/crank seals+timing cover gasket+accessory belt; mid diesel; NZ GST-incl'),
+  ('MIT_OUTLANDER_PHEV_24', (SELECT id FROM part_categories WHERE slug='timing_chain_replacement'), 1645, 2040, 6.0, 9.0, 'moat_nz_gst_incl', 2, 'Chain+guides+tensioner+sprockets+cam/crank seals+timing cover gasket+accessory belt; hybrid; NZ GST-incl'),
+  ('NIS_HR15DE_15', (SELECT id FROM part_categories WHERE slug='timing_chain_replacement'), 1280, 1590, 5.0, 7.0, 'moat_nz_gst_incl', 2, 'Chain+guides+tensioner+sprockets+cam/crank seals+timing cover gasket+accessory belt; economy; NZ GST-incl'),
+  ('NIS_MR18DE_18', (SELECT id FROM part_categories WHERE slug='timing_chain_replacement'), 1280, 1590, 5.0, 7.0, 'moat_nz_gst_incl', 2, 'Chain+guides+tensioner+sprockets+cam/crank seals+timing cover gasket+accessory belt; economy; NZ GST-incl'),
+  ('NIS_MR20DE_20', (SELECT id FROM part_categories WHERE slug='timing_chain_replacement'), 1645, 2040, 6.0, 9.0, 'moat_nz_gst_incl', 2, 'Chain+guides+tensioner+sprockets+cam/crank seals+timing cover gasket+accessory belt; mid; NZ GST-incl'),
+  ('NIS_QR25DE_25', (SELECT id FROM part_categories WHERE slug='timing_chain_replacement'), 1645, 2040, 6.0, 9.0, 'moat_nz_gst_incl', 2, 'Chain+guides+tensioner+sprockets+cam/crank seals+timing cover gasket+accessory belt; mid; NZ GST-incl'),
+  ('NIS_SR20_20', (SELECT id FROM part_categories WHERE slug='timing_chain_replacement'), 1645, 2040, 6.0, 9.0, 'moat_nz_gst_incl', 2, 'Chain+guides+tensioner+sprockets+cam/crank seals+timing cover gasket+accessory belt; mid; NZ GST-incl'),
+  ('NIS_VK56_56_V8', (SELECT id FROM part_categories WHERE slug='timing_chain_replacement'), 3010, 3660, 11.0, 17.0, 'moat_nz_gst_incl', 2, 'Chain+guides+tensioner+sprockets+cam/crank seals+timing cover gasket+accessory belt; premium V6/V8; NZ GST-incl'),
+  ('NIS_VQ25_VQ30_V6', (SELECT id FROM part_categories WHERE slug='timing_chain_replacement'), 3010, 3660, 11.0, 17.0, 'moat_nz_gst_incl', 2, 'Chain+guides+tensioner+sprockets+cam/crank seals+timing cover gasket+accessory belt; premium V6/V8; NZ GST-incl'),
+  ('NIS_VQ35DE_35_V6', (SELECT id FROM part_categories WHERE slug='timing_chain_replacement'), 3010, 3660, 11.0, 17.0, 'moat_nz_gst_incl', 2, 'Chain+guides+tensioner+sprockets+cam/crank seals+timing cover gasket+accessory belt; premium V6/V8; NZ GST-incl'),
+  ('NIS_YD25_25_DIESEL', (SELECT id FROM part_categories WHERE slug='timing_chain_replacement'), 1935, 2400, 7.0, 10.5, 'moat_nz_gst_incl', 2, 'Chain+guides+tensioner+sprockets+cam/crank seals+timing cover gasket+accessory belt; mid diesel; NZ GST-incl'),
+  ('SUB_EZ30_EZ36_H6', (SELECT id FROM part_categories WHERE slug='timing_chain_replacement'), 3010, 3660, 11.0, 17.0, 'moat_nz_gst_incl', 2, 'Chain+guides+tensioner+sprockets+cam/crank seals+timing cover gasket+accessory belt; premium V6/V8; NZ GST-incl'),
+  ('SUB_FB20_20_CHAIN', (SELECT id FROM part_categories WHERE slug='timing_chain_replacement'), 1280, 1590, 5.0, 7.0, 'moat_nz_gst_incl', 2, 'Chain+guides+tensioner+sprockets+cam/crank seals+timing cover gasket+accessory belt; economy; NZ GST-incl'),
+  ('SUB_FB25_25_CHAIN', (SELECT id FROM part_categories WHERE slug='timing_chain_replacement'), 1645, 2040, 6.0, 9.0, 'moat_nz_gst_incl', 2, 'Chain+guides+tensioner+sprockets+cam/crank seals+timing cover gasket+accessory belt; mid; NZ GST-incl'),
+  ('SUZ_K10C_10_TURBO', (SELECT id FROM part_categories WHERE slug='timing_chain_replacement'), 1280, 1590, 5.0, 7.0, 'moat_nz_gst_incl', 2, 'Chain+guides+tensioner+sprockets+cam/crank seals+timing cover gasket+accessory belt; economy; NZ GST-incl'),
+  ('SUZ_K12B_12', (SELECT id FROM part_categories WHERE slug='timing_chain_replacement'), 1280, 1590, 5.0, 7.0, 'moat_nz_gst_incl', 2, 'Chain+guides+tensioner+sprockets+cam/crank seals+timing cover gasket+accessory belt; economy; NZ GST-incl'),
+  ('SUZ_K14_14', (SELECT id FROM part_categories WHERE slug='timing_chain_replacement'), 1645, 2040, 6.0, 9.0, 'moat_nz_gst_incl', 2, 'Chain+guides+tensioner+sprockets+cam/crank seals+timing cover gasket+accessory belt; mid; NZ GST-incl'),
+  ('SUZ_K6A_F6A_KEI', (SELECT id FROM part_categories WHERE slug='timing_chain_replacement'), 1280, 1590, 5.0, 7.0, 'moat_nz_gst_incl', 2, 'Chain+guides+tensioner+sprockets+cam/crank seals+timing cover gasket+accessory belt; economy; NZ GST-incl'),
+  ('SUZ_M16A_16', (SELECT id FROM part_categories WHERE slug='timing_chain_replacement'), 1280, 1590, 5.0, 7.0, 'moat_nz_gst_incl', 2, 'Chain+guides+tensioner+sprockets+cam/crank seals+timing cover gasket+accessory belt; economy; NZ GST-incl'),
+  ('TOY_1AZFE_20', (SELECT id FROM part_categories WHERE slug='timing_chain_replacement'), 1280, 1590, 5.0, 7.0, 'moat_nz_gst_incl', 2, 'Chain+guides+tensioner+sprockets+cam/crank seals+timing cover gasket+accessory belt; economy; NZ GST-incl'),
+  ('TOY_1GDFTV_28_DIESEL', (SELECT id FROM part_categories WHERE slug='timing_chain_replacement'), 1935, 2400, 7.0, 10.5, 'moat_nz_gst_incl', 2, 'Chain+guides+tensioner+sprockets+cam/crank seals+timing cover gasket+accessory belt; mid diesel; NZ GST-incl'),
+  ('TOY_1GRFE_40_V6', (SELECT id FROM part_categories WHERE slug='timing_chain_replacement'), 3010, 3660, 11.0, 17.0, 'moat_nz_gst_incl', 2, 'Chain+guides+tensioner+sprockets+cam/crank seals+timing cover gasket+accessory belt; premium V6/V8; NZ GST-incl'),
+  ('TOY_1KRFE_10', (SELECT id FROM part_categories WHERE slug='timing_chain_replacement'), 1280, 1590, 5.0, 7.0, 'moat_nz_gst_incl', 2, 'Chain+guides+tensioner+sprockets+cam/crank seals+timing cover gasket+accessory belt; economy; NZ GST-incl'),
+  ('TOY_1NR_2NR_13_15', (SELECT id FROM part_categories WHERE slug='timing_chain_replacement'), 1280, 1590, 5.0, 7.0, 'moat_nz_gst_incl', 2, 'Chain+guides+tensioner+sprockets+cam/crank seals+timing cover gasket+accessory belt; economy; NZ GST-incl'),
+  ('TOY_1NZFE_15', (SELECT id FROM part_categories WHERE slug='timing_chain_replacement'), 1280, 1590, 5.0, 7.0, 'moat_nz_gst_incl', 2, 'Chain+guides+tensioner+sprockets+cam/crank seals+timing cover gasket+accessory belt; economy; NZ GST-incl'),
+  ('TOY_1NZFXE_15_HYBRID', (SELECT id FROM part_categories WHERE slug='timing_chain_replacement'), 1645, 2040, 6.0, 9.0, 'moat_nz_gst_incl', 2, 'Chain+guides+tensioner+sprockets+cam/crank seals+timing cover gasket+accessory belt; hybrid; NZ GST-incl'),
+  ('TOY_1ZRFE_16', (SELECT id FROM part_categories WHERE slug='timing_chain_replacement'), 1280, 1590, 5.0, 7.0, 'moat_nz_gst_incl', 2, 'Chain+guides+tensioner+sprockets+cam/crank seals+timing cover gasket+accessory belt; economy; NZ GST-incl'),
+  ('TOY_2ARFE_25', (SELECT id FROM part_categories WHERE slug='timing_chain_replacement'), 1645, 2040, 6.0, 9.0, 'moat_nz_gst_incl', 2, 'Chain+guides+tensioner+sprockets+cam/crank seals+timing cover gasket+accessory belt; mid; NZ GST-incl'),
+  ('TOY_2ARFXE_25_HYBRID', (SELECT id FROM part_categories WHERE slug='timing_chain_replacement'), 1645, 2040, 6.0, 9.0, 'moat_nz_gst_incl', 2, 'Chain+guides+tensioner+sprockets+cam/crank seals+timing cover gasket+accessory belt; hybrid; NZ GST-incl'),
+  ('TOY_2AZFE_24', (SELECT id FROM part_categories WHERE slug='timing_chain_replacement'), 1645, 2040, 6.0, 9.0, 'moat_nz_gst_incl', 2, 'Chain+guides+tensioner+sprockets+cam/crank seals+timing cover gasket+accessory belt; mid; NZ GST-incl'),
+  ('TOY_2GDFTV_24_DIESEL', (SELECT id FROM part_categories WHERE slug='timing_chain_replacement'), 1935, 2400, 7.0, 10.5, 'moat_nz_gst_incl', 2, 'Chain+guides+tensioner+sprockets+cam/crank seals+timing cover gasket+accessory belt; mid diesel; NZ GST-incl'),
+  ('TOY_2GRFE_35_V6', (SELECT id FROM part_categories WHERE slug='timing_chain_replacement'), 3010, 3660, 11.0, 17.0, 'moat_nz_gst_incl', 2, 'Chain+guides+tensioner+sprockets+cam/crank seals+timing cover gasket+accessory belt; premium V6/V8; NZ GST-incl'),
+  ('TOY_2NZFE_13', (SELECT id FROM part_categories WHERE slug='timing_chain_replacement'), 1280, 1590, 5.0, 7.0, 'moat_nz_gst_incl', 2, 'Chain+guides+tensioner+sprockets+cam/crank seals+timing cover gasket+accessory belt; economy; NZ GST-incl'),
+  ('TOY_2ZRFE_18', (SELECT id FROM part_categories WHERE slug='timing_chain_replacement'), 1280, 1590, 5.0, 7.0, 'moat_nz_gst_incl', 2, 'Chain+guides+tensioner+sprockets+cam/crank seals+timing cover gasket+accessory belt; economy; NZ GST-incl'),
+  ('TOY_2ZRFXE_18_HYBRID', (SELECT id FROM part_categories WHERE slug='timing_chain_replacement'), 1645, 2040, 6.0, 9.0, 'moat_nz_gst_incl', 2, 'Chain+guides+tensioner+sprockets+cam/crank seals+timing cover gasket+accessory belt; hybrid; NZ GST-incl'),
+  ('TOY_A25AFXS_25_HYBRID', (SELECT id FROM part_categories WHERE slug='timing_chain_replacement'), 1645, 2040, 6.0, 9.0, 'moat_nz_gst_incl', 2, 'Chain+guides+tensioner+sprockets+cam/crank seals+timing cover gasket+accessory belt; hybrid; NZ GST-incl'),
+  ('VW_EA111_14_TSI', (SELECT id FROM part_categories WHERE slug='timing_chain_replacement'), 1645, 2040, 6.0, 9.0, 'moat_nz_gst_incl', 2, 'Chain+guides+tensioner+sprockets+cam/crank seals+timing cover gasket+accessory belt; mid; NZ GST-incl'),
+  ('VW_EA888_20_TSI', (SELECT id FROM part_categories WHERE slug='timing_chain_replacement'), 2190, 2715, 8.0, 12.0, 'moat_nz_gst_incl', 2, 'Chain+guides+tensioner+sprockets+cam/crank seals+timing cover gasket+accessory belt; premium; NZ GST-incl')
+) AS v(engine_family_id, category_id, total_job_low, total_job_high, hours_low, hours_high, source_anchor, confidence, notes)
+ON CONFLICT (engine_family_id, category_id) DO NOTHING;

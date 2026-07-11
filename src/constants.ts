@@ -9,6 +9,7 @@ export const SERVICES: Service[] = [
   { id: 'brakes_rear_pads', name: 'Rear Brake Pads', icon: '🛑', basePrice: 0, category: 'repair' },
   { id: 'brakes_rear_rotors', name: 'Rear Rotors & Pads', icon: '🛑', basePrice: 0, category: 'repair' },
   { id: 'timing', name: 'Cambelt / Timing Chain', icon: '⚙️', basePrice: 0, category: 'maintenance' },
+  { id: 'timing_chain_full', name: 'Full Timing Chain Replacement', icon: '⛓️', basePrice: 0, category: 'repair' },
   { id: 'transmission', name: 'Transmission Service', icon: '⚙️', basePrice: 0, category: 'maintenance' },
   { id: 'battery', name: 'Battery (12V)', icon: '🔋', basePrice: 0, category: 'repair' },
   { id: 'diag_inspection', name: 'Diagnostic Inspection', icon: '🔍', basePrice: 99, category: 'inspection' },

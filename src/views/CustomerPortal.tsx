@@ -1730,7 +1730,7 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
   // Calculate total price based on selected services (per-vehicle pricing)
   const totalPrice = useMemo(() => {
     let t = selectedServices.reduce((sum, id) => sum + priceFor(id), 0);
-    if (addWaterPump && waterPump && selectedServices.includes('timing')) {
+    if (addWaterPump && waterPump && (selectedServices.includes('timing') || selectedServices.includes('timing_chain_full'))) {
       t += waterPump.high;
     }
     // Workshop fee applies to every job EXCEPT a standalone $99 diagnostic inspection.
@@ -1905,6 +1905,7 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
   const SERVICE_TO_CATEGORY_SLUG: Record<string, string> = {
     oil: 'oil_filter',
     timing: 'cambelt',
+    timing_chain_full: 'timing_chain_replacement',
     brakes_front_pads: 'front_brake_pads',
     brakes_front_rotors: 'front_rotors',
     brakes_rear_pads: 'rear_brake_pads',
@@ -2628,12 +2629,12 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
   // Typical job durations (minutes) per service
   const SERVICE_DURATIONS: Record<string, number> = {
     oil: 45, wof: 60, full: 180, brakes_front_pads: 90, brakes_front_rotors: 120,
-    brakes_rear_pads: 90, brakes_rear_rotors: 120, timing: 480, transmission: 240,
+    brakes_rear_pads: 90, brakes_rear_rotors: 120, timing: 480, timing_chain_full: 600, transmission: 240,
     battery: 30, diag_inspection: 60, spark_plugs: 90, cabin_filter: 20, brake_fluid: 60,
     coolant_flush: 60, ignition_coils: 120, water_pump: 150, thermostat_housing: 120,
   };
   // Services that usually need parts ordered in (incur the workshop's parts lead time)
-  const NEEDS_PARTS = new Set(['timing', 'transmission', 'brakes_front_rotors', 'brakes_rear_rotors', 'spark_plugs', 'ignition_coils', 'water_pump', 'thermostat_housing']);
+  const NEEDS_PARTS = new Set(['timing', 'timing_chain_full', 'transmission', 'brakes_front_rotors', 'brakes_rear_rotors', 'spark_plugs', 'ignition_coils', 'water_pump', 'thermostat_housing']);
 
   const addBusinessDays = (from: Date, days: number) => {
     const d = new Date(from);
@@ -2796,6 +2797,29 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
     // Total price is discounted on confirmation if promo code is applied
     const finalCalculatedPrice = calculatedPrice;
 
+    // Build an itemised breakdown so the invoice/quote PDF shows per-service
+    // prices (bookings otherwise persist only a single total_price). Reuses the
+    // exact per-service prices the customer just saw. vehicleLabel + customerPhone
+    // are snapshotted here because bookings store neither the vehicle make/model
+    // nor (from this flow) the phone.
+    const catalogIds = pricedServiceIds.length > 0 ? pricedServiceIds : selectedServices;
+    const catalogParts = catalogIds
+      .filter(id => id !== 'thermostat_housing')
+      .map(id => ({ name: serviceDisplayName(id, SERVICES.find(s => s.id === id)?.name || id), qty: 1, unitPrice: priceFor(id) }));
+    if (addWaterPump && waterPump && (selectedServices.includes('timing') || selectedServices.includes('timing_chain_full'))) {
+      catalogParts.push({ name: 'Water Pump & Thermostat Housing', qty: 1, unitPrice: waterPump.high });
+    }
+    const isDiagOnlyBooking = catalogIds.length === 1 && catalogIds[0] === 'diag_inspection';
+    const catalogQuoteItems = {
+      parts: catalogParts,
+      labourHours: 0,
+      labourRate: 0,
+      shopFee: (!isDiagOnlyBooking && fleetShopFee) ? fleetShopFee : 0,
+      vehicleLabel: `${vehicle?.year || ''} ${vehicle?.make || ''} ${vehicle?.model || ''}`.trim() || undefined,
+      customerPhone: userProfile?.phone || undefined,
+    };
+    const catalogCustomerName = userProfile?.name || userName || undefined;
+
     // The paid booking covers only jobs with a real instant price. Any precise-
     // quote jobs are handled by the single quote-request entry created above.
     const newJob: Job = {
@@ -2829,7 +2853,7 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
         fetch('/api/bookings/persist', {
           method: 'POST', headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
-            bookingData: { ...newJob, email: customerEmail || userProfile?.email || user?.email || null, customerName: userName || undefined },
+            bookingData: { ...newJob, email: customerEmail || userProfile?.email || user?.email || null, customerName: catalogCustomerName, customerPhone: catalogQuoteItems.customerPhone, quoteItems: catalogQuoteItems },
             userId: user?.id ?? customerOwnerId ?? null,
           }),
         }).catch(e => console.error('Failed to persist $0 booking:', e));
@@ -2854,7 +2878,7 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
             bookingId: newJob.id,
             customerEmail: customerEmail || userProfile?.email || user?.email || 'customer@torqued.nz',
             description: `Torqued Repair Booking Ref ${newJob.id}`,
-            bookingData: { ...newJob, email: customerEmail || userProfile?.email || user?.email || null, customerName: userName || undefined },
+            bookingData: { ...newJob, email: customerEmail || userProfile?.email || user?.email || null, customerName: catalogCustomerName, customerPhone: catalogQuoteItems.customerPhone, quoteItems: catalogQuoteItems },
             userId: user?.id ?? customerOwnerId ?? null,
           })
         });
@@ -2906,6 +2930,9 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
         date: newJob.date,
         total_price: newJob.totalPrice,
         deposit_paid: newJob.depositPaid ?? null,
+        customer_name: catalogCustomerName ?? null,
+        customer_phone: catalogQuoteItems.customerPhone ?? null,
+        quote_items: catalogQuoteItems,
       }, { onConflict: 'id' }).then(({ error }) => {
         if (error) console.error('Failed to persist booking:', error.message);
       });
@@ -3417,6 +3444,9 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                     if (service.id === 'thermostat_housing') return false;
                     if (service.id === 'water_pump' && !waterPumpInDB) return false;
                     if (service.id === 'differential' && !differentialApplicable) return false;
+                    // Full Timing Chain Replacement only shows for chain engines that
+                    // have a real price (migration 051); never as an unpriced quote card.
+                    if (service.id === 'timing_chain_full' && !fleetPricesRaw['timing_chain_full']) return false;
                     if (isEV) {
                       const EV_OK = new Set(['wof','brakes_front_pads','brakes_front_rotors','brakes_rear_pads','brakes_rear_rotors','diag_inspection','cabin_filter','brake_fluid','ppi']);
                       return EV_OK.has(service.id);
@@ -3599,14 +3629,14 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                   </div>
                 )}
 
-                {/* Water pump recommendation card — belt-driven VW/Audi/Skoda/Seat */}
-                {waterPumpRecommended && waterPump && selectedServices.includes('timing') && (
+                {/* Water pump recommendation card — shown alongside any timing job (cambelt or full chain) */}
+                {waterPumpRecommended && waterPump && (selectedServices.includes('timing') || selectedServices.includes('timing_chain_full')) && (
                   <div className="p-4 bg-orange-500/10 border border-orange-500/30 rounded-xl space-y-3">
                     <div className="flex items-start gap-3">
                       <AlertTriangle size={16} className="text-orange-400 mt-0.5 shrink-0" />
                       <div className="flex-1 space-y-2">
                         <p className="text-sm font-bold text-orange-500">Water Pump & Thermostat Housing strongly recommended</p>
-                        <p className="text-[11px] text-muted">On this engine the water pump is belt-driven and the thermostat housing is replaced at the same time. Doing all this while the covers are off avoids a second labour charge. Includes pump, thermostat housing, auxiliary belt, and coolant refill.</p>
+                        <p className="text-[11px] text-muted">The water pump sits behind the same timing cover, so replacing it at the same time avoids a second strip-down and labour charge. Includes pump, thermostat housing, and coolant refill.</p>
                         <div className="space-y-1 text-[10px] text-muted border-t border-orange-500/20 pt-2">
                           <div className="flex justify-between"><span>Parts (pump kit + auxiliary belt)</span><span>${waterPump.partsHigh}</span></div>
                           {(waterPump as any).coolantHigh > 0 && <div className="flex justify-between"><span>Coolant refill</span><span>${(waterPump as any).coolantHigh}</span></div>}

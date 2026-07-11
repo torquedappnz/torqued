@@ -357,8 +357,10 @@ app.post('/api/bookings/persist', async (req, res) => {
       total_price: bookingData.totalPrice || 0,
       deposit_paid: bookingData.depositPaid ?? null,
       customer_name: bookingData.customerName || null,
+      customer_phone: bookingData.customerPhone || null,
       email: bookingData.email || null,
       description: bookingData.description || null,
+      quote_items: bookingData.quoteItems ?? null,
     };
 
     if (hasDiag && hasNonDiag) {
@@ -366,7 +368,8 @@ app.post('/api/bookings/persist', async (req, res) => {
       const repairId = crypto.randomUUID();
       const diagPrice = 99;
       const repairPrice = Math.max(0, (bookingData.totalPrice || 0) - diagPrice);
-      const { error: e1 } = await supabase.from('bookings').upsert({ ...baseFields, id: diagId, service_ids: ['diag_inspection'], total_price: diagPrice, transaction_id: diagId }, { onConflict: 'id' });
+      // The itemised quote_items breakdown belongs to the repair job, not the $99 diagnostic.
+      const { error: e1 } = await supabase.from('bookings').upsert({ ...baseFields, id: diagId, service_ids: ['diag_inspection'], total_price: diagPrice, quote_items: null, transaction_id: diagId }, { onConflict: 'id' });
       if (e1) return res.status(500).json({ error: e1.message });
       const { error: e2 } = await supabase.from('bookings').upsert({ ...baseFields, id: repairId, service_ids: serviceIds.filter((s: string) => s !== 'diag_inspection'), total_price: repairPrice, transaction_id: diagId }, { onConflict: 'id' });
       if (e2) return res.status(500).json({ error: e2.message });
@@ -4137,12 +4140,14 @@ app.get('/api/fleet-prices', async (req, res) => {
             fluidIds.length
               ? supabase.from('fluid_pricing').select('fluid_id, spec, cost_per_litre_low, cost_per_litre_high').in('fluid_id', fluidIds)
               : Promise.resolve({ data: [] as any[] }),
-            supabase.from('service_schedule').select('trans_capacity_l').eq('engine_family_id', efFamilyId).maybeSingle(),
+            supabase.from('service_schedule').select('trans_capacity_l, trans_interval_km').eq('engine_family_id', efFamilyId).maybeSingle(),
           ]);
           const fluidPricingMap = new Map<string, any>((fluidPricingRows ?? []).map((r: any) => [r.fluid_id, r]));
           const oilFluid = efFluids?.oil_fluid_id ? fluidPricingMap.get(efFluids.oil_fluid_id) : null;
           const transFluid = efFluids?.trans_fluid_id ? fluidPricingMap.get(efFluids.trans_fluid_id) : null;
           const transCapacityL = Number((efSchedule as any)?.trans_capacity_l) || null;
+          // Default 60,000 km unless the DB states a lower figure (e.g. 40k on DSG/wet-clutch).
+          const transIntervalKm = Number((efSchedule as any)?.trans_interval_km) || 60000;
 
           let efLabourRate: number;
           if (mechanicId) {
@@ -4182,7 +4187,9 @@ app.get('/api/fleet-prices', async (req, res) => {
             'brake_pads_and_rotors_front': 'brakes_front_rotors',
             'cambelt_full':                'timing',
             'wet_belt_replacement':        'timing',
-            'timing_chain_replacement':    'timing',
+            // Distinct id (NOT 'timing') so chain cars keep the diagnostic-quote
+            // 'timing' card AND gain a priced full-replacement option.
+            'timing_chain_replacement':    'timing_chain_full',
             'spark_plugs':                 'spark_plugs',
             'ignition_coil':               'ignition_coils',
             'water_pump_standalone':       'water_pump',
@@ -4385,9 +4392,10 @@ app.get('/api/fleet-prices', async (req, res) => {
           // (Belt engines still get a real 'timing' price above from the
           // cambelt_full / wet_belt_replacement ef_parts_data rows.)
 
-          const wpMakesEF = ['volkswagen', 'vw', 'skoda', 'seat', 'audi', 'volvo', 'land rover', 'jaguar'];
-          const efWPRec = efTimingDrive === 'belt'
-            && wpMakesEF.some(m => (custVehicle.make || '').toLowerCase().includes(m));
+          // Recommend water pump + thermostat housing alongside ANY timing job —
+          // cambelt (belt) OR full timing chain (chain). The pump is behind the
+          // same timing cover, so doing it at the same time saves a second teardown.
+          const efWPRec = efTimingDrive === 'belt' || efTimingDrive === 'chain';
           const wpEFLabour = Math.round(1.0 * efLabourRate);
 
           // Differential fluid service — AWD/4WD only, keyed per exact matched
@@ -4421,11 +4429,18 @@ app.get('/api/fleet-prices', async (req, res) => {
             vehicleOilType: ef?.oil_spec || '',
             waterPumpRecommended: efWPRec,
             waterPumpInDB: efTimingDrive != null,
-            waterPump: efWPRec ? {
+            // Prefer the real per-engine water-pump price (water_pump_standalone
+            // ef_parts_data) when present; fall back to a generic estimate.
+            waterPump: efWPRec ? (efPrices['water_pump'] ? {
+              partsLow: efPrices['water_pump'].partsLow, partsHigh: efPrices['water_pump'].partsHigh,
+              coolantLow: 60, coolantHigh: 90, labourExtra: efPrices['water_pump'].labourHigh,
+              low: efPrices['water_pump'].low, high: efPrices['water_pump'].high,
+            } : {
               partsLow: 435, partsHigh: 660, coolantLow: 60, coolantHigh: 90,
               labourExtra: wpEFLabour,
               low: 435 + 60 + wpEFLabour, high: 660 + 90 + wpEFLabour,
-            } : null,
+            }) : null,
+            transIntervalKm,
             differentialInDB: !!diffSpec,
             differentialApplicable,
             fromEngineFamily: true,
@@ -4767,11 +4782,9 @@ app.get('/api/fleet-prices', async (req, res) => {
       prices['oil'].oilCapacityL = oilCapacity;
     }
 
-    // Water pump recommendation: true when timing_drive is 'belt' and make is VW/Skoda/Seat/Audi
-    // (belt-driven water pump engines where replacement is standard practice alongside cambelt).
-    const wpMakes = ['volkswagen', 'vw', 'skoda', 'seat', 'audi'];
-    const waterPumpRecommended = timingDrive === 'belt' &&
-      wpMakes.some(m => (custVehicle.make || '').toLowerCase().includes(m));
+    // Recommend water pump + thermostat alongside ANY timing job — cambelt (belt)
+    // OR full timing chain (chain). The pump sits behind the same timing cover.
+    const waterPumpRecommended = timingDrive === 'belt' || timingDrive === 'chain';
     // Cambelt add-on: Water Pump + Thermostat Housing + Auxiliary Belt + Coolant
     // (standalone water_pump price already includes thermostat; this add-on is the incremental
     //  cost of doing it at the same time as cambelt — labour savings vs separate job)
@@ -4789,6 +4802,7 @@ app.get('/api/fleet-prices', async (req, res) => {
         ? { partsLow: wpPartsLow, partsHigh: wpPartsHigh, coolantLow: wpCoolantLow, coolantHigh: wpCoolantHigh, labourExtra: wpLabour,
             low: wpPartsLow + wpCoolantLow + wpLabour, high: wpPartsHigh + wpCoolantHigh + wpLabour }
         : null,
+      transIntervalKm: 60000,
       // Legacy vehicle_models/parts_data path doesn't have differential-service
       // data — never show/offer it here (frontend hides the card when false).
       differentialApplicable: false, differentialInDB: false,
@@ -7181,14 +7195,16 @@ app.post('/api/stripe/create-payment', async (req, res) => {
           total_price: bookingData.totalPrice || 0,
           deposit_paid: bookingData.depositPaid ?? null,
           customer_name: bookingData.customerName || null,
+          customer_phone: bookingData.customerPhone || null,
           email: bookingData.email || customerEmail || null,
           description: bookingData.description || null,
+          quote_items: bookingData.quoteItems ?? null,
         };
         if (hasDiag && hasNonDiag) {
           const repairId = crypto.randomUUID();
           const diagPrice = 99;
           const repairPrice = Math.max(0, (bookingData.totalPrice || 0) - diagPrice);
-          const { error: e1 } = await supabase.from('bookings').upsert({ ...baseFields, id: bookingId, service_ids: ['diag_inspection'], total_price: diagPrice, transaction_id: bookingId }, { onConflict: 'id' });
+          const { error: e1 } = await supabase.from('bookings').upsert({ ...baseFields, id: bookingId, service_ids: ['diag_inspection'], total_price: diagPrice, quote_items: null, transaction_id: bookingId }, { onConflict: 'id' });
           if (e1) console.error('[create-payment] Failed to persist diag booking:', e1.message);
           const { error: e2 } = await supabase.from('bookings').upsert({ ...baseFields, id: repairId, service_ids: serviceIds.filter((s: string) => s !== 'diag_inspection'), total_price: repairPrice, transaction_id: bookingId }, { onConflict: 'id' });
           if (e2) console.error('[create-payment] Failed to persist repair booking:', e2.message);
