@@ -4115,7 +4115,7 @@ app.get('/api/fleet-prices', async (req, res) => {
 
           const [efFamilyRes, efPartsRes, efRateRes, tierPartsRes, jobTimesRes, bodyMultRes, exemptRes, efFluidsRes] = await Promise.all([
             supabase.from('engine_families')
-              .select('timing_type, oil_capacity_l, oil_spec, segment_tier')
+              .select('timing_type, oil_capacity_l, oil_spec, segment_tier, cambelt_interval_km')
               .eq('family_id', efFamilyId).single(),
             (supabase as any).from('ef_parts_data')
               .select('total_job_low, total_job_high, hours_low, hours_high, part_categories(slug)')
@@ -4441,6 +4441,9 @@ app.get('/api/fleet-prices', async (req, res) => {
               low: 435 + 60 + wpEFLabour, high: 660 + 90 + wpEFLabour,
             }) : null,
             transIntervalKm,
+            // Manufacturer cambelt interval (belt engines) — used to frame the
+            // water-pump "replace at each timing service" recommendation. Null on chains.
+            timingIntervalKm: ef?.cambelt_interval_km ?? null,
             differentialInDB: !!diffSpec,
             differentialApplicable,
             fromEngineFamily: true,

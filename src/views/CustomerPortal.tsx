@@ -940,6 +940,7 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
   const [fleetShopFee, setFleetShopFee] = useState<number | null>(null);
   const [waterPumpRecommended, setWaterPumpRecommended] = useState(false);
   const [waterPump, setWaterPump] = useState<{ partsLow: number; partsHigh: number; labourExtra: number; low: number; high: number } | null>(null);
+  const [timingIntervalKm, setTimingIntervalKm] = useState<number | null>(null);
   const [addWaterPump, setAddWaterPump] = useState(false);
   const [customServiceQuery, setCustomServiceQuery] = useState('');
   const [customSearchResults, setCustomSearchResults] = useState<Array<{ id: string; name: string; indicativePrice: number }>>([]);
@@ -1857,6 +1858,7 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
           if (fp?.timingDrive) setVehicleTimingDrive(fp.timingDrive as 'belt' | 'chain' | 'na');
           setWaterPumpRecommended(!!fp?.waterPumpRecommended);
           setWaterPump(fp?.waterPump ?? null);
+          setTimingIntervalKm(fp?.timingIntervalKm ?? null);
           setAddWaterPump(false);
           if (fp?.shopFee) setFleetShopFee(fp.shopFee);
           if (fp?.prices && Object.keys(fp.prices).length > 0) {
@@ -3066,6 +3068,7 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                                       if (fp?.timingDrive) setVehicleTimingDrive(fp.timingDrive as 'belt' | 'chain' | 'na');
                                       setWaterPumpRecommended(!!fp?.waterPumpRecommended);
                                       setWaterPump(fp?.waterPump ?? null);
+                                      setTimingIntervalKm(fp?.timingIntervalKm ?? null);
                                       if (fp?.shopFee) setFleetShopFee(fp.shopFee);
                                       if (fp?.prices && Object.keys(fp.prices).length > 0) {
                                         const highs: Record<string, number> = {};
@@ -3399,6 +3402,7 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                               if (fp?.timingDrive) setVehicleTimingDrive(fp.timingDrive as 'belt' | 'chain' | 'na');
                               setWaterPumpRecommended(!!fp?.waterPumpRecommended);
                               setWaterPump(fp?.waterPump ?? null);
+                              setTimingIntervalKm(fp?.timingIntervalKm ?? null);
                               if (fp?.shopFee) setFleetShopFee(fp.shopFee);
                               if (fp?.prices && Object.keys(fp.prices).length > 0) {
                                 const highs: Record<string, number> = {};
@@ -3447,6 +3451,9 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                     // Full Timing Chain Replacement only shows for chain engines that
                     // have a real price (migration 051); never as an unpriced quote card.
                     if (service.id === 'timing_chain_full' && !fleetPricesRaw['timing_chain_full']) return false;
+                    // On chain engines the priced 'Full Timing Chain Replacement' card
+                    // replaces the generic 'Timing Chain' quote card — don't show both.
+                    if (service.id === 'timing' && vehicleTimingDrive === 'chain' && fleetPricesRaw['timing_chain_full']) return false;
                     if (isEV) {
                       const EV_OK = new Set(['wof','brakes_front_pads','brakes_front_rotors','brakes_rear_pads','brakes_rear_rotors','diag_inspection','cabin_filter','brake_fluid','ppi']);
                       return EV_OK.has(service.id);
@@ -3616,6 +3623,30 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                   </div>
                 )}
 
+                {/* Full timing chain replacement — what's included + diagnostic pathway */}
+                {selectedServices.includes('timing_chain_full') && (
+                  <div className="p-4 bg-card border border-border rounded-xl space-y-2.5">
+                    <div className="flex items-start gap-3">
+                      <span className="text-lg shrink-0">⛓️</span>
+                      <div className="space-y-2">
+                        <p className="text-sm font-bold text-foreground">What a full timing chain replacement includes</p>
+                        <ul className="text-[11px] text-muted leading-relaxed list-disc pl-4 space-y-0.5">
+                          <li>Timing chain(s)</li>
+                          <li>Tensioner &amp; chain guides</li>
+                          <li>Camshaft &amp; crankshaft sprockets</li>
+                          <li>Camshaft &amp; crankshaft oil seals</li>
+                          <li>Timing cover gasket &amp; seals</li>
+                          <li>Drive / accessory belt</li>
+                        </ul>
+                        <p className="text-[11px] text-muted leading-relaxed">
+                          Timing chains are built to last the life of the engine, so there's no fixed replacement interval — they're renewed when they stretch, rattle on cold start, or throw a timing-related fault. <span className="text-foreground font-semibold">Not sure yours needs doing?</span> A ${''}
+                          <button onClick={() => { if (!selectedServices.includes('diag_inspection')) toggleService('diag_inspection'); }} className="underline font-bold text-torqued-red hover:text-red-400">$99 Diagnostic Inspection</button> confirms its condition first — and the fee comes off the job if you go ahead.
+                        </p>
+                      </div>
+                    </div>
+                  </div>
+                )}
+
                 {/* Belt water-pump nudge — pump sits behind the cambelt, so doing both together shares labour */}
                 {selectedServices.includes('water_pump') && vehicleTimingDrive === 'belt' && !selectedServices.includes('timing') && (
                   <div className="p-4 bg-blue-500/10 border border-blue-500/25 rounded-xl">
@@ -3637,6 +3668,9 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                       <div className="flex-1 space-y-2">
                         <p className="text-sm font-bold text-orange-500">Water Pump & Thermostat Housing strongly recommended</p>
                         <p className="text-[11px] text-muted">The water pump sits behind the same timing cover, so replacing it at the same time avoids a second strip-down and labour charge. Includes pump, thermostat housing, and coolant refill.</p>
+                        {timingIntervalKm && (
+                          <p className="text-[11px] text-orange-400/90 font-semibold">Manufacturer schedule replaces the water pump alongside the timing service — roughly every {timingIntervalKm.toLocaleString()} km.</p>
+                        )}
                         <div className="space-y-1 text-[10px] text-muted border-t border-orange-500/20 pt-2">
                           <div className="flex justify-between"><span>Parts (pump kit + auxiliary belt)</span><span>${waterPump.partsHigh}</span></div>
                           {(waterPump as any).coolantHigh > 0 && <div className="flex justify-between"><span>Coolant refill</span><span>${(waterPump as any).coolantHigh}</span></div>}

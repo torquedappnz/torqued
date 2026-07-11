@@ -113,14 +113,51 @@ const BLOG_POSTS = [
       },
     ],
   },
+  {
+    id: 'timing-water-pump',
+    tag: 'Timing',
+    title: 'Why You Should Replace the Water Pump With Your Timing Belt',
+    subtitle: 'Even if it\'s still fine. The labour math explains why.',
+    readTime: '4 min',
+    content: [
+      {
+        type: 'p',
+        text: 'If your mechanic tells you the timing belt needs replacing and doesn\'t mention the water pump in the same breath, ask why not. On most engines where the water pump is driven by the timing belt, skipping it at this point isn\'t caution — it\'s a missed window.',
+      },
+      { type: 'h2', text: 'The logic isn\'t about the pump\'s condition' },
+      {
+        type: 'p',
+        text: 'A water pump that\'s ten years old but hasn\'t failed yet looks like a pump that\'s fine. That\'s the trap. Pump failure doesn\'t follow a neat wear curve you can eyeball; it follows bearing fatigue and seal degradation that give little warning before they let go. And when a water pump fails, it fails as a coolant leak — which means overheating, which on an interference engine can mean bent valves or a cracked head if it happens at the wrong moment.',
+      },
+      { type: 'h2', text: 'The real argument is about labour, not parts' },
+      {
+        type: 'p',
+        text: 'On a belt-driven water pump, the pump sits behind the same covers, tensioners, and belt you just removed to do the timing job. The labour to reach the water pump, on most platforms, is the same labour as the timing belt job itself. The pump itself is usually $30 to $80. The extra time to swap it while everything\'s already stripped down is often under an hour.',
+      },
+      {
+        type: 'p',
+        text: 'Do the math the other way. Timing belt jobs typically run 4 to 8 hours of labour. If the water pump fails two years later, you\'re not paying for a $50 part and an extra 45 minutes — you\'re paying for a full second teardown: the covers, the tensioners, the belt again (it\'s already off and shouldn\'t go back on used), and the pump. On a shop rate of $120 to $180 an hour, that second job can cost more than the original timing belt service did.',
+      },
+      { type: 'h2', text: 'The interference engine multiplier' },
+      {
+        type: 'p',
+        text: 'If the engine is an interference design — meaning the pistons and valves occupy the same space at different points in the rotation — the stakes go up. A water pump seizing suddenly, or a belt failing because coolant contaminated it after a slow pump leak, can put the engine out of time mid-rotation. That\'s a valve job at best, a replacement engine at worst. The cost delta between "replace the pump now" and "replace the pump after it takes the belt with it" isn\'t linear; it\'s a different category of repair.',
+      },
+      { type: 'h2', text: 'Where this doesn\'t apply' },
+      {
+        type: 'p',
+        text: 'Not every water pump lives on the timing belt or chain. Plenty of engines run the pump off a separate accessory belt, fully independent of the timing system. If that\'s your setup, there\'s no shared labour to piggyback on, and the calculus changes: replace it on its own maintenance schedule, not automatically alongside timing components. Chain-driven engines are a mixed bag too — some manufacturers still route the pump off the chain, most don\'t. The rule only pays off when the pump genuinely shares the teardown.',
+      },
+      {
+        type: 'cta',
+        text: 'When you book a Timing Belt or Timing Chain job with Torqued, we\'ll give you the option to add a water pump replacement — it\'s often recommended by the manufacturer, and almost always cheaper to do at the same time.',
+      },
+    ],
+  },
 ];
 
 const SUGGESTED_POSTS = [
-  { tag: 'Basics', title: 'WOF vs Service: What\'s the Difference?', desc: 'Two different things that most people confuse. Here\'s exactly what each one covers.' },
   { tag: 'Engine', title: 'Why Engine Oil Actually Matters', desc: 'It\'s not just "black stuff you top up." Here\'s what oil does and why old oil is a real problem.' },
-  { tag: 'Timing', title: 'Timing Belt vs Timing Chain: Know Before It\'s Too Late', desc: 'One can snap without warning. The other lasts the life of the engine. Do you know which your car has?' },
-  { tag: 'EV', title: 'Electric vs Petrol Servicing: What Changes, What Doesn\'t', desc: 'EVs still need servicing. Here\'s what\'s different and what remains the same.' },
-  { tag: 'Safety', title: 'What Happens During a Brake Pad Replacement', desc: 'A step-by-step breakdown so you know exactly what you\'re paying for — and why it matters.' },
 ];
 
 type BlogPost = typeof BLOG_POSTS[0];
