@@ -1505,8 +1505,7 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
 
   const renderParts = () => (
     <div className="space-y-6">
-      <div className="flex justify-between items-center">
-        <h2 className="text-3xl">Parts Inventory</h2>
+      <div className="flex justify-end items-center">
         <Button onClick={() => setIsAddingPart(true)} className="flex items-center gap-2">
           <Plus size={18} /> Add Part
         </Button>
@@ -1725,8 +1724,7 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
       <div className="space-y-6">
         <div className="flex justify-between items-center">
           <div>
-            <h2 className="text-3xl font-bold tracking-tight">{title}</h2>
-            <p className="text-white/40 text-sm mt-1">{subtitle}</p>
+            <p className="text-muted text-sm">{subtitle}</p>
           </div>
           {showOnlyDiagnostics && (
             <div className="flex gap-2 shrink-0">
@@ -1765,8 +1763,8 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
 
         <div className="space-y-4">
           {displayJobs.length === 0 ? (
-            <div className="text-center py-20 bg-white/5 rounded-3xl border border-dashed border-white/10">
-              <p className="text-white/40 font-bold uppercase tracking-widest">
+            <div className="text-center py-20 bg-card rounded-3xl border border-dashed border-border">
+              <p className="text-muted font-bold uppercase tracking-widest">
                 {showOnlyDiagnostics
                   ? (manualQuoteFilter === 'queue' ? 'No jobs awaiting a quote' : 'No sent quotes pending booking')
                   : 'No jobs in this queue'}
@@ -1993,10 +1991,9 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
   const renderProfile = () => (
     <div className="max-w-4xl space-y-8 pb-12">
       <div className="space-y-2">
-        <h2 className="text-3xl text-foreground font-bold">Workshop Profile Setup</h2>
         <p className="text-muted">Complete your profile to start receiving bookings.</p>
       </div>
-      
+
       <div className="space-y-6">
         <Card className="p-0 overflow-hidden border-border bg-card shadow-sm">
           <div className="h-48 bg-gradient-to-br from-torqued-red/10 to-background relative">
@@ -3589,7 +3586,6 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
     ];
     return (
       <div className="space-y-5 pb-12">
-        <h2 className="text-2xl sm:text-3xl font-black tracking-tight text-foreground">My Jobs</h2>
         <div className="flex gap-2 flex-wrap">
           {subtabs.map(s => (
             <button key={s.id} onClick={() => setJobsSubtab(s.id)}
@@ -3611,7 +3607,6 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
     <div className="space-y-4 pb-12 max-w-3xl">
       <div className="flex items-start justify-between gap-3 flex-wrap">
         <div>
-          <h2 className="text-2xl sm:text-3xl font-black tracking-tight text-foreground">Customers</h2>
           <p className="text-sm text-muted">Customers who've booked, been cold-quoted, or added by your workshop.</p>
         </div>
         <Button size="sm" className="bg-torqued-red text-white shrink-0" onClick={() => { setColdForm({ customerName: '', email: '', phone: '', rego: '', make: '', model: '', description: '', date: '' }); setShowColdQuote(true); }}>+ Add new customer</Button>
@@ -3681,7 +3676,6 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
     return (
       <div className="space-y-5 pb-12 max-w-3xl">
         <div>
-          <h2 className="text-2xl sm:text-3xl font-black tracking-tight text-foreground">Payments & Subscription</h2>
           <p className="text-sm text-muted">Your $99/month subscription is billed to your card. Job payouts are paid out less Torqued's 4% commission.</p>
         </div>
 
@@ -3747,7 +3741,6 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
     return (
       <div className="flex flex-col h-[calc(100vh-160px)] max-w-3xl">
         <div>
-          <h2 className="text-2xl sm:text-3xl font-black tracking-tight text-foreground">Mechanic Assistant</h2>
           <p className="text-sm text-muted">Quick generalist data — oil capacities, fluid types, torque specs, intervals. Always confirm exact figures against the OEM manual.</p>
           <p className="text-[11px] text-torqued-red font-bold mt-1">Tip: type "order: cambelt kit x1" to add a part straight to your Parts-to-order list. You can also attach a photo for visual analysis.</p>
         </div>
