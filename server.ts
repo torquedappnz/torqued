@@ -50,7 +50,7 @@ function getMailTransporter() {
   const pass = process.env.SMTP_PASS;
 
   if (host && user && pass) {
-    return nodemailer.createTransport({
+    const transporter = nodemailer.createTransport({
       host,
       port,
       secure: port === 465,
@@ -60,6 +60,15 @@ function getMailTransporter() {
       connectionTimeout: 10000,
       greetingTimeout: 10000,
     });
+    // Default reply-to for all automated mail (verification, receipts, reminders,
+    // document requests, etc). Sends still go out from SMTP_FROM (the gmail
+    // account) — this only changes where replies land. Calls that set their own
+    // replyTo (e.g. routing a reply between a customer and their mechanic)
+    // override this default.
+    return {
+      sendMail: (mailOptions: Parameters<typeof transporter.sendMail>[0]) =>
+        transporter.sendMail({ replyTo: 'hello@torqued.nz', ...mailOptions }),
+    };
   }
   return null;
 }
