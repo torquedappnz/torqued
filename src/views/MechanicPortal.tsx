@@ -479,10 +479,35 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
   // Build & download a branded TAX INVOICE for a paid job (from its stored quote_items)
   const exportInvoice = async (job: any) => {
     const qi = job.quote_items || {};
-    const parts = Array.isArray(qi.parts) ? qi.parts.filter((p: any) => p.name) : [];
+    let parts = Array.isArray(qi.parts) ? qi.parts.filter((p: any) => p.name) : [];
     const labourTotal = (qi.labourHours || 0) * (qi.labourRate || 0);
     const otherList = Array.isArray(qi.other) ? qi.other.filter((o: any) => o.name) : [];
     const total = parseFloat(job.quoted_price ?? job.total_price) || 0;
+
+    // Older/manually-created bookings don't always carry a quote_items breakdown.
+    // Rather than print blank prices next to each service, re-derive per-service
+    // prices from live fleet pricing (or split the known total evenly) so every
+    // invoice is always itemised.
+    if (parts.length === 0 && labourTotal === 0 && (job.service_ids || []).length > 0) {
+      const svcIds: string[] = job.service_ids;
+      const svcNames = svcIds.map((id: string) => SERVICES.find(s => s.id === id)?.name || id);
+      let priced: Record<string, any> = {};
+      if (job.vehicle_rego) {
+        try {
+          const r = await fetch(`/api/fleet-prices?rego=${encodeURIComponent(job.vehicle_rego)}`);
+          if (r.ok) priced = await r.json();
+        } catch { /* fall through to even split below */ }
+      }
+      const known = svcIds.map(id => priced?.[id]?.high).filter((n: any) => typeof n === 'number' && n > 0);
+      const knownSum = known.reduce((s: number, n: number) => s + n, 0);
+      const unknownCount = svcIds.length - known.length;
+      const remainder = Math.max(0, total - knownSum);
+      parts = svcIds.map((id: string, i: number) => {
+        const fp = priced?.[id]?.high;
+        const unitPrice = (typeof fp === 'number' && fp > 0) ? fp : (unknownCount > 0 ? remainder / unknownCount : 0);
+        return { name: svcNames[i], qty: 1, unitPrice };
+      });
+    }
     const isPaid = job.payment_status === 'confirmed';
     const doc = new jsPDF({ unit: 'mm', format: 'a4' });
     const logo = await fetchDataUrl('/torqued-logo.png');
@@ -561,7 +586,7 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
     const doc = new jsPDF({ unit: 'mm', format: 'a4' });
     const logo = await fetchDataUrl('/torqued-logo.png');
     // QR deep-links straight to this quote's review-and-pay screen (quote pre-loaded)
-    const quoteUrl = `https://torqued-psi.vercel.app/customer?quote=${encodeURIComponent(job.id)}`;
+    const quoteUrl = `https://torqued.site/customer?quote=${encodeURIComponent(job.id)}`;
     const qr = await fetchDataUrl('https://api.qrserver.com/v1/create-qr-code/?size=240x240&data=' + encodeURIComponent(quoteUrl));
 
     if (logo) doc.addImage(logo, 'PNG', 15, 8, 52, 17.4);
@@ -688,6 +713,7 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
       name: '', phone: '', address: '', nzbn: '',
       serviceAreas: [], diagnosticTools: [], certifications: [],
       labourRate: 145, shopFee: 25, offersPpi: false,
+      bio: '', profilePhotoUrl: '',
       bannerImage: 'https://images.unsplash.com/photo-1486006920555-c77dcf18193c?auto=format&fit=crop&q=80&w=1920',
     });
   }, [user?.id]);
@@ -722,6 +748,8 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
           labourRate: data.labour_rate ?? 145,
           shopFee: data.shop_fee ?? 25,
           offersPpi: !!data.offers_ppi,
+          bio: data.bio || '',
+          profilePhotoUrl: data.profile_photo_url || '',
           bannerImage: data.banner_image || 'https://images.unsplash.com/photo-1486006920555-c77dcf18193c?auto=format&fit=crop&q=80&w=1920',
         });
       })
@@ -843,8 +871,8 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
   const [modalInsights, setModalInsights] = useState<{ title: string; detail: string; severity: string }[]>([]);
   const [calendarView, setCalendarView] = useState<'day' | 'week' | 'month'>('week');
   const [calendarMonth, setCalendarMonth] = useState(() => { const d = new Date(); return { year: d.getFullYear(), month: d.getMonth() }; });
+  const [calendarDayDate, setCalendarDayDate] = useState<string>(() => localISO(new Date()));
   const [parts, setParts] = useState<InventoryPart[]>([]);
-  const [appointments, setAppointments] = useState<any[]>([]);
   const [incomingJobs, setIncomingJobs] = useState<any[]>([]);
   const [weekRevenue, setWeekRevenue] = useState(0);
   const [pastJobs, setPastJobs] = useState<any[]>([]);
@@ -1070,8 +1098,11 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
     labourRate: 145,
     shopFee: 25,
     offersPpi: false,
+    bio: '',
+    profilePhotoUrl: '',
     bannerImage: 'https://images.unsplash.com/photo-1486006920555-c77dcf18193c?auto=format&fit=crop&q=80&w=1920'
   });
+  const [profilePhotoUploading, setProfilePhotoUploading] = useState(false);
 
   // Load the vehicle's portable service history (imported + Torqued jobs) when a job is opened
   useEffect(() => {
@@ -1208,18 +1239,6 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
       }, ...deliveredParts]);
     }
 
-    // Add to appointments (default to next available slot for demo)
-    const newAppointment = {
-      id: Math.random().toString(36).substr(2, 9),
-      day: 'Mon',
-      time: '16:30',
-      endTime: '17:30',
-      car: job.model + ' (' + job.reg + ')',
-      service: job.services.join(' & '),
-      status: 'Waiting' as const,
-      type: 'repair' as const
-    };
-    setAppointments([...appointments, newAppointment]);
     setActiveTab('calendar');
   };
 
@@ -1234,7 +1253,7 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
           nzbn: profileData.nzbn, service_areas: profileData.serviceAreas,
           diagnostic_tools: profileData.diagnosticTools, certifications: profileData.certifications,
           labour_rate: profileData.labourRate, shop_fee: profileData.shopFee,
-          offers_ppi: profileData.offersPpi,
+          offers_ppi: profileData.offersPpi, bio: profileData.bio,
         }}),
       });
       const d = await r.json();
@@ -1285,13 +1304,17 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
     return days.map(d => ({ day: d, amount: Math.round(map[d]) }));
   }, [pastJobs]);
 
-  const renderDashboard = () => (
+  const renderDashboard = () => {
+    const isConfirmedCalendarJob = (j: any) => !!j.date && (j.status === 'accepted' || j.status === 'in_progress' || j.status === 'completed' || j.payment_status === 'confirmed');
+    const todaysJobs = pastJobs.filter((j: any) => isConfirmedCalendarJob(j) && localISO(new Date(j.date)) === localISO(new Date()))
+      .sort((a: any, b: any) => new Date(a.date).getTime() - new Date(b.date).getTime());
+    return (
     <div className="space-y-6">
       <div className="grid grid-cols-2 md:grid-cols-4 gap-3 sm:gap-4">
         <Card className="p-3 sm:p-4 space-y-1 bg-card border-border">
           <p className="text-[10px] font-bold uppercase text-muted">Today's Jobs</p>
           <div className="flex items-end gap-2">
-            <h3 className="text-xl sm:text-3xl text-foreground">{appointments.filter(a => a.day === 'Mon').length}</h3>
+            <h3 className="text-xl sm:text-3xl text-foreground">{todaysJobs.length}</h3>
           </div>
         </Card>
         <Card className="p-3 sm:p-4 space-y-1 bg-card border-border">
@@ -1470,38 +1493,37 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
             </div>
           </Card>
 
-          <Card className="p-6 space-y-6">
-            <h3 className="text-xl">Today's Schedule</h3>
+          <Card className="p-6 space-y-6 bg-card border-border">
+            <h3 className="text-xl text-foreground">Today's Schedule</h3>
             <div className="space-y-4">
-              {appointments.filter(a => a.day === 'Mon').slice(0, 4).map((job, i) => (
-                <div 
-                  key={i} 
-                  className="flex gap-4 items-start pb-4 border-b border-black/5 last:border-0 cursor-pointer hover:bg-black/[0.02] -mx-2 px-2 rounded-xl transition-all"
-                  onClick={() => {
-                    const jobId = job.id === '6' ? 'req3' : 'req1';
-                    setSelectedJobId(jobId);
-                  }}
+              {todaysJobs.length === 0 && <p className="text-xs text-muted italic">No jobs scheduled for today.</p>}
+              {todaysJobs.slice(0, 4).map((job: any) => (
+                <div
+                  key={job.id}
+                  className="flex gap-4 items-start pb-4 border-b border-border last:border-0 cursor-pointer hover:bg-background -mx-2 px-2 rounded-xl transition-all"
+                  onClick={() => { setActiveTab('jobs'); setJobsSubtab(job.status === 'completed' ? 'history' : 'today'); }}
                 >
-                  <div className="text-xs font-bold text-muted pt-1">{job.time}</div>
+                  <div className="text-xs font-bold text-muted pt-1">{new Date(job.date).toLocaleTimeString('en-NZ', { hour: '2-digit', minute: '2-digit' })}</div>
                   <div className="flex-1">
-                    <h4 className="text-sm font-bold">{job.car}</h4>
-                    <p className="text-xs text-muted">{job.service}</p>
+                    <h4 className="text-sm font-bold text-foreground">{job.vehicle_label || job.vehicle_rego || job.customer_name || 'Job'}</h4>
+                    <p className="text-xs text-muted">{(job.service_ids || []).map((id: string) => SERVICES.find((s: any) => s.id === id)?.name || id).join(', ') || jobSummaryTitle(job)}</p>
                   </div>
                   <span className={cn(
-                    "text-[10px] font-bold uppercase px-2 py-0.5 rounded",
-                    job.status === 'In Progress' ? "bg-torqued-red text-white" : "bg-card text-muted"
+                    "text-[10px] font-bold uppercase px-2 py-0.5 rounded shrink-0",
+                    job.status === 'in_progress' ? "bg-torqued-red text-white" : "bg-background text-muted"
                   )}>
-                    {job.status}
+                    {job.status === 'in_progress' ? 'In Progress' : job.status}
                   </span>
                 </div>
               ))}
             </div>
-            <Button variant="outline" fullWidth size="sm" className="border-white/10 text-white hover:bg-white/5">View Full Calendar</Button>
+            <Button variant="outline" fullWidth size="sm" className="border-border text-foreground hover:bg-background" onClick={() => setActiveTab('calendar')}>View Full Calendar</Button>
           </Card>
         </div>
       </div>
     </div>
-  );
+    );
+  };
 
   const renderParts = () => (
     <div className="space-y-6">
@@ -1997,12 +2019,51 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
       <div className="space-y-6">
         <Card className="p-0 overflow-hidden border-border bg-card shadow-sm">
           <div className="h-48 bg-gradient-to-br from-torqued-red/10 to-background relative">
-            <div className="absolute -bottom-12 left-8 w-24 h-24 bg-background p-1 rounded-2xl shadow-2xl border border-border">
+            <div className="absolute -bottom-12 left-8 w-24 h-24 bg-background p-1 rounded-2xl shadow-2xl border border-border group">
               <div className="w-full h-full bg-card rounded-xl flex items-center justify-center overflow-hidden">
-                <span className="text-2xl font-black italic text-torqued-red/40">
-                  {(profileData.name || user?.email || 'W').split(' ').map((w: string) => w[0]).slice(0, 2).join('').toUpperCase()}
-                </span>
+                {profileData.profilePhotoUrl ? (
+                  <img src={profileData.profilePhotoUrl} alt="Workshop profile" className="w-full h-full object-cover" />
+                ) : (
+                  <span className="text-2xl font-black italic text-torqued-red/40">
+                    {(profileData.name || user?.email || 'W').split(' ').map((w: string) => w[0]).slice(0, 2).join('').toUpperCase()}
+                  </span>
+                )}
               </div>
+              <label className="absolute inset-1 rounded-xl bg-black/0 group-hover:bg-black/50 transition-all flex items-center justify-center cursor-pointer">
+                {profilePhotoUploading ? (
+                  <span className="text-[9px] font-bold text-white uppercase">Uploading…</span>
+                ) : (
+                  <Camera size={18} className="text-white opacity-0 group-hover:opacity-100 transition-opacity" />
+                )}
+                <input
+                  type="file"
+                  accept="image/png,image/jpeg,image/webp"
+                  className="hidden"
+                  disabled={profilePhotoUploading}
+                  onChange={async (e) => {
+                    const file = e.target.files?.[0];
+                    e.target.value = '';
+                    if (!file || !user?.id) return;
+                    setProfilePhotoUploading(true);
+                    try {
+                      const imageBase64: string = await new Promise((resolve, reject) => {
+                        const reader = new FileReader();
+                        reader.onload = () => resolve(reader.result as string);
+                        reader.onerror = reject;
+                        reader.readAsDataURL(file);
+                      });
+                      const r = await fetch('/api/mechanic/profile-photo', {
+                        method: 'POST', headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ mechanicId: user.id, imageBase64 }),
+                      });
+                      const d = await r.json();
+                      if (r.ok && d.url) setProfileData(p => ({ ...p, profilePhotoUrl: d.url }));
+                      else alert(d.error || 'Could not upload photo.');
+                    } catch { alert('Could not upload photo.'); }
+                    finally { setProfilePhotoUploading(false); }
+                  }}
+                />
+              </label>
             </div>
           </div>
           <div className="pt-16 pb-6 px-8 flex flex-col sm:flex-row justify-between items-start sm:items-end gap-4">
@@ -2011,6 +2072,7 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
               {profileData.address && (
                 <p className="text-sm text-muted font-medium">{profileData.address}</p>
               )}
+              <p className="text-[10px] text-muted">Square image suggested, 512×512px.</p>
             </div>
             <div className="flex gap-2 w-full sm:w-auto">
               <div className="text-left sm:text-right mr-4">
@@ -2034,14 +2096,14 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
           {user?.id ? (
             <div className="flex flex-col sm:flex-row gap-2">
               <div className="flex-1 min-w-0 bg-background border border-border rounded-xl px-4 py-3 text-sm text-foreground font-mono truncate">
-                {`https://torqued-psi.vercel.app/customer?book=${user.id}`}
+                {`https://torqued.site/customer?book=${user.id}`}
               </div>
               <div className="flex gap-2 shrink-0">
                 <Button
                   size="sm"
                   className="bg-torqued-red text-white h-auto px-5"
                   onClick={() => {
-                    navigator.clipboard.writeText(`https://torqued-psi.vercel.app/customer?book=${user.id}`);
+                    navigator.clipboard.writeText(`https://torqued.site/customer?book=${user.id}`);
                     setBookingLinkCopied(true);
                     setTimeout(() => setBookingLinkCopied(false), 2000);
                   }}
@@ -2052,7 +2114,7 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                   variant="outline"
                   size="sm"
                   className="border-border text-foreground hover:bg-background h-auto px-5"
-                  onClick={() => window.open(`https://torqued-psi.vercel.app/customer?book=${user.id}`, '_blank')}
+                  onClick={() => window.open(`https://torqued.site/customer?book=${user.id}`, '_blank')}
                 >
                   Preview
                 </Button>
@@ -2071,6 +2133,20 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
             <Input label="Trading / Workshop Name" value={profileData.name} placeholder="e.g. North Mechanical" onChange={(e) => setProfileData({ ...profileData, name: e.target.value })} />
             <Input label="Contact Phone" value={profileData.phone} placeholder="e.g. 021 234 5678" onChange={(e) => setProfileData({ ...profileData, phone: e.target.value })} />
+          </div>
+          <div className="space-y-1.5">
+            <label className="text-xs font-bold uppercase text-muted">Workshop bio</label>
+            <textarea
+              value={profileData.bio}
+              placeholder="Tell customers a bit about your workshop — experience, specialities, what makes you different…"
+              rows={4}
+              onChange={(e) => {
+                const words = e.target.value.split(/\s+/).filter(Boolean);
+                if (words.length <= 200) setProfileData({ ...profileData, bio: e.target.value });
+              }}
+              className="w-full bg-background border border-border rounded-xl px-4 py-3 text-sm text-foreground placeholder:text-muted outline-none focus:border-torqued-red transition-colors resize-none"
+            />
+            <p className="text-[10px] text-muted">{profileData.bio.split(/\s+/).filter(Boolean).length} / 200 words</p>
           </div>
           {/* Pre-Purchase Inspection opt-in */}
           <div className="border-t border-border pt-4 flex items-start justify-between gap-4">
@@ -2091,48 +2167,6 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
         </Card>
 
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 sm:gap-6">
-          <Card className="p-6 space-y-6 bg-card border-border">
-            <div className="flex items-center gap-2 border-b border-border pb-4 mb-4">
-              <Award size={20} className="text-torqued-red" />
-              <h3 className="text-xl text-foreground">Diagnostics & Tools</h3>
-            </div>
-            <div className="space-y-4">
-              <p className="text-xs font-bold uppercase text-muted">Specific tools you use</p>
-              <div className="flex flex-wrap gap-2">
-                {profileData.diagnosticTools.map(tool => (
-                  <span key={tool} className="px-3 py-1.5 bg-torqued-red/10 text-torqued-red rounded-lg text-[10px] font-bold uppercase border border-torqued-red/20 flex items-center gap-1.5">
-                    {tool}
-                    <button onClick={() => setProfileData({ ...profileData, diagnosticTools: profileData.diagnosticTools.filter(t => t !== tool) })} className="hover:text-foreground"><X size={11} /></button>
-                  </span>
-                ))}
-                <button onClick={() => {
-                  const t = prompt('Add a diagnostic tool (e.g. Autel MaxiSys):');
-                  if (t && t.trim()) setProfileData({ ...profileData, diagnosticTools: [...profileData.diagnosticTools, t.trim()] });
-                }} className="px-3 py-1.5 border border-dashed border-border rounded-lg text-[10px] font-bold uppercase text-muted hover:border-torqued-red hover:text-torqued-red transition-all">
-                  + Add Tool
-                </button>
-              </div>
-            </div>
-            <div className="space-y-4 pt-4">
-              <p className="text-xs font-bold uppercase text-muted">Certifications & Accreditations</p>
-              <div className="space-y-2">
-                {profileData.certifications.map(cert => (
-                  <div key={cert} className="flex items-center gap-3 p-3 bg-background rounded-xl">
-                    <Award size={16} className="text-torqued-red" />
-                    <span className="text-xs font-bold text-foreground">{cert}</span>
-                    <button onClick={() => setProfileData({ ...profileData, certifications: profileData.certifications.filter(c => c !== cert) })} className="ml-auto text-muted hover:text-torqued-red"><Trash2 size={14} /></button>
-                  </div>
-                ))}
-                <button onClick={() => {
-                  const c = prompt('Add a certification / accreditation:');
-                  if (c && c.trim()) setProfileData({ ...profileData, certifications: [...profileData.certifications, c.trim()] });
-                }} className="px-3 py-1.5 border border-dashed border-border rounded-lg text-[10px] font-bold uppercase text-muted hover:border-torqued-red hover:text-torqued-red transition-all">
-                  + Add Certification
-                </button>
-              </div>
-            </div>
-          </Card>
-
           <Card className="p-6 space-y-6">
              <div className="flex items-center gap-2 border-b border-black/5 pb-4 mb-4">
               <CreditCard size={20} className="text-torqued-red" />
@@ -2304,7 +2338,19 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
     </div>
   );
 
-  const renderCalendar = () => (
+  const renderCalendar = () => {
+    // Confirmed jobs with a real scheduled date/time — the source of truth for the calendar
+    // (accepted/in-progress/paid jobs; completed jobs still show if scheduled for a past date).
+    const isConfirmedCalendarJob = (j: any) => !!j.date && (j.status === 'accepted' || j.status === 'in_progress' || j.status === 'completed' || j.payment_status === 'confirmed');
+    const confirmedJobs = pastJobs.filter(isConfirmedCalendarJob);
+    const jobsOnDate = (iso: string) => confirmedJobs.filter((j: any) => localISO(new Date(j.date)) === iso);
+    const jobLabel = (j: any) => j.vehicle_label || j.vehicle_rego || j.customer_name || 'Job';
+    const jobServiceLabel = (j: any) => (j.service_ids || []).map((id: string) => SERVICES.find((s: any) => s.id === id)?.name || id).join(', ') || jobSummaryTitle(j);
+    const openJobFromCalendar = (j: any) => {
+      setActiveTab('jobs');
+      setJobsSubtab(j.status === 'completed' ? 'history' : (localISO(new Date(j.date)) === localISO(new Date()) ? 'today' : 'upcoming'));
+    };
+    return (
     <div className="space-y-6">
       {/* Staff Roster */}
       {(() => {
@@ -2473,7 +2519,8 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
             </div>
             {/* Grid for days */}
             {[...Array(7)].map((_, dayIdx) => {
-              const dayName = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'][dayIdx];
+              const colDate = new Date(rosterWeekStart + 'T00:00:00'); colDate.setDate(colDate.getDate() + dayIdx);
+              const colIso = localISO(colDate);
               return (
                 <div
                   key={dayIdx}
@@ -2527,31 +2574,30 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                     <div key={i} className="absolute w-full h-px bg-border" style={{ top: `${i * 96}px` }} />
                   ))}
 
-                  {/* Appointments */}
-                  {appointments.filter(a => a.day === dayName).map(appt => {
-                    const startHour = parseInt(appt.time.split(':')[0]);
-                    const startMin = parseInt(appt.time.split(':')[1]);
-                    const endHour = parseInt(appt.endTime.split(':')[0]);
-                    const endMin = parseInt(appt.endTime.split(':')[1]);
-                    
+                  {/* Confirmed jobs scheduled for this day */}
+                  {jobsOnDate(colIso).map((job: any) => {
+                    const d = new Date(job.date);
+                    const startHour = d.getHours();
+                    const startMin = d.getMinutes();
                     const top = (startHour - 8) * 96 + (startMin / 60) * 96;
-                    const height = (endHour - startHour) * 96 + ((endMin - startMin) / 60) * 96;
-                    
+                    const height = 96; // default 1hr block — no duration data on bookings yet
+
                     return (
                       <motion.div
                         data-appt="1"
-                        key={appt.id}
+                        key={job.id}
                         initial={{ opacity: 0, scale: 0.9 }}
                         animate={{ opacity: 1, scale: 1 }}
                         className={cn(
                           "absolute left-1 right-1 rounded-lg p-2 text-white shadow-sm cursor-pointer hover:brightness-110 transition-all z-20",
-                          appt.type === 'maintenance' ? "bg-blue-500" : appt.type === 'repair' ? "bg-torqued-red" : "bg-emerald-500"
+                          job.status === 'completed' ? "bg-emerald-500" : job.status === 'in_progress' ? "bg-torqued-red" : "bg-blue-500"
                         )}
                         style={{ top: `${top}px`, height: `${height}px` }}
+                        onClick={() => openJobFromCalendar(job)}
                       >
-                         <p className="text-[8px] font-bold uppercase opacity-80">{appt.time} - {appt.endTime}</p>
-                         <h4 className="text-[10px] font-bold leading-tight truncate">{appt.car}</h4>
-                         <p className="text-[8px] truncate">{appt.service}</p>
+                         <p className="text-[8px] font-bold uppercase opacity-80">{d.toLocaleTimeString('en-NZ', { hour: '2-digit', minute: '2-digit' })}</p>
+                         <h4 className="text-[10px] font-bold leading-tight truncate">{jobLabel(job)}</h4>
+                         <p className="text-[8px] truncate">{jobServiceLabel(job)}</p>
                       </motion.div>
                     );
                   })}
@@ -2595,25 +2641,33 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                 const isValid = dayNum >= 1 && dayNum <= totalDays;
                 const cellDate = isValid ? new Date(calendarMonth.year, calendarMonth.month, dayNum) : null;
                 const isToday = cellDate && cellDate.toDateString() === today.toDateString();
-                const dayName = cellDate ? ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'][cellDate.getDay()] : null;
+                const iso = cellDate ? localISO(cellDate) : '';
+                const dayJobs = iso ? jobsOnDate(iso) : [];
                 return (
-                  <div key={i} className={cn("border-r border-b border-border p-2 min-h-[80px] relative", isValid ? 'hover:bg-foreground/[0.03] transition-colors' : 'bg-foreground/[0.02]')}>
+                  <div
+                    key={i}
+                    className={cn("border-r border-b border-border p-2 min-h-[80px] relative", isValid ? 'hover:bg-foreground/[0.03] transition-colors cursor-pointer' : 'bg-foreground/[0.02]')}
+                    onClick={() => { if (isValid && iso) { setCalendarDayDate(iso); setCalendarView('day'); } }}
+                  >
                     {isValid && (
                       <>
                         <div className="flex items-center justify-between">
                           <span className={cn("text-xs font-bold", isToday ? 'w-6 h-6 rounded-full bg-torqued-red text-white flex items-center justify-center text-[10px]' : 'text-muted')}>{dayNum}</span>
                           {(() => {
-                            const iso = cellDate ? localISO(cellDate) : '';
                             const n = new Set(rosterShifts.filter(s => s.shift_date === iso).map(s => s.staff_id)).size;
                             return n > 0 ? <span className="text-[8px] font-black text-torqued-red">{n} on</span> : null;
                           })()}
                         </div>
-                        {appointments.filter(a => a.day === dayName).map(a => (
-                          <div key={a.id} className={cn("mt-1 p-1 text-white text-[8px] font-bold rounded uppercase leading-tight truncate",
-                            a.type === 'maintenance' ? 'bg-blue-500' : a.type === 'repair' ? 'bg-torqued-red' : 'bg-emerald-500')}>
-                            {a.car.split('(')[0].trim()}
+                        {dayJobs.slice(0, 3).map((job: any) => (
+                          <div
+                            key={job.id}
+                            onClick={(e) => { e.stopPropagation(); openJobFromCalendar(job); }}
+                            className={cn("mt-1 p-1 text-white text-[8px] font-bold rounded uppercase leading-tight truncate",
+                            job.status === 'completed' ? 'bg-emerald-500' : job.status === 'in_progress' ? 'bg-torqued-red' : 'bg-blue-500')}>
+                            {jobLabel(job).split('(')[0].trim()}
                           </div>
                         ))}
+                        {dayJobs.length > 3 && <p className="text-[8px] text-muted font-bold mt-0.5">+{dayJobs.length - 3} more</p>}
                       </>
                     )}
                   </div>
@@ -2622,46 +2676,63 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
             })()}
           </div>
         </Card>
-      ) : (
+      ) : (() => {
+        const dayJobs = jobsOnDate(calendarDayDate).sort((a: any, b: any) => new Date(a.date).getTime() - new Date(b.date).getTime());
+        const shiftDate = (delta: number) => { const d = new Date(calendarDayDate + 'T00:00:00'); d.setDate(d.getDate() + delta); setCalendarDayDate(localISO(d)); };
+        const dayRevenue = dayJobs.reduce((s: number, j: any) => s + (parseFloat(j.total_price) || 0), 0);
+        return (
         <Card className="p-6 space-y-6">
-          <div className="flex gap-4 items-center justify-between border-b border-border pb-4">
+          <div className="flex gap-4 items-center justify-between border-b border-border pb-4 flex-wrap">
              <div className="flex items-center gap-4">
-                <button className="p-2 hover:bg-card rounded-full text-foreground"><ChevronLeft size={20} /></button>
-                <h3 className="text-xl font-bold uppercase tracking-tight text-foreground">{new Date().toLocaleDateString('en-NZ', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' })}</h3>
-                <button className="p-2 hover:bg-card rounded-full text-foreground"><ChevronRight size={20} /></button>
+                <button onClick={() => shiftDate(-1)} className="p-2 hover:bg-card rounded-full text-foreground"><ChevronLeft size={20} /></button>
+                <h3 className="text-xl font-bold uppercase tracking-tight text-foreground">{new Date(calendarDayDate + 'T00:00:00').toLocaleDateString('en-NZ', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' })}</h3>
+                <button onClick={() => shiftDate(1)} className="p-2 hover:bg-card rounded-full text-foreground"><ChevronRight size={20} /></button>
              </div>
-             <Button variant="outline" size="sm">Today</Button>
+             <Button variant="outline" size="sm" className="border-border text-foreground" onClick={() => setCalendarDayDate(localISO(new Date()))}>Today</Button>
           </div>
-          <div className="space-y-4">
-            {appointments.filter(a => a.day === 'Mon').map(appt => (
-              <div key={appt.id} className="flex gap-6 items-start p-4 hover:bg-foreground/[0.03] rounded-2xl transition-all group">
-                <div className="w-16 text-sm font-bold text-muted pt-1">{appt.time}</div>
+          {/* Summary strip */}
+          <div className="grid grid-cols-3 gap-3">
+            <div className="bg-background border border-border rounded-xl p-3 text-center">
+              <p className="text-2xl font-black text-foreground">{dayJobs.length}</p>
+              <p className="text-[10px] font-bold uppercase text-muted">Jobs scheduled</p>
+            </div>
+            <div className="bg-background border border-border rounded-xl p-3 text-center">
+              <p className="text-2xl font-black text-foreground">{dayJobs.filter((j: any) => j.status === 'completed').length}</p>
+              <p className="text-[10px] font-bold uppercase text-muted">Completed</p>
+            </div>
+            <div className="bg-background border border-border rounded-xl p-3 text-center">
+              <p className="text-2xl font-black text-foreground">{formatCurrency(dayRevenue)}</p>
+              <p className="text-[10px] font-bold uppercase text-muted">Scheduled revenue</p>
+            </div>
+          </div>
+          <div className="space-y-3">
+            {dayJobs.length === 0 && <p className="text-sm text-muted italic text-center py-8">No confirmed jobs scheduled for this day.</p>}
+            {dayJobs.map((job: any) => (
+              <div key={job.id} className="flex gap-6 items-start p-4 hover:bg-foreground/[0.03] rounded-2xl transition-all group cursor-pointer" onClick={() => openJobFromCalendar(job)}>
+                <div className="w-16 text-sm font-bold text-muted pt-1">{new Date(job.date).toLocaleTimeString('en-NZ', { hour: '2-digit', minute: '2-digit' })}</div>
                 <div className={cn(
-                  "w-1 h-12 rounded-full",
-                  appt.type === 'maintenance' ? "bg-blue-500" : appt.type === 'repair' ? "bg-torqued-red" : "bg-emerald-500"
+                  "w-1 h-12 rounded-full shrink-0",
+                  job.status === 'completed' ? "bg-emerald-500" : job.status === 'in_progress' ? "bg-torqued-red" : "bg-blue-500"
                 )} />
-                <div className="flex-1">
-                  <div className="flex justify-between items-start">
-                    <div>
-                      <h4 className="text-lg font-bold text-foreground">{appt.car}</h4>
-                      <p className="text-sm text-muted">{appt.service}</p>
+                <div className="flex-1 min-w-0">
+                  <div className="flex justify-between items-start gap-2">
+                    <div className="min-w-0">
+                      <h4 className="text-lg font-bold text-foreground truncate">{jobLabel(job)}</h4>
+                      <p className="text-sm text-muted truncate">{jobServiceLabel(job)}</p>
                     </div>
                     <span className={cn(
-                      "text-[10px] font-bold uppercase px-2 py-0.5 rounded",
-                      appt.status === 'In Progress' ? "bg-torqued-red text-white" : "bg-foreground/5 text-muted"
+                      "text-[10px] font-bold uppercase px-2 py-0.5 rounded shrink-0",
+                      job.status === 'in_progress' ? "bg-torqued-red text-white" : "bg-foreground/5 text-muted"
                     )}>
-                      {appt.status}
+                      {job.status === 'in_progress' ? 'In Progress' : job.status}
                     </span>
                   </div>
                 </div>
-                <Button 
-                  variant="ghost" 
-                  size="sm" 
-                  className="opacity-0 group-hover:opacity-100 transition-opacity"
-                  onClick={() => {
-                    const realJob = incomingJobs.find(j => j.reg === appt.car.match(/\(([^)]+)\)/)?.[1]);
-                    if (realJob) setSelectedJobId(realJob.id);
-                  }}
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className="opacity-0 group-hover:opacity-100 transition-opacity shrink-0"
+                  onClick={(e) => { e.stopPropagation(); openJobFromCalendar(job); }}
                 >
                   View Details
                 </Button>
@@ -2669,7 +2740,8 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
             ))}
           </div>
         </Card>
-      )}
+        );
+      })()}
 
       {/* Operating Hours Table */}
       {calendarView === 'week' && (
@@ -2912,7 +2984,8 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
         </div>
       )}
     </div>
-  );
+    );
+  };
 
   const renderProcurementModal = () => {
     const job = incomingJobs.find(j => j.id === selectedJobForProcurement);
@@ -3401,7 +3474,7 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                 doc.setFont('helvetica', 'normal');
                 doc.setFontSize(7);
                 doc.setTextColor(...muted);
-                doc.text('Generated by Torqued NZ — torqued-psi.vercel.app', 14, 290);
+                doc.text('Generated by Torqued NZ — torqued.site', 14, 290);
                 doc.text(`Page ${i} of ${pageCount}`, 190, 290, { align: 'right' });
               }
 
@@ -3888,7 +3961,7 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
     // Parties
     writeSection('PARTIES');
     writePara(`This Mechanic Platform Agreement ("Agreement") is entered into as of ${todayStr} between:`);
-    writePara(`Platform Operator: Torqued Limited, a company incorporated in New Zealand ("Torqued"), operating the Torqued platform at torqued-psi.vercel.app.`);
+    writePara(`Platform Operator: Torqued Limited, a company incorporated in New Zealand ("Torqued"), operating the Torqued platform at torqued.site.`);
     writePara(`Workshop / Service Partner: ${workshopName} ("Workshop" or "Partner"), trading as: ${tradingName}, of ${address}, NZBN: ${nzbn}, GST Number: ${gst}.`);
     writePara(`Together referred to as the "Parties."`);
 
@@ -3935,7 +4008,7 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
     writePara(`7.3 Restrictions: The Workshop must not reverse-engineer, copy, or create derivative works from the Platform or its underlying technology.`);
 
     writeSection('8. PRIVACY & DATA');
-    writePara(`8.1 Data Handling: Torqued collects and handles personal information in accordance with its Privacy Policy at torqued-psi.vercel.app/privacy and the Privacy Act 2020.`);
+    writePara(`8.1 Data Handling: Torqued collects and handles personal information in accordance with its Privacy Policy at torqued.site/privacy and the Privacy Act 2020.`);
     writePara(`8.2 Customer Data: The Workshop acknowledges that Customer personal information accessed through the Platform may only be used for the purpose of providing Services under a confirmed Booking and must not be used for unsolicited marketing, sold to third parties, or retained beyond what is necessary under applicable law.`);
     writePara(`8.3 Data Breach: Each Party must promptly notify the other of any actual or reasonably suspected data breach affecting the other's data.`);
 
@@ -4636,7 +4709,7 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
       <div className="min-h-screen bg-background text-foreground flex flex-col">
         <nav className="p-4 md:px-8 flex justify-between items-center bg-background/80 border-b border-border backdrop-blur-sm">
           <Logo />
-          <Button size="sm" variant="outline" className="border-border" onClick={() => { setIncomingJobs([]); setCustomers([]); setBilling(null); setJobNotes({}); setVehiclePhotos({}); setProfileData({ name: '', nzbn: '', phone: '', address: '', serviceAreas: [], diagnosticTools: [], certifications: [], labourRate: 145, shopFee: 25, offersPpi: false, bannerImage: '' }); logout(); }}>
+          <Button size="sm" variant="outline" className="border-border" onClick={() => { setIncomingJobs([]); setCustomers([]); setBilling(null); setJobNotes({}); setVehiclePhotos({}); setProfileData({ name: '', nzbn: '', phone: '', address: '', serviceAreas: [], diagnosticTools: [], certifications: [], labourRate: 145, shopFee: 25, offersPpi: false, bio: '', profilePhotoUrl: '', bannerImage: '' }); logout(); }}>
             Sign Out
           </Button>
         </nav>
@@ -4673,7 +4746,7 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
 {/* Navigation */}
         <nav className="p-4 md:px-8 flex justify-between items-center bg-background/80 border-b border-border backdrop-blur-sm">
           <Logo />
-          <Button size="sm" variant="outline" className="border-border" onClick={() => { setIncomingJobs([]); setCustomers([]); setBilling(null); setJobNotes({}); setVehiclePhotos({}); setProfileData({ name: '', nzbn: '', phone: '', address: '', serviceAreas: [], diagnosticTools: [], certifications: [], labourRate: 145, shopFee: 25, offersPpi: false, bannerImage: '' }); logout(); }}>
+          <Button size="sm" variant="outline" className="border-border" onClick={() => { setIncomingJobs([]); setCustomers([]); setBilling(null); setJobNotes({}); setVehiclePhotos({}); setProfileData({ name: '', nzbn: '', phone: '', address: '', serviceAreas: [], diagnosticTools: [], certifications: [], labourRate: 145, shopFee: 25, offersPpi: false, bio: '', profilePhotoUrl: '', bannerImage: '' }); logout(); }}>
             Sign Out
           </Button>
         </nav>
@@ -5055,7 +5128,7 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
             </div>
           </div>
           <button
-            onClick={() => { setIncomingJobs([]); setCustomers([]); setBilling(null); setJobNotes({}); setVehiclePhotos({}); setProfileData({ name: '', nzbn: '', phone: '', address: '', serviceAreas: [], diagnosticTools: [], certifications: [], labourRate: 145, shopFee: 25, offersPpi: false, bannerImage: '' }); logout(); }}
+            onClick={() => { setIncomingJobs([]); setCustomers([]); setBilling(null); setJobNotes({}); setVehiclePhotos({}); setProfileData({ name: '', nzbn: '', phone: '', address: '', serviceAreas: [], diagnosticTools: [], certifications: [], labourRate: 145, shopFee: 25, offersPpi: false, bio: '', profilePhotoUrl: '', bannerImage: '' }); logout(); }}
             className="w-full flex items-center justify-center gap-2 py-2.5 rounded-xl border border-border text-xs font-bold text-muted hover:text-torqued-red hover:border-torqued-red/40 hover:bg-torqued-red/5 transition-all"
           >
             <LogOut size={14} /> Sign Out

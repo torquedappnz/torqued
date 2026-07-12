@@ -768,7 +768,7 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
 
     // ── QR "book" block — only for an open, unbooked quote ──
     if (!isBooked) {
-      const quoteUrl = `https://torqued-psi.vercel.app/customer?quote=${encodeURIComponent(job.id)}`;
+      const quoteUrl = `https://torqued.site/customer?quote=${encodeURIComponent(job.id)}`;
       const qr = await loadImageDataUrl('https://api.qrserver.com/v1/create-qr-code/?size=240x240&data=' + encodeURIComponent(quoteUrl));
       if (qr) doc.addImage(qr, 'PNG', 15, 240, 32, 32);
       doc.setTextColor(21, 4, 2); doc.setFont('Helvetica', 'bold'); doc.setFontSize(11);

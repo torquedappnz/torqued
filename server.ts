@@ -12,7 +12,7 @@ const app = express();
 const PORT = 3000;
 
 // Public URL of the Torqued logo for email templates
-const LOGO_URL = 'https://torqued-psi.vercel.app/torqued-logo.png';
+const LOGO_URL = 'https://torqued.site/torqued-logo.png';
 
 // Capture raw body for Stripe webhook signature verification.
 // 10mb limit so receipt photo/PDF uploads (base64) aren't rejected.
@@ -153,7 +153,7 @@ function emailWrap(content: string): string {
 <table width="100%" cellpadding="0" cellspacing="0" style="max-width:520px;background:${EMAIL_CARD};border-radius:20px;overflow:hidden;border:1px solid #e2e0dc;">
 <tr><td style="background:${EMAIL_DARK};padding:22px 32px;border-bottom:3px solid ${EMAIL_RED};text-align:center;"><img src="${LOGO_URL}" width="180" height="60" alt="Torqued" style="display:inline-block;border:0;width:180px;height:60px;" /></td></tr>
 ${content}
-<tr><td style="background:#f8f7f5;border-top:1px solid #e2e0dc;padding:16px 32px;text-align:center;"><p style="margin:0;font-size:10px;font-family:${EMAIL_BODY_FONT};color:#aaa;">Torqued NZ &nbsp;·&nbsp; <a href="mailto:torqued.nz@icloud.com" style="color:#aaa;text-decoration:none;">torqued.nz@icloud.com</a> &nbsp;·&nbsp; <a href="https://torqued-psi.vercel.app/privacy-policy.pdf" style="color:#aaa;text-decoration:none;">Privacy Policy</a></p></td></tr>
+<tr><td style="background:#f8f7f5;border-top:1px solid #e2e0dc;padding:16px 32px;text-align:center;"><p style="margin:0;font-size:10px;font-family:${EMAIL_BODY_FONT};color:#aaa;">Torqued NZ &nbsp;·&nbsp; <a href="mailto:torqued.nz@icloud.com" style="color:#aaa;text-decoration:none;">torqued.nz@icloud.com</a> &nbsp;·&nbsp; <a href="https://torqued.site/privacy-policy.pdf" style="color:#aaa;text-decoration:none;">Privacy Policy</a></p></td></tr>
 </table></td></tr></table></body></html>`;
 }
 
@@ -701,9 +701,17 @@ app.get('/api/mechanic/profile', async (req, res) => {
     // fall back to the core columns so the profile NEVER fails to load.
     let { data, error } = await supabase
       .from('profiles')
-      .select('name, phone, address, nzbn, service_areas, diagnostic_tools, certifications, labour_rate, shop_fee, banner_image, technicians, parts_lead_days, billing_start_date, cancellation_notice_hours, cancellation_partial_refund_pct, offers_ppi')
+      .select('name, phone, address, nzbn, service_areas, diagnostic_tools, certifications, labour_rate, shop_fee, banner_image, technicians, parts_lead_days, billing_start_date, cancellation_notice_hours, cancellation_partial_refund_pct, offers_ppi, bio, profile_photo_url')
       .eq('id', mechanicId)
       .single();
+    // Pre-migration 054: profile_photo_url may not exist yet — retry without it.
+    if (error && /profile_photo_url/.test(error.message || '')) {
+      ({ data, error } = await supabase
+        .from('profiles')
+        .select('name, phone, address, nzbn, service_areas, diagnostic_tools, certifications, labour_rate, shop_fee, banner_image, technicians, parts_lead_days, billing_start_date, cancellation_notice_hours, cancellation_partial_refund_pct, offers_ppi, bio')
+        .eq('id', mechanicId)
+        .single());
+    }
     if (error) {
       console.warn('[mechanic/profile] full select failed, falling back:', error.message);
       ({ data, error } = await supabase
@@ -827,8 +835,8 @@ app.get('/api/mechanic/customer-lookup', async (req, res) => {
 });
 
 // ── Passkeys (WebAuthn) ─────────────────────────────────────
-const RP_ID = 'torqued-psi.vercel.app';
-const RP_ORIGIN = 'https://torqued-psi.vercel.app';
+const RP_ID = 'torqued.site';
+const RP_ORIGIN = 'https://torqued.site';
 const RP_NAME = 'Torqued';
 
 // GET /api/passkey/has — does this actor already have a passkey registered?
@@ -1751,8 +1759,8 @@ app.post('/api/mechanic/email-trial', async (req, res) => {
 <p style="margin:0 0 6px;font-size:11px;text-transform:uppercase;letter-spacing:2px;color:rgba(255,255,255,.5)">Trial Code</p>
 <p style="margin:0;font-family:monospace;font-size:28px;font-weight:900;letter-spacing:4px;color:#FF1800">sritorqued</p>
 </div>
-<p style="font-size:13px;color:rgba(255,255,255,.7)">Log in at <a href="https://torqued-psi.vercel.app/mechanic" style="color:#FF1800">torqued-psi.vercel.app/mechanic</a>, enter <strong>sritorqued</strong> in the promo field on the activation screen, and click Apply — your Garage Hub unlocks instantly.</p>
-<a href="https://torqued-psi.vercel.app/mechanic" style="display:inline-block;background:#FF1800;color:#fff;font-weight:900;text-transform:uppercase;font-size:13px;letter-spacing:1px;text-decoration:none;padding:14px 32px;border-radius:10px;margin-top:8px">Open Mechanic Portal</a>
+<p style="font-size:13px;color:rgba(255,255,255,.7)">Log in at <a href="https://torqued.site/mechanic" style="color:#FF1800">torqued.site/mechanic</a>, enter <strong>sritorqued</strong> in the promo field on the activation screen, and click Apply — your Garage Hub unlocks instantly.</p>
+<a href="https://torqued.site/mechanic" style="display:inline-block;background:#FF1800;color:#fff;font-weight:900;text-transform:uppercase;font-size:13px;letter-spacing:1px;text-decoration:none;padding:14px 32px;border-radius:10px;margin-top:8px">Open Mechanic Portal</a>
 </div></div>`;
 
     await transporter.sendMail({
@@ -1968,7 +1976,7 @@ app.post('/api/customer/reply', async (req, res) => {
 function quoteReadyEmailHtml(custName: string, vehicleLabel: string, mechanicName: string, bookingId: string): string {
   const car = vehicleLabel || 'your vehicle';
   const mech = mechanicName ? ` from ${mechanicName}` : '';
-  const link = `https://torqued-psi.vercel.app/customer?quote=${encodeURIComponent(bookingId)}`;
+  const link = `https://torqued.site/customer?quote=${encodeURIComponent(bookingId)}`;
   return emailWrap(`<tr><td style="padding:36px 32px;">
 ${emailTitle('Your quote is ready')}
 ${emailGreeting(custName)}
@@ -2421,7 +2429,7 @@ app.post('/api/admin/request-setup', async (req, res) => {
     await supabase.from('admin_users').upsert({ email }, { onConflict: 'email' });
 
     const token = signAdmin({ kind: 'admin-setup', email }, 24 * 60 * 60 * 1000);
-    const link = `https://torqued-psi.vercel.app/admin?setup=${token}`;
+    const link = `https://torqued.site/admin?setup=${token}`;
     const transporter = getMailTransporter();
     if (transporter) {
       const html = emailWrap(`<tr><td style="padding:36px 32px;">
@@ -2541,14 +2549,14 @@ ${emailTitle('Admin Portal Access')}
 ${emailPara("You've been granted admin access to the Torqued back-office.")}
 <table width="100%" cellpadding="0" cellspacing="0" style="margin:16px 0;background:#f7f4f0;border-radius:12px;border:1px solid #e8e4df;">
   <tr><td style="padding:16px 18px;">
-    <p style="margin:0 0 8px;font-family:${EMAIL_BODY_FONT};font-size:13px;color:${EMAIL_DARK};"><strong>Portal:</strong> <a href="https://torqued-psi.vercel.app/admin" style="color:${EMAIL_RED};">torqued-psi.vercel.app/admin</a></p>
+    <p style="margin:0 0 8px;font-family:${EMAIL_BODY_FONT};font-size:13px;color:${EMAIL_DARK};"><strong>Portal:</strong> <a href="https://torqued.site/admin" style="color:${EMAIL_RED};">torqued.site/admin</a></p>
     <p style="margin:0;font-family:${EMAIL_BODY_FONT};font-size:13px;color:${EMAIL_DARK};"><strong>Temporary password:</strong> <span style="font-family:monospace;">${tempPass}</span></p>
   </td></tr>
 </table>
 <div style="background:#fff7e6;border:1px solid #ffe2a8;border-radius:12px;padding:14px 16px;margin-bottom:20px;">
   <p style="margin:0;font-family:${EMAIL_BODY_FONT};font-size:13px;color:#7a5b00;"><strong>Action required:</strong> please set a strong personal password — do not keep the temporary one.</p>
 </div>
-<a href="https://torqued-psi.vercel.app/admin" style="display:inline-block;background:${EMAIL_RED};color:#fff;font-family:${EMAIL_BODY_FONT};font-size:12px;font-weight:900;text-transform:uppercase;letter-spacing:1px;text-decoration:none;padding:13px 28px;border-radius:10px;">Open Admin Portal</a>
+<a href="https://torqued.site/admin" style="display:inline-block;background:${EMAIL_RED};color:#fff;font-family:${EMAIL_BODY_FONT};font-size:12px;font-weight:900;text-transform:uppercase;letter-spacing:1px;text-decoration:none;padding:13px 28px;border-radius:10px;">Open Admin Portal</a>
 </td></tr>`);
 
     await transporter.sendMail({
@@ -3317,7 +3325,7 @@ app.post('/api/mechanic/save-onboarding', async (req, res) => {
     const supabase = getSupabaseAdmin();
     if (!supabase) return res.status(500).json({ error: 'Database not configured' });
 
-    const allowed = ['name','legal_name','nzbn','address','phone','owner_name','owner_phone','years_in_trade','bio','bank_account_name','bank_account_number','labour_rate','shop_fee','technicians','parts_lead_days','service_areas','diagnostic_tools','certifications','banner_image','cancellation_notice_hours','cancellation_partial_refund_pct','billing_start_date','agreement_signed_at','agreement_signed_by','offers_ppi','wants_wof'];
+    const allowed = ['name','legal_name','nzbn','address','phone','owner_name','owner_phone','years_in_trade','bio','profile_photo_url','bank_account_name','bank_account_number','labour_rate','shop_fee','technicians','parts_lead_days','service_areas','diagnostic_tools','certifications','banner_image','cancellation_notice_hours','cancellation_partial_refund_pct','billing_start_date','agreement_signed_at','agreement_signed_by','offers_ppi','wants_wof'];
     const update: Record<string, any> = {};
     for (const k of allowed) if (fields[k] !== undefined) update[k] = fields[k];
     if (complete) { update.onboarding_complete = true; update.review_status = 'pending'; }
@@ -3339,6 +3347,11 @@ app.post('/api/mechanic/save-onboarding', async (req, res) => {
     if (error && /wants_wof|review_status/.test(error.message || '')) {
       delete update.wants_wof;
       delete update.review_status;
+      ({ error } = await supabase.from('profiles').update(update).eq('id', mechanicId));
+    }
+    // Pre-migration 054: profile_photo_url column may not exist yet — retry without it.
+    if (error && /profile_photo_url/.test(error.message || '')) {
+      delete update.profile_photo_url;
       ({ error } = await supabase.from('profiles').update(update).eq('id', mechanicId));
     }
     if (error) return res.status(500).json({ error: error.message });
@@ -3476,6 +3489,42 @@ app.get('/api/mechanic/status', async (req, res) => {
   } catch (err) {
     console.error('[mechanic/status]', err);
     res.json({ subscriptionActive: false });
+  }
+});
+
+// POST /api/mechanic/profile-photo — upload a square workshop profile photo (base64 → Supabase Storage)
+app.post('/api/mechanic/profile-photo', async (req, res) => {
+  try {
+    const supabase = getSupabaseAdmin();
+    if (!supabase) return res.status(503).json({ error: 'DB unavailable' });
+    const { mechanicId, imageBase64 } = req.body;
+    if (!mechanicId || !imageBase64) return res.status(400).json({ error: 'mechanicId and imageBase64 required' });
+
+    const base64Data = imageBase64.replace(/^data:image\/[a-z]+;base64,/, '');
+    const buffer = Buffer.from(base64Data, 'base64');
+    if (buffer.length > 5 * 1024 * 1024) return res.status(413).json({ error: 'Image too large (max 5MB)' });
+
+    const ext = imageBase64.startsWith('data:image/png') ? 'png' : 'jpg';
+    const fileName = `${mechanicId}/${Date.now()}.${ext}`;
+    const bucketName = 'mechanic-profile-photos';
+
+    await supabase.storage.createBucket(bucketName, { public: true }).catch(() => {});
+    const { error: uploadErr } = await supabase.storage
+      .from(bucketName).upload(fileName, buffer, { contentType: `image/${ext}`, upsert: false });
+    if (uploadErr) throw uploadErr;
+
+    const { data: { publicUrl } } = supabase.storage.from(bucketName).getPublicUrl(fileName);
+
+    let { error } = await supabase.from('profiles').update({ profile_photo_url: publicUrl }).eq('id', mechanicId);
+    if (error && /profile_photo_url/.test(error.message || '')) {
+      return res.status(500).json({ error: 'Run migration 054 (profile_photo_url column) before uploading a profile photo.' });
+    }
+    if (error) throw error;
+
+    res.json({ url: publicUrl });
+  } catch (err: any) {
+    console.error('[mechanic/profile-photo]', err);
+    res.status(500).json({ error: err?.message || 'Upload failed' });
   }
 });
 
@@ -5976,7 +6025,7 @@ ${emailTitle('Booking Cancelled')}
 ${emailGreeting(ctx.custName ? ctx.custName.split(' ')[0] : 'there')}
 ${emailPara(`Your booking for <strong>${ctx.vehicleLabel}</strong>${ctx.mechanicName ? ` with ${ctx.mechanicName}` : ''} (Ref <strong style="color:${EMAIL_RED};">#${bookingId}</strong>) has been cancelled.`)}
 ${refundLine}
-${emailPara(`Changed your mind? You can re-book anytime at <a href="https://torqued-psi.vercel.app" style="color:${EMAIL_RED};">torqued-psi.vercel.app</a>.`)}
+${emailPara(`Changed your mind? You can re-book anytime at <a href="https://torqued.site" style="color:${EMAIL_RED};">torqued.site</a>.`)}
 </td></tr>`);
           await t.sendMail({
             from: process.env.SMTP_FROM || '"Torqued NZ" <no-reply@torqued.nz>',
@@ -6056,7 +6105,7 @@ app.post('/api/mechanic/reschedule-request', async (req, res) => {
     const mech = mechanicName || ctx.mechanicName || 'Your workshop';
 
     if (ctx.email) {
-      const acceptLink = `https://torqued-psi.vercel.app/customer?reschedule_accept=${encodeURIComponent(bookingId)}&proposed=${encodeURIComponent(proposedDate)}`;
+      const acceptLink = `https://torqued.site/customer?reschedule_accept=${encodeURIComponent(bookingId)}&proposed=${encodeURIComponent(proposedDate)}`;
       const html = emailWrap(`<tr><td style="padding:36px 32px;">
 ${emailTitle('Reschedule Request')}
 ${emailGreeting(ctx.custName)}
@@ -6513,7 +6562,7 @@ app.post('/api/customer/transfer-vehicle', async (req, res) => {
         pending_transfer_expires_at: expiresAt,
       }).eq('rego', formattedRego);
 
-      const claimUrl = `https://torqued-psi.vercel.app/customer?claim=${token}`;
+      const claimUrl = `https://torqued.site/customer?claim=${token}`;
       const transporter = getMailTransporter();
       if (transporter) {
         const html = emailWrap(`<tr><td style="padding:36px 32px;text-align:center;">
@@ -6556,7 +6605,7 @@ ${emailGreeting(recipientProfile.name)}
 ${emailPara(`<strong>${senderName}</strong> has transferred a vehicle to your Torqued account — including its full service history.`)}
 ${emailPara(`<strong style="color:${EMAIL_RED};">${vehicleLabel} (${formattedRego})</strong>`)}
 ${emailPara('You can now view its complete service history, get quotes, and book services through Torqued.')}
-<a href="https://torqued-psi.vercel.app/customer" style="display:inline-block;background:${EMAIL_RED};color:#fff;font-family:${EMAIL_TITLE_FONT};font-size:13px;font-weight:900;text-transform:uppercase;letter-spacing:1px;text-decoration:none;padding:14px 34px;border-radius:12px;">View My Vehicle</a>
+<a href="https://torqued.site/customer" style="display:inline-block;background:${EMAIL_RED};color:#fff;font-family:${EMAIL_TITLE_FONT};font-size:13px;font-weight:900;text-transform:uppercase;letter-spacing:1px;text-decoration:none;padding:14px 34px;border-radius:12px;">View My Vehicle</a>
 </td></tr>`);
       await transporter.sendMail({
         from: process.env.SMTP_FROM || '"Torqued" <torquedapp.nz@gmail.com>',
@@ -7140,12 +7189,12 @@ ${emailPara(`It's time for your annual maintenance. We recommend a <strong>12-mo
 <table width="100%" cellpadding="0" cellspacing="0" style="margin:20px 0;background:#f7f4f0;border-radius:12px;border:1px solid #e8e4df;">
   <tr><td style="padding:20px 18px;text-align:center;">
     <p style="margin:0 0 14px;font-family:${EMAIL_BODY_FONT};font-size:13px;font-weight:700;color:${EMAIL_DARK};">Book your next service with <strong>${mechanicName}</strong></p>
-    <a href="https://torqued-psi.vercel.app" style="display:inline-block;background:${EMAIL_RED};color:#fff;font-family:${EMAIL_BODY_FONT};font-size:12px;font-weight:900;text-transform:uppercase;letter-spacing:1px;text-decoration:none;padding:13px 28px;border-radius:10px;">Schedule Service</a>
+    <a href="https://torqued.site" style="display:inline-block;background:${EMAIL_RED};color:#fff;font-family:${EMAIL_BODY_FONT};font-size:12px;font-weight:900;text-transform:uppercase;letter-spacing:1px;text-decoration:none;padding:13px 28px;border-radius:10px;">Schedule Service</a>
   </td></tr>
 </table>
 
 <p style="margin:24px 0 0;font-family:${EMAIL_BODY_FONT};font-size:11px;color:${EMAIL_MUTED};text-align:center;">
-  <a href="https://torqued-psi.vercel.app/unsubscribe?email=${encodeURIComponent(emailStr)}" style="color:${EMAIL_MUTED};text-decoration:underline;">Unsubscribe from service reminders</a>
+  <a href="https://torqued.site/unsubscribe?email=${encodeURIComponent(emailStr)}" style="color:${EMAIL_MUTED};text-decoration:underline;">Unsubscribe from service reminders</a>
 </p>
 </td></tr>`);
 }
