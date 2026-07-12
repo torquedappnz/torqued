@@ -153,7 +153,7 @@ function emailWrap(content: string): string {
 <table width="100%" cellpadding="0" cellspacing="0" style="max-width:520px;background:${EMAIL_CARD};border-radius:20px;overflow:hidden;border:1px solid #e2e0dc;">
 <tr><td style="background:${EMAIL_DARK};padding:22px 32px;border-bottom:3px solid ${EMAIL_RED};text-align:center;"><img src="${LOGO_URL}" width="180" height="60" alt="Torqued" style="display:inline-block;border:0;width:180px;height:60px;" /></td></tr>
 ${content}
-<tr><td style="background:#f8f7f5;border-top:1px solid #e2e0dc;padding:16px 32px;text-align:center;"><p style="margin:0;font-size:10px;font-family:${EMAIL_BODY_FONT};color:#aaa;">Torqued NZ &nbsp;·&nbsp; <a href="mailto:torqued.nz@icloud.com" style="color:#aaa;text-decoration:none;">torqued.nz@icloud.com</a> &nbsp;·&nbsp; <a href="https://torqued.site/privacy-policy.pdf" style="color:#aaa;text-decoration:none;">Privacy Policy</a></p></td></tr>
+<tr><td style="background:#f8f7f5;border-top:1px solid #e2e0dc;padding:16px 32px;text-align:center;"><p style="margin:0;font-size:10px;font-family:${EMAIL_BODY_FONT};color:#aaa;">Torqued NZ &nbsp;·&nbsp; <a href="mailto:hello@torqued.site" style="color:#aaa;text-decoration:none;">hello@torqued.site</a> &nbsp;·&nbsp; <a href="https://torqued.site/privacy-policy.pdf" style="color:#aaa;text-decoration:none;">Privacy Policy</a></p></td></tr>
 </table></td></tr></table></body></html>`;
 }
 
@@ -7865,7 +7865,7 @@ app.post('/api/mechanic/request-history-access', async (req, res) => {
                 </div>
                 <p style="font-size:13px;color:#6b7280;margin-top:8px;">This code expires in 5 minutes. If you did not expect this request or do not wish to share your history, you can ignore this email — no access will be granted without the code.</p>
                 <hr style="border:none;border-top:1px solid #e5e7eb;margin:20px 0;" />
-                <p style="font-size:11px;color:#9ca3af;">Torqued NZ · torqued.nz@icloud.com · If you have questions, reply to this email.</p>
+                <p style="font-size:11px;color:#9ca3af;">Torqued NZ · hello@torqued.site · If you have questions, reply to this email.</p>
               </div>
             </div>
           </div>
@@ -7954,9 +7954,9 @@ app.post('/api/mechanic/verify-history-otp', async (req, res) => {
                 </div>
                 <div style="padding:28px;">
                   <p style="font-size:15px;color:#111;margin-bottom:12px;">This is to let you know that a mechanic on Torqued has accessed the service history for your <strong>${vehicleLabel}</strong> to prepare a quote.</p>
-                  <p style="font-size:14px;color:#6b7280;">If you have questions about this, contact us at <a href="mailto:torqued.nz@icloud.com" style="color:#ff1800;">torqued.nz@icloud.com</a>.</p>
+                  <p style="font-size:14px;color:#6b7280;">If you have questions about this, contact us at <a href="mailto:hello@torqued.site" style="color:#ff1800;">hello@torqued.site</a>.</p>
                   <hr style="border:none;border-top:1px solid #e5e7eb;margin:20px 0;" />
-                  <p style="font-size:11px;color:#9ca3af;">Torqued NZ · torqued.nz@icloud.com</p>
+                  <p style="font-size:11px;color:#9ca3af;">Torqued NZ · hello@torqued.site</p>
                 </div>
               </div>
             </div>
@@ -8164,7 +8164,7 @@ ${emailTitle(disabled ? 'AI features paused' : 'AI features re-enabled')}
 ${emailGreeting(profile.name)}
 ${disabled
   ? emailPara(`You have requested that AI-powered features be paused on your Torqued account. This includes AI service recommendations, vehicle health analysis, and AI-assisted receipt scanning.`) +
-    emailPara(`To re-enable AI features, please contact us at <a href="mailto:torqued.nz@icloud.com" style="color:${EMAIL_RED};">torqued.nz@icloud.com</a>.`)
+    emailPara(`To re-enable AI features, please contact us at <a href="mailto:hello@torqued.site" style="color:${EMAIL_RED};">hello@torqued.site</a>.`)
   : emailPara(`AI-powered features have been re-enabled on your Torqued account. You can now access AI service recommendations, vehicle health analysis, and AI-assisted receipt scanning.`)
 }
 </td></tr>`),

@@ -930,7 +930,7 @@ export const AdminPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) => {
             <div className="bg-card border border-border rounded-2xl p-4 text-xs text-muted space-y-1">
               <p className="font-bold text-foreground">Privacy Policy</p>
               <p>Published policy document: <a href="/privacy-policy.pdf" target="_blank" rel="noreferrer" className="text-torqued-red underline">View Privacy Policy PDF</a></p>
-              <p>For privacy enquiries: <a href="mailto:torqued.nz@icloud.com" className="text-torqued-red">torqued.nz@icloud.com</a></p>
+              <p>For privacy enquiries: <a href="mailto:hello@torqued.site" className="text-torqued-red">hello@torqued.site</a></p>
             </div>
           </div>
         )}

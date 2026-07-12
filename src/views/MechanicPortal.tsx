@@ -1180,7 +1180,7 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
     } catch { alert('Could not save mileage.'); }
   };
 
-  // Mechanic sends a real email to the customer (reply-to torqued.nz@icloud.com)
+  // Mechanic sends a real email to the customer (reply-to hello@torqued.site)
   const messageCustomer = async (job: any) => {
     const msg = prompt(`Message to the customer about ${job.reg || 'this job'}:`);
     if (msg == null || !msg.trim()) return;
