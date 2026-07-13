@@ -26,6 +26,11 @@ export interface InventoryPart {
   unitPrice: number;
   description?: string;
   minStockLevel?: number;
+  categoryId?: number | null;
+  spec?: string | null;
+  unit?: 'each' | 'litre' | 'set' | 'pair';
+  supplier?: string | null;
+  sellPriceInclGst?: number | null;
 }
 
 export interface LabourTask {

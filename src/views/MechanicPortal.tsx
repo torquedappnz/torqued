@@ -352,6 +352,10 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
   const [profileSaveStatus, setProfileSaveStatus] = useState<'idle' | 'saved' | 'error'>('idle');
   const [profileSaveError, setProfileSaveError] = useState<string | null>(null);
   const [addressUpdateStatus, setAddressUpdateStatus] = useState<'idle' | 'updating' | 'updated' | 'error'>('idle');
+  const [stockReportFrom, setStockReportFrom] = useState(() => { const d = new Date(); d.setMonth(d.getMonth() - 1); return localISO(d); });
+  const [stockReportTo, setStockReportTo] = useState(() => localISO(new Date()));
+  const [stockReportBusy, setStockReportBusy] = useState(false);
+  const [stockReportError, setStockReportError] = useState<string | null>(null);
   const [mechLocating, setMechLocating] = useState(false);
   const [portalLoading, setPortalLoading] = useState(true);
   const [capSaveError, setCapSaveError] = useState<string | null>(null);
@@ -862,6 +866,11 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
           unitPrice: parseFloat(row.unit_price) || 0,
           description: row.description ?? undefined,
           minStockLevel: row.min_stock_level ?? undefined,
+          categoryId: row.category_id ?? null,
+          spec: row.spec ?? null,
+          unit: row.unit || 'each',
+          supplier: row.supplier ?? null,
+          sellPriceInclGst: row.sell_price_incl_gst != null ? parseFloat(row.sell_price_incl_gst) : null,
         }));
         setParts(prev => {
           const dbIds = new Set(dbParts.map((p: any) => p.id));
@@ -870,6 +879,9 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
         });
       })
       .catch(() => {});
+
+    fetch('/api/part-categories').then(r => r.json()).then(d => setPartCategories(d.categories || [])).catch(() => {});
+    fetch(`/api/mechanic/reorder-queue?mechanicId=${user.id}`).then(r => r.json()).then(d => setReorderQueue(d.items || [])).catch(() => {});
   }, [user]);
 
   const [searchQuery, setSearchQuery] = useState('');
@@ -883,6 +895,8 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
   const [calendarMonth, setCalendarMonth] = useState(() => { const d = new Date(); return { year: d.getFullYear(), month: d.getMonth() }; });
   const [calendarDayDate, setCalendarDayDate] = useState<string>(() => localISO(new Date()));
   const [parts, setParts] = useState<InventoryPart[]>([]);
+  const [partCategories, setPartCategories] = useState<{ id: number; slug: string; display: string; job_group: string }[]>([]);
+  const [reorderQueue, setReorderQueue] = useState<any[]>([]);
   const [incomingJobs, setIncomingJobs] = useState<any[]>([]);
   const [weekRevenue, setWeekRevenue] = useState(0);
   const [pastJobs, setPastJobs] = useState<any[]>([]);
@@ -1092,7 +1106,7 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
   const [customQuotePrice, setCustomQuotePrice] = useState('580');
   const [deliveredParts, setDeliveredParts] = useState<DeliveryItem[]>([]);
   const [isAddingPart, setIsAddingPart] = useState(false);
-  const [newPart, setNewPart] = useState<Partial<InventoryPart>>({ name: '', quantity: 0, unitPrice: 0 });
+  const [newPart, setNewPart] = useState<Partial<InventoryPart>>({ name: '', quantity: 0, unitPrice: 0, unit: 'each' });
   const [showProcurement, setShowProcurement] = useState(false);
   const [selectedJobForProcurement, setSelectedJobForProcurement] = useState<string | null>(null);
   const [procurementSelections, setProcurementSelections] = useState<Record<string, string>>({});
@@ -1550,25 +1564,68 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
             <button onClick={() => setIsAddingPart(false)}><X size={20} className="text-muted hover:text-foreground" /></button>
           </div>
           <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-            <Input 
-              label="Part Name" 
-              placeholder="E.g. VW Oil Filter" 
+            <Input
+              label="Part Name"
+              placeholder="E.g. VW Oil Filter"
               value={newPart.name}
               onChange={(e) => setNewPart({ ...newPart, name: e.target.value })}
             />
-            <Input 
-              label="Quantity" 
+            <div>
+              <label className="text-xs font-bold text-muted uppercase tracking-wide block mb-1.5">Category</label>
+              <select
+                value={newPart.categoryId ?? ''}
+                onChange={(e) => setNewPart({ ...newPart, categoryId: e.target.value ? Number(e.target.value) : null })}
+                className="w-full bg-background border border-border rounded-xl px-3 h-11 text-sm text-foreground focus:outline-none focus:border-torqued-red"
+              >
+                <option value="">— None —</option>
+                {partCategories.map(c => <option key={c.id} value={c.id}>{c.display}</option>)}
+              </select>
+            </div>
+            <Input
+              label="Spec / Type"
+              placeholder="e.g. Castrol EDGE 5W-30 VW 502.00/507.00"
+              value={newPart.spec || ''}
+              onChange={(e) => setNewPart({ ...newPart, spec: e.target.value })}
+            />
+            <Input
+              label="Quantity in stock"
               type="number"
-              placeholder="0" 
+              placeholder="0"
               value={newPart.quantity || ''}
               onChange={(e) => setNewPart({ ...newPart, quantity: parseInt(e.target.value) || 0 })}
             />
-            <Input 
-              label="Unit Price ($)" 
+            <div>
+              <label className="text-xs font-bold text-muted uppercase tracking-wide block mb-1.5">Unit</label>
+              <select
+                value={newPart.unit || 'each'}
+                onChange={(e) => setNewPart({ ...newPart, unit: e.target.value as InventoryPart['unit'] })}
+                className="w-full bg-background border border-border rounded-xl px-3 h-11 text-sm text-foreground focus:outline-none focus:border-torqued-red"
+              >
+                <option value="each">Each</option>
+                <option value="litre">Litre</option>
+                <option value="set">Set</option>
+                <option value="pair">Pair</option>
+              </select>
+            </div>
+            <Input
+              label="Supplier"
+              placeholder="e.g. Repco Dunedin"
+              value={newPart.supplier || ''}
+              onChange={(e) => setNewPart({ ...newPart, supplier: e.target.value })}
+            />
+            <Input
+              label="Your cost ($, excl. GST)"
               type="number"
-              placeholder="0.00" 
+              placeholder="0.00"
               value={newPart.unitPrice || ''}
               onChange={(e) => setNewPart({ ...newPart, unitPrice: parseFloat(e.target.value) || 0 })}
+            />
+            <Input
+              label={`Charge to customer (incl. GST, per ${newPart.unit || 'each'})`}
+              type="number"
+              placeholder="0.00"
+              value={newPart.sellPriceInclGst ?? ''}
+              onChange={(e) => setNewPart({ ...newPart, sellPriceInclGst: e.target.value ? parseFloat(e.target.value) : null })}
             />
           </div>
           <div className="flex gap-3">
@@ -1579,7 +1636,7 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                 const optimistic: InventoryPart = { ...newPart as InventoryPart, id: tempId };
                 setParts(prev => [...prev, optimistic]);
                 setIsAddingPart(false);
-                setNewPart({ name: '', quantity: 0, unitPrice: 0 });
+                setNewPart({ name: '', quantity: 0, unitPrice: 0, unit: 'each' });
                 // Persist via Express API (service role — bypasses RLS)
                 fetch('/api/mechanic/parts', {
                   method: 'POST',
@@ -1589,6 +1646,9 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                     quantity: newPart.quantity, unitPrice: newPart.unitPrice,
                     description: (newPart as any).description ?? null,
                     minStockLevel: (newPart as any).minStockLevel ?? null,
+                    categoryId: newPart.categoryId ?? null, spec: newPart.spec || null,
+                    unit: newPart.unit || 'each', supplier: newPart.supplier || null,
+                    sellPriceInclGst: newPart.sellPriceInclGst ?? null,
                   }),
                 })
                   .then(async r => {
@@ -1666,6 +1726,60 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
         </Card>
       )}
 
+      {reorderQueue.length > 0 && (
+        <Card className="p-5 bg-card border-amber-500/30 space-y-3">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-2">
+              <AlertCircle size={18} className="text-amber-500" />
+              <h3 className="text-base font-black text-foreground">Need to Order ({reorderQueue.length})</h3>
+            </div>
+            <button
+              className="text-[10px] font-bold text-torqued-red underline"
+              onClick={() => {
+                const lines = reorderQueue.map(r => `${r.label}\tQty ${r.quantity_needed}\t${r.mechanic_parts?.name ? `Possible duplicate of: ${r.mechanic_parts.name}` : ''}`);
+                const csv = ['Part needed\tQuantity\tNotes', ...lines].join('\n');
+                const blob = new Blob([csv], { type: 'text/tab-separated-values' });
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = url; a.download = `need-to-order-${new Date().toISOString().slice(0, 10)}.tsv`; a.click();
+                URL.revokeObjectURL(url);
+              }}
+            >Export list</button>
+          </div>
+          <p className="text-xs text-muted">Automatically raised when you accept a job needing a part you're not carrying enough of.</p>
+          <div className="space-y-2">
+            {reorderQueue.map(r => (
+              <div key={r.id} className="flex items-center justify-between bg-background border border-border rounded-xl p-3 text-sm">
+                <div>
+                  <p className="font-bold text-foreground">{r.label} <span className="text-muted font-normal">× {r.quantity_needed}</span></p>
+                  {r.mechanic_parts?.name && (
+                    <p className="text-[10px] text-amber-600 dark:text-amber-400 font-bold uppercase tracking-widest">
+                      You may already have this in your inventory — check "{r.mechanic_parts.name}" before ordering
+                    </p>
+                  )}
+                </div>
+                <div className="flex gap-2 shrink-0">
+                  <button
+                    onClick={async () => {
+                      setReorderQueue(prev => prev.filter(x => x.id !== r.id));
+                      try { await fetch(`/api/mechanic/reorder-queue/${r.id}/mark-ordered`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ mechanicId: user?.id }) }); } catch {}
+                    }}
+                    className="text-[10px] font-bold text-emerald-600 dark:text-emerald-400 underline"
+                  >Mark ordered</button>
+                  <button
+                    onClick={async () => {
+                      setReorderQueue(prev => prev.filter(x => x.id !== r.id));
+                      try { await fetch(`/api/mechanic/reorder-queue/${r.id}/dismiss`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ mechanicId: user?.id }) }); } catch {}
+                    }}
+                    className="text-muted hover:text-torqued-red"
+                  ><X size={14} /></button>
+                </div>
+              </div>
+            ))}
+          </div>
+        </Card>
+      )}
+
       <Card className="overflow-hidden bg-card border-border">
         {parts.length === 0 && <p className="p-8 text-center text-muted italic text-sm">No parts in your inventory yet. Add one above.</p>}
         {parts.length > 0 && (
@@ -1673,8 +1787,9 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
           <thead className="bg-background text-[10px] font-bold uppercase text-muted">
             <tr>
               <th className="px-6 py-4">Part Details</th>
+              <th className="px-6 py-4">Category / Supplier</th>
               <th className="px-6 py-4">Stock Level</th>
-              <th className="px-6 py-4">Unit Price</th>
+              <th className="px-6 py-4">Cost / Sell (incl. GST)</th>
               <th className="px-6 py-4">Total Value</th>
               <th className="px-6 py-4 text-right">Actions</th>
             </tr>
@@ -1689,16 +1804,21 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                     </div>
                     <div>
                       <p className="font-bold text-foreground">{part.name}</p>
+                      {part.spec && <p className="text-xs text-muted">{part.spec}</p>}
                       {part.description && <p className="text-xs text-muted">{part.description}</p>}
                     </div>
                   </div>
+                </td>
+                <td className="px-6 py-4 text-xs text-muted">
+                  <p>{partCategories.find(c => c.id === part.categoryId)?.display || '—'}</p>
+                  {part.supplier && <p className="text-[10px]">{part.supplier}</p>}
                 </td>
                 <td className="px-6 py-4">
                   <div className="flex items-center gap-2">
                     <span className={cn(
                       "font-bold",
                       part.quantity < 5 ? "text-torqued-red" : "text-foreground"
-                    )}>{part.quantity} units</span>
+                    )}>{part.quantity} {part.unit === 'litre' ? 'L' : (part.unit || 'units')}</span>
                     {part.quantity < 5 && (
                       <span className="text-[8px] bg-torqued-red/20 text-torqued-red px-1.5 py-0.5 rounded font-bold uppercase tracking-widest border border-torqued-red/20">Order Now</span>
                     )}
@@ -1710,7 +1830,10 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                     />
                   </div>
                 </td>
-                <td className="px-6 py-4 font-medium text-muted">{formatCurrency(part.unitPrice)}</td>
+                <td className="px-6 py-4 font-medium text-muted">
+                  <p>{formatCurrency(part.unitPrice)}</p>
+                  {part.sellPriceInclGst != null && <p className="text-emerald-600 dark:text-emerald-400 font-bold">{formatCurrency(part.sellPriceInclGst)}</p>}
+                </td>
                 <td className="px-6 py-4 font-bold text-foreground">{formatCurrency(part.quantity * part.unitPrice)}</td>
                 <td className="px-6 py-4 text-right">
                   <div className="flex justify-end gap-2 opacity-0 group-hover:opacity-100 transition-opacity">
@@ -2020,6 +2143,48 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
     );
   };
 
+  const generateStockReport = async () => {
+    if (!user) return;
+    setStockReportBusy(true); setStockReportError(null);
+    try {
+      const r = await fetch(`/api/mechanic/inventory-report?mechanicId=${user.id}&from=${stockReportFrom}&to=${stockReportTo}`);
+      const d = await r.json();
+      if (!r.ok) { setStockReportError(d.error || 'Could not generate report.'); return; }
+      const doc = new jsPDF({ unit: 'mm', format: 'a4' });
+      const FONT = 'helvetica';
+      let y = 20;
+      doc.setFont(FONT, 'bold'); doc.setFontSize(16); doc.setTextColor(21, 4, 2);
+      doc.text('Stock Report', 15, y); y += 8;
+      doc.setFont(FONT, 'normal'); doc.setFontSize(10); doc.setTextColor(80, 80, 80);
+      doc.text(`${profileData.name || 'Workshop'} — ${new Date(stockReportFrom).toLocaleDateString('en-NZ')} to ${new Date(stockReportTo).toLocaleDateString('en-NZ')}`, 15, y); y += 12;
+
+      const summary = d.summary || [];
+      if (summary.length === 0) {
+        doc.setFont(FONT, 'normal'); doc.setFontSize(10); doc.setTextColor(120, 120, 120);
+        doc.text('No stock movements in this period.', 15, y);
+      } else {
+        doc.setFont(FONT, 'bold'); doc.setFontSize(9); doc.setTextColor(21, 4, 2);
+        doc.text('Part', 15, y); doc.text('In', 110, y); doc.text('Out', 135, y); doc.text('Net Change', 160, y); y += 6;
+        doc.setDrawColor(200, 200, 200); doc.line(15, y - 4, 195, y - 4);
+        doc.setFont(FONT, 'normal');
+        summary.forEach((s: any) => {
+          if (y > 280) { doc.addPage(); y = 20; }
+          const label = s.spec ? `${s.name} — ${s.spec}` : s.name;
+          doc.text(String(label), 15, y, { maxWidth: 90 });
+          doc.text(`${s.qtyIn} ${s.unit}`, 110, y);
+          doc.text(`${s.qtyOut} ${s.unit}`, 135, y);
+          doc.text(`${s.net >= 0 ? '+' : ''}${s.net} ${s.unit}`, 160, y);
+          y += 6;
+        });
+      }
+      doc.save(`Torqued-Stock-Report-${stockReportFrom}-to-${stockReportTo}.pdf`);
+    } catch (e: any) {
+      setStockReportError(e?.message || 'Could not generate report.');
+    } finally {
+      setStockReportBusy(false);
+    }
+  };
+
   const renderProfile = () => (
     <div className="max-w-4xl space-y-8 pb-12">
       <div className="space-y-2">
@@ -2301,6 +2466,28 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
             {addressUpdateStatus === 'error' && <p className="text-xs text-torqued-red font-bold">Geocode failed — check the address and try again.</p>}
           </Card>
         </div>
+
+        <Card className="p-6 space-y-4 bg-card border-border">
+          <div className="flex items-center gap-2 border-b border-border pb-4">
+            <Package size={20} className="text-torqued-red" />
+            <h3 className="text-xl text-foreground">Stock Report</h3>
+          </div>
+          <p className="text-xs text-muted">Track parts entered and used over a date range — for stocktakes, supplier reconciliation, or tax time.</p>
+          <div className="grid grid-cols-2 gap-3">
+            <div>
+              <label className="text-[10px] font-black uppercase tracking-widest text-muted block mb-1">From</label>
+              <input type="date" value={stockReportFrom} onChange={e => setStockReportFrom(e.target.value)} className="w-full bg-background border border-border rounded-xl px-3 h-11 text-sm text-foreground focus:outline-none focus:border-torqued-red" />
+            </div>
+            <div>
+              <label className="text-[10px] font-black uppercase tracking-widest text-muted block mb-1">To</label>
+              <input type="date" value={stockReportTo} onChange={e => setStockReportTo(e.target.value)} className="w-full bg-background border border-border rounded-xl px-3 h-11 text-sm text-foreground focus:outline-none focus:border-torqued-red" />
+            </div>
+          </div>
+          {stockReportError && <p className="text-xs text-torqued-red font-bold">{stockReportError}</p>}
+          <Button disabled={stockReportBusy} className="bg-torqued-red text-white" onClick={generateStockReport}>
+            {stockReportBusy ? 'Generating…' : 'Generate Report'}
+          </Button>
+        </Card>
 
         {/* Capacity & Cancellation Policy (moved here from Calendar) */}
         <Card className="p-6 space-y-4">

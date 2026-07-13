@@ -81,6 +81,110 @@ function getSupabaseAdmin() {
   return createSupabaseClient(url, key);
 }
 
+// Maps a customer-facing SERVICES id (src/constants.ts) to the part_categories
+// slug that represents the part it consumes. Shared by the reorder-queue
+// trigger (accept-job) and the mechanic-inventory pricing override in
+// /api/fleet-prices, so the two stay in sync instead of drifting apart.
+const SERVICE_TO_CATEGORY_SLUG: Record<string, string> = {
+  oil: 'oil_change',
+  timing: 'cambelt_full',
+  timing_chain_full: 'timing_chain_replacement',
+  transmission: 'transmission_service',
+  battery: 'battery_12v',
+  spark_plugs: 'spark_plugs',
+  cabin_filter: 'cabin_filter',
+  brake_fluid: 'brake_fluid_flush',
+  coolant_flush: 'coolant_flush',
+  ignition_coils: 'ignition_coil',
+  water_pump: 'water_pump_standalone',
+  thermostat_housing: 'water_pump_standalone',
+  differential: 'differential_service',
+  brakes_front_pads: 'brake_pads_front',
+  brakes_front_rotors: 'brake_pads_and_rotors_front',
+  brakes_rear_pads: 'brake_pads_rear',
+  brakes_rear_rotors: 'brake_pads_and_rotors_front',
+};
+
+// When a specific mechanic is quoting (?mechanic=<id>), override the generic
+// engine's parts price for any service where that mechanic actually stocks a
+// matching part with their own customer sell price set. Litre-unit parts (oils/
+// fluids) are multiplied by the vehicle's real capacity; everything else is
+// charged as a flat per-unit price. Labour stays whatever the generic engine
+// already computed (from the mechanic's own labour_rate) — only the parts
+// portion changes. No matching stocked part → the service is left untouched.
+async function applyMechanicInventoryOverrides(supabase: any, mechanicId: string | null, prices: Record<string, any>, oilCapacityL: number) {
+  if (!mechanicId) return prices;
+  try {
+    const { data: parts } = await supabase.from('mechanic_parts')
+      .select('category_id, unit, sell_price_incl_gst')
+      .eq('mechanic_id', mechanicId)
+      .not('category_id', 'is', null)
+      .not('sell_price_incl_gst', 'is', null)
+      .gt('quantity', 0);
+    if (!parts?.length) return prices;
+    const byCategory = new Map<number, any>();
+    for (const p of parts) if (!byCategory.has(p.category_id)) byCategory.set(p.category_id, p);
+
+    for (const [svcId, slug] of Object.entries(SERVICE_TO_CATEGORY_SLUG)) {
+      const existing = prices[svcId];
+      if (!existing) continue;
+      const category = await getCategoryForSlug(supabase, slug);
+      if (!category) continue;
+      const part = byCategory.get(category.id);
+      if (!part) continue;
+      const sellPrice = Number(part.sell_price_incl_gst);
+      if (!(sellPrice > 0)) continue;
+      const partsTotal = part.unit === 'litre' ? Math.round(sellPrice * oilCapacityL) : Math.round(sellPrice);
+      const labourLow = Number(existing.labourLow) || 0;
+      const labourHigh = Number(existing.labourHigh) || 0;
+      prices[svcId] = {
+        ...existing,
+        partsLow: partsTotal, partsHigh: partsTotal,
+        low: partsTotal + labourLow, high: partsTotal + labourHigh,
+        midpoint: partsTotal + Math.round((labourLow + labourHigh) / 2),
+        fromMechanicInventory: true,
+      };
+    }
+  } catch (e) { console.warn('[applyMechanicInventoryOverrides] non-fatal:', (e as Error)?.message); }
+  return prices;
+}
+
+// part_categories rarely changes — cache slug -> {id, display} lookups for the process lifetime.
+const categoryLookupCache = new Map<string, { id: number; display: string } | null>();
+async function getCategoryForSlug(supabase: any, slug: string): Promise<{ id: number; display: string } | null> {
+  if (categoryLookupCache.has(slug)) return categoryLookupCache.get(slug)!;
+  const { data } = await supabase.from('part_categories').select('id, display').eq('slug', slug).maybeSingle();
+  const result = data ? { id: data.id, display: data.display as string } : null;
+  categoryLookupCache.set(slug, result);
+  return result;
+}
+
+// After a mechanic accepts a job, check each service's part category against
+// their own stock; queue a "Need to Order" entry when they're not carrying any
+// (or the row is at zero stock). Flags a likely duplicate when they already
+// have *a* row in that category, even if it's currently empty, so the mechanic
+// can restock instead of ordering something new under a different name.
+async function queueReorderIfNeeded(supabase: any, mechanicId: string, bookingId: string, serviceIds: string[]) {
+  for (const svcId of serviceIds) {
+    const slug = SERVICE_TO_CATEGORY_SLUG[svcId];
+    if (!slug) continue;
+    try {
+      const category = await getCategoryForSlug(supabase, slug);
+      if (!category) continue;
+      const { data: stocked } = await supabase.from('mechanic_parts').select('id, name, quantity').eq('mechanic_id', mechanicId).eq('category_id', category.id);
+      const rows = stocked || [];
+      const totalQty = rows.reduce((s: number, r: any) => s + (Number(r.quantity) || 0), 0);
+      if (totalQty > 0) continue; // sufficiently stocked — nothing to queue
+      await supabase.from('mechanic_reorder_queue').upsert({
+        mechanic_id: mechanicId, booking_id: bookingId, category_id: category.id,
+        label: category.display, quantity_needed: 1,
+        possible_duplicate_part_id: rows[0]?.id ?? null,
+        status: 'pending',
+      }, { onConflict: 'booking_id,category_id', ignoreDuplicates: true });
+    } catch (e) { console.warn('[queueReorderIfNeeded] non-fatal:', (e as Error)?.message); }
+  }
+}
+
 function getOrigin(req: express.Request): string {
   // SITE_URL env var is the canonical production origin — always wins when set
   if (process.env.SITE_URL) return process.env.SITE_URL.replace(/\/$/, '');
@@ -323,8 +427,10 @@ app.post('/api/mechanic/update-job-status', async (req, res) => {
     if (!supabase) return res.status(500).json({ error: 'Database not configured' });
 
     // Enforce billing_start_date: mechanic cannot accept jobs before their billing starts
+    let acceptedBooking: { mechanic_id?: string; service_ids?: string[] } | null = null;
     if (status === 'accepted' || status === 'in_progress') {
-      const { data: booking } = await supabase.from('bookings').select('mechanic_id').eq('id', bookingId).single();
+      const { data: booking } = await supabase.from('bookings').select('mechanic_id, service_ids').eq('id', bookingId).single();
+      acceptedBooking = booking;
       if (booking?.mechanic_id) {
         const { data: profile } = await supabase.from('profiles').select('billing_start_date').eq('id', booking.mechanic_id).single();
         if (profile?.billing_start_date) {
@@ -344,6 +450,14 @@ app.post('/api/mechanic/update-job-status', async (req, res) => {
     if (status === 'completed') { update.completed_at = new Date().toISOString(); }
     const { error } = await supabase.from('bookings').update(update).eq('id', bookingId);
     if (error) return res.status(500).json({ error: error.message });
+
+    // Confirmed job: check the mechanic's own stock for the parts it needs and
+    // raise "Need to Order" entries for anything they're not carrying.
+    if (status === 'accepted' && acceptedBooking?.mechanic_id && acceptedBooking.service_ids?.length) {
+      queueReorderIfNeeded(supabase, acceptedBooking.mechanic_id, bookingId, acceptedBooking.service_ids)
+        .catch(e => console.warn('[update-job-status] reorder queue non-fatal:', e?.message));
+    }
+
     res.json({ success: true });
   } catch (err) {
     console.error('[mechanic/update-job-status]', err);
@@ -543,6 +657,22 @@ app.get('/api/history/:rego', async (req, res) => {
   }
 });
 
+// GET /api/part-categories — job-relevant categories for the mechanic's inventory
+// Category picker (links a stocked part to the job it prices/consumes).
+app.get('/api/part-categories', async (_req, res) => {
+  try {
+    const supabase = getSupabaseAdmin();
+    if (!supabase) return res.json({ categories: [] });
+    const { data, error } = await supabase.from('part_categories')
+      .select('id, slug, display, job_group').eq('is_job', true).order('job_group').order('display');
+    if (error) throw error;
+    res.json({ categories: data ?? [] });
+  } catch (err) {
+    console.error('[part-categories]', err);
+    res.json({ categories: [] });
+  }
+});
+
 // ── Mechanic Parts Inventory (CRUD via service-role — bypasses RLS) ──────────
 // GET /api/mechanic/parts?mechanicId=
 app.get('/api/mechanic/parts', async (req, res) => {
@@ -561,22 +691,47 @@ app.get('/api/mechanic/parts', async (req, res) => {
   }
 });
 
+// Records a stock movement. Non-fatal — a logging failure must never block the
+// actual inventory change (the column may not exist yet if migration 056 hasn't
+// been run, in which case we just skip the ledger entry).
+async function logInventoryTxn(supabase: any, params: { mechanicId: string; partId: string; direction: 'in' | 'out'; quantity: number; reason: 'restock' | 'used_on_job' | 'manual_adjust'; bookingId?: string | null }) {
+  if (params.quantity <= 0) return;
+  try {
+    await supabase.from('mechanic_inventory_transactions').insert({
+      mechanic_id: params.mechanicId, part_id: params.partId, direction: params.direction,
+      quantity: params.quantity, reason: params.reason, booking_id: params.bookingId ?? null,
+    });
+  } catch (e) { console.warn('[logInventoryTxn] non-fatal:', (e as Error)?.message); }
+}
+
 // POST /api/mechanic/parts — create a part
 app.post('/api/mechanic/parts', async (req, res) => {
   try {
-    const { mechanicId, name, quantity, unitPrice, description, minStockLevel } = req.body;
+    const { mechanicId, name, quantity, unitPrice, description, minStockLevel, categoryId, spec, unit, supplier, sellPriceInclGst } = req.body;
     if (!mechanicId || !name) return res.status(400).json({ error: 'mechanicId and name required' });
     const supabase = getSupabaseAdmin();
     if (!supabase) return res.status(503).json({ error: 'DB unavailable' });
     const id = crypto.randomUUID();
-    const { data, error } = await supabase.from('mechanic_parts').insert({
+    const startQty = Number(quantity) || 0;
+    const insertRow: Record<string, any> = {
       id, mechanic_id: mechanicId, name: String(name).trim(),
-      quantity: Number(quantity) || 0,
+      quantity: startQty,
       unit_price: parseFloat(unitPrice) || 0,
       description: description ?? null,
       min_stock_level: minStockLevel ?? null,
-    }).select().single();
+      category_id: categoryId ?? null, spec: spec || null, unit: unit || 'each',
+      supplier: supplier || null, sell_price_incl_gst: sellPriceInclGst != null && sellPriceInclGst !== '' ? parseFloat(sellPriceInclGst) : null,
+    };
+    let { data, error } = await supabase.from('mechanic_parts').insert(insertRow).select().single();
+    // Pre-migration 056: new columns may not exist yet — retry with the original core fields.
+    if (error && /category_id|spec|unit|supplier|sell_price_incl_gst/.test(error.message || '')) {
+      ({ data, error } = await supabase.from('mechanic_parts').insert({
+        id, mechanic_id: mechanicId, name: insertRow.name, quantity: startQty,
+        unit_price: insertRow.unit_price, description: insertRow.description, min_stock_level: insertRow.min_stock_level,
+      }).select().single());
+    }
     if (error) throw error;
+    if (startQty > 0) await logInventoryTxn(supabase, { mechanicId, partId: id, direction: 'in', quantity: startQty, reason: 'restock' });
     res.json({ part: data });
   } catch (err: any) {
     console.error('[mechanic/parts POST]', err);
@@ -584,22 +739,50 @@ app.post('/api/mechanic/parts', async (req, res) => {
   }
 });
 
-// PATCH /api/mechanic/parts/:id — update quantity/price/description
+// PATCH /api/mechanic/parts/:id — update quantity/price/description/inventory fields
 app.patch('/api/mechanic/parts/:id', async (req, res) => {
   try {
     const { id } = req.params;
-    const { mechanicId, quantity, unitPrice, description, minStockLevel } = req.body;
+    const { mechanicId, quantity, unitPrice, description, minStockLevel, categoryId, spec, unit, supplier, sellPriceInclGst } = req.body;
     if (!mechanicId) return res.status(400).json({ error: 'mechanicId required' });
     const supabase = getSupabaseAdmin();
     if (!supabase) return res.status(503).json({ error: 'DB unavailable' });
+
+    let prevQuantity: number | null = null;
+    if (quantity !== undefined) {
+      const { data: existing } = await supabase.from('mechanic_parts').select('quantity').eq('id', id).eq('mechanic_id', mechanicId).maybeSingle();
+      prevQuantity = existing?.quantity ?? null;
+    }
+
     const updates: any = {};
     if (quantity !== undefined) updates.quantity = Number(quantity);
     if (unitPrice !== undefined) updates.unit_price = parseFloat(unitPrice);
     if (description !== undefined) updates.description = description;
     if (minStockLevel !== undefined) updates.min_stock_level = minStockLevel;
-    const { data, error } = await supabase.from('mechanic_parts')
+    if (categoryId !== undefined) updates.category_id = categoryId;
+    if (spec !== undefined) updates.spec = spec;
+    if (unit !== undefined) updates.unit = unit;
+    if (supplier !== undefined) updates.supplier = supplier;
+    if (sellPriceInclGst !== undefined) updates.sell_price_incl_gst = sellPriceInclGst != null && sellPriceInclGst !== '' ? parseFloat(sellPriceInclGst) : null;
+
+    let { data, error } = await supabase.from('mechanic_parts')
       .update(updates).eq('id', id).eq('mechanic_id', mechanicId).select().single();
+    // Pre-migration 056: retry without the new columns if they don't exist yet.
+    if (error && /category_id|spec|unit|supplier|sell_price_incl_gst/.test(error.message || '')) {
+      const coreUpdates: any = {};
+      if (quantity !== undefined) coreUpdates.quantity = updates.quantity;
+      if (unitPrice !== undefined) coreUpdates.unit_price = updates.unit_price;
+      if (description !== undefined) coreUpdates.description = updates.description;
+      if (minStockLevel !== undefined) coreUpdates.min_stock_level = updates.min_stock_level;
+      ({ data, error } = await supabase.from('mechanic_parts').update(coreUpdates).eq('id', id).eq('mechanic_id', mechanicId).select().single());
+    }
     if (error) throw error;
+
+    if (quantity !== undefined && prevQuantity !== null) {
+      const delta = Number(quantity) - prevQuantity;
+      if (delta > 0) await logInventoryTxn(supabase, { mechanicId, partId: id, direction: 'in', quantity: delta, reason: 'restock' });
+      else if (delta < 0) await logInventoryTxn(supabase, { mechanicId, partId: id, direction: 'out', quantity: -delta, reason: 'manual_adjust' });
+    }
     res.json({ part: data });
   } catch (err: any) {
     console.error('[mechanic/parts PATCH]', err);
@@ -622,6 +805,104 @@ app.delete('/api/mechanic/parts/:id', async (req, res) => {
   } catch (err: any) {
     console.error('[mechanic/parts DELETE]', err);
     res.status(500).json({ error: err?.message || 'Failed to delete part' });
+  }
+});
+
+// GET /api/mechanic/reorder-queue?mechanicId= — "Need to Order" list
+app.get('/api/mechanic/reorder-queue', async (req, res) => {
+  try {
+    const mechanicId = req.query.mechanicId as string;
+    if (!mechanicId) return res.status(400).json({ error: 'mechanicId required' });
+    const supabase = getSupabaseAdmin();
+    if (!supabase) return res.json({ items: [] });
+    const { data, error } = await supabase
+      .from('mechanic_reorder_queue')
+      .select('id, booking_id, category_id, label, quantity_needed, possible_duplicate_part_id, status, created_at, ordered_at, mechanic_parts:possible_duplicate_part_id(name)')
+      .eq('mechanic_id', mechanicId)
+      .neq('status', 'dismissed')
+      .order('created_at', { ascending: false });
+    if (error) throw error;
+    res.json({ items: data ?? [] });
+  } catch (err) {
+    console.error('[reorder-queue GET]', err);
+    res.json({ items: [] });
+  }
+});
+
+// POST /api/mechanic/reorder-queue/:id/mark-ordered
+app.post('/api/mechanic/reorder-queue/:id/mark-ordered', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { mechanicId } = req.body;
+    if (!mechanicId) return res.status(400).json({ error: 'mechanicId required' });
+    const supabase = getSupabaseAdmin();
+    if (!supabase) return res.status(503).json({ error: 'DB unavailable' });
+    const { error } = await supabase.from('mechanic_reorder_queue')
+      .update({ status: 'ordered', ordered_at: new Date().toISOString() })
+      .eq('id', id).eq('mechanic_id', mechanicId);
+    if (error) throw error;
+    res.json({ ok: true });
+  } catch (err: any) {
+    console.error('[reorder-queue mark-ordered]', err);
+    res.status(500).json({ error: err?.message || 'Failed to update' });
+  }
+});
+
+// POST /api/mechanic/reorder-queue/:id/dismiss
+app.post('/api/mechanic/reorder-queue/:id/dismiss', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { mechanicId } = req.body;
+    if (!mechanicId) return res.status(400).json({ error: 'mechanicId required' });
+    const supabase = getSupabaseAdmin();
+    if (!supabase) return res.status(503).json({ error: 'DB unavailable' });
+    const { error } = await supabase.from('mechanic_reorder_queue')
+      .update({ status: 'dismissed' })
+      .eq('id', id).eq('mechanic_id', mechanicId);
+    if (error) throw error;
+    res.json({ ok: true });
+  } catch (err: any) {
+    console.error('[reorder-queue dismiss]', err);
+    res.status(500).json({ error: err?.message || 'Failed to update' });
+  }
+});
+
+// GET /api/mechanic/inventory-report?mechanicId=&from=&to= — stock movements in a date
+// range, grouped per part (for the "Generate Stock Report" feature under Profile).
+app.get('/api/mechanic/inventory-report', async (req, res) => {
+  try {
+    const mechanicId = req.query.mechanicId as string;
+    const from = req.query.from as string;
+    const to = req.query.to as string;
+    if (!mechanicId || !from || !to) return res.status(400).json({ error: 'mechanicId, from, and to are required' });
+    const supabase = getSupabaseAdmin();
+    if (!supabase) return res.status(503).json({ error: 'DB unavailable' });
+
+    const toEnd = new Date(to); toEnd.setHours(23, 59, 59, 999);
+    const { data: txns, error } = await supabase
+      .from('mechanic_inventory_transactions')
+      .select('id, part_id, direction, quantity, reason, booking_id, created_at, mechanic_parts:part_id(name, spec, unit)')
+      .eq('mechanic_id', mechanicId)
+      .gte('created_at', new Date(from).toISOString())
+      .lte('created_at', toEnd.toISOString())
+      .order('created_at', { ascending: true });
+    if (error) throw error;
+
+    const rows = txns ?? [];
+    const byPart: Record<string, { partId: string; name: string; spec: string | null; unit: string; qtyIn: number; qtyOut: number; net: number }> = {};
+    for (const t of rows as any[]) {
+      const key = t.part_id;
+      if (!byPart[key]) {
+        byPart[key] = { partId: key, name: t.mechanic_parts?.name || 'Unknown part', spec: t.mechanic_parts?.spec || null, unit: t.mechanic_parts?.unit || 'each', qtyIn: 0, qtyOut: 0, net: 0 };
+      }
+      if (t.direction === 'in') { byPart[key].qtyIn += t.quantity; byPart[key].net += t.quantity; }
+      else { byPart[key].qtyOut += t.quantity; byPart[key].net -= t.quantity; }
+    }
+
+    res.json({ from, to, transactions: rows, summary: Object.values(byPart) });
+  } catch (err: any) {
+    console.error('[inventory-report]', err);
+    res.status(500).json({ error: err?.message || 'Could not build report' });
   }
 });
 
@@ -4495,6 +4776,8 @@ app.get('/api/fleet-prices', async (req, res) => {
             };
           }
 
+          await applyMechanicInventoryOverrides(supabase, mechanicId, efPrices, oilCapacityL);
+
           return res.json({
             prices: efPrices,
             timingDrive: efTimingDrive,
@@ -4869,6 +5152,7 @@ app.get('/api/fleet-prices', async (req, res) => {
     const wpPartsHigh = 420 + 60 + 180;
     const wpCoolantLow = 60, wpCoolantHigh = 90;
     const wpLabour    = Math.round(1.0 * NZD_LABOUR_RATE);
+    await applyMechanicInventoryOverrides(supabase, mechanicId, prices, oilCapacity);
     res.json({
       prices, timingDrive, vehicleId,
       shopFee: shopFee,
