@@ -4,7 +4,7 @@
 CREATE TABLE IF NOT EXISTS privacy_requests (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   customer_email text NOT NULL,
-  request_type text NOT NULL CHECK (request_type IN ('export', 'delete', 'correction', 'complaint')),
+  request_type text NOT NULL CHECK (request_type IN ('export', 'export_workshop', 'delete')),
   notes text,
   status text NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'resolved')),
   resolved_by text,

@@ -4655,13 +4655,6 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                     onChange={e => setMechEmail(e.target.value)}
                     className="w-full bg-background border border-border rounded-xl px-4 h-12 text-sm text-foreground placeholder:text-muted focus:outline-none focus:border-torqued-red"
                   />
-                  <input
-                    type="password"
-                    placeholder="Password"
-                    value={mechPassword}
-                    onChange={e => setMechPassword(e.target.value)}
-                    className="w-full bg-background border border-border rounded-xl px-4 h-12 text-sm text-foreground placeholder:text-muted focus:outline-none focus:border-torqued-red"
-                  />
                 </div>
 
                 {mechAuthError && (
@@ -4678,9 +4671,15 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                       setMechAuthError(null);
                       setMechAuthLoading(true);
                       try {
-                        const result = await signUpMechanic(mechEmail, mechPassword, mechName);
+                        const result = await signUpMechanic(mechEmail, mechName);
                         if (result.error) setMechAuthError(result.error);
-                        else if (result.needsConfirmation) { setShowSignupModal(false); setMechSignupSent(true); }
+                        else {
+                          // Carry the details they just gave us straight into onboarding
+                          // step 1 — no re-typing the workshop name/email.
+                          setObEmail(mechEmail);
+                          setOb(o => ({ ...o, name: mechName }));
+                          if (result.needsConfirmation) { setShowSignupModal(false); setMechSignupSent(true); }
+                        }
                       } catch (e: any) {
                         setMechAuthError(e.message || 'Authentication failed');
                       } finally {

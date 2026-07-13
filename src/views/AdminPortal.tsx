@@ -882,13 +882,12 @@ export const AdminPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) => {
               </div>
               <div className="space-y-2.5">
                 <input value={privacyForm.email} onChange={e => setPrivacyForm(f => ({ ...f, email: e.target.value }))}
-                  placeholder="Customer email address" className={inp} />
+                  placeholder="Customer or workshop email address" className={inp} />
                 <select value={privacyForm.type} onChange={e => setPrivacyForm(f => ({ ...f, type: e.target.value }))}
                   className="w-full bg-background border border-border rounded-xl px-3 h-10 text-sm text-foreground focus:outline-none focus:border-torqued-red">
-                  <option value="export">Data export request (Access request)</option>
+                  <option value="export">Data export request (Customer Account)</option>
+                  <option value="export_workshop">Data export request (Workshop Account)</option>
                   <option value="delete">Deletion / erasure request</option>
-                  <option value="correction">Correction request</option>
-                  <option value="complaint">Privacy complaint</option>
                 </select>
                 <textarea value={privacyForm.notes} onChange={e => setPrivacyForm(f => ({ ...f, notes: e.target.value }))}
                   placeholder="Notes (optional)" rows={2}

@@ -161,7 +161,7 @@ function emailWrap(content: string): string {
 <body style="margin:0;padding:0;background:${EMAIL_BG};">
 <table width="100%" cellpadding="0" cellspacing="0" style="background:${EMAIL_BG};padding:32px 8px;"><tr><td align="center">
 <table width="100%" cellpadding="0" cellspacing="0" style="max-width:520px;background:${EMAIL_CARD};border-radius:20px;overflow:hidden;border:1px solid #e2e0dc;">
-<tr><td style="background:${EMAIL_DARK};padding:22px 32px;border-bottom:3px solid ${EMAIL_RED};text-align:center;"><img src="${LOGO_URL}" width="180" height="60" alt="Torqued" style="display:inline-block;border:0;width:180px;height:60px;" /></td></tr>
+<tr><td style="background:${EMAIL_CARD};padding:22px 32px;border-bottom:3px solid ${EMAIL_RED};text-align:center;"><img src="${LOGO_URL}" width="180" height="60" alt="Torqued" style="display:inline-block;border:0;width:180px;height:60px;" /></td></tr>
 ${content}
 <tr><td style="background:#f8f7f5;border-top:1px solid #e2e0dc;padding:16px 32px;text-align:center;"><p style="margin:0;font-size:10px;font-family:${EMAIL_BODY_FONT};color:#aaa;">Torqued NZ &nbsp;·&nbsp; <a href="mailto:hello@torqued.site" style="color:#aaa;text-decoration:none;">hello@torqued.site</a> &nbsp;·&nbsp; <a href="https://torqued.site/privacy-policy.pdf" style="color:#aaa;text-decoration:none;">Privacy Policy</a></p></td></tr>
 </table></td></tr></table></body></html>`;
@@ -1647,22 +1647,24 @@ app.post('/api/customer/register', async (req, res) => {
 // POST /api/mechanic/register — creates a pre-confirmed mechanic account (no email link required)
 app.post('/api/mechanic/register', async (req, res) => {
   try {
-    const { email, password, name } = req.body;
-    if (!email || !password || !name) {
-      return res.status(400).json({ error: 'Name, email and password are required' });
-    }
-    if ((password as string).length < 6) {
-      return res.status(400).json({ error: 'Password must be at least 6 characters' });
+    const { email, name } = req.body;
+    if (!email || !name) {
+      return res.status(400).json({ error: 'Workshop name and email are required' });
     }
 
     const supabase = getSupabaseAdmin();
     if (!supabase) return res.status(500).json({ error: 'Database not configured' });
-    const origin = getOrigin(req);
+
+    // No password is collected at this stage — that's set later in onboarding.
+    // Generate one server-side (never shown to the mechanic) purely so Supabase
+    // auth has a credential; the client uses it once, silently, to establish
+    // the session right after this call.
+    const tempPassword = crypto.randomBytes(24).toString('base64url');
 
     // Create the account PRE-CONFIRMED so the mechanic can log in immediately.
     const { data: authData, error: authError } = await supabase.auth.admin.createUser({
       email,
-      password,
+      password: tempPassword,
       email_confirm: true,
       user_metadata: { name, role: 'mechanic' },
     });
@@ -1684,18 +1686,10 @@ app.post('/api/mechanic/register', async (req, res) => {
       }, { onConflict: 'id' });
     }
 
-    // Branded welcome email with a link straight to the portal (informational, not a gate)
-    const transporter = getMailTransporter();
-    if (transporter) {
-      await transporter.sendMail({
-        from: process.env.SMTP_FROM || '"Torqued" <torquedapp.nz@gmail.com>',
-        to: email,
-        subject: 'Welcome to Torqued — your workshop account is ready',
-        html: generateMechanicConfirmEmailHtml(name, `${origin}/mechanic`),
-      }).catch(e => console.warn('Welcome email failed (non-blocking):', e?.message));
-    }
-
-    res.json({ success: true });
+    // No "your account is ready" email here — onboarding isn't done yet. The
+    // admin "Approve & Email" flow sends the real welcome email once the
+    // workshop is reviewed and approved.
+    res.json({ success: true, tempPassword });
   } catch (err) {
     console.error('[mechanic/register]', err);
     res.status(500).json({ error: 'Registration failed' });
@@ -8178,13 +8172,20 @@ function buildDataExportPdf(customerEmail: string, data: Awaited<ReturnType<type
   sectionTitle(`Bookings — past, future, cancelled & refunded (${nonQuoteBookings.length})`);
   if (nonQuoteBookings.length === 0) empty('No bookings on file.');
   else {
-    wrappedRow(['Date', 'Vehicle', 'Services', 'Status'], [26, 26, 88, 40], true);
-    nonQuoteBookings.forEach((b: any) => wrappedRow([
-      safeFormatDate(b.date || b.created_at),
-      b.vehicle_rego || NIL,
-      (b.service_ids || []).join(', ') || b.description || NIL,
-      b.status || NIL,
-    ], [26, 26, 88, 40]));
+    const bkWidths = [18, 18, 18, 40, 16, 26, 20];
+    wrappedRow(['Date Booked', 'Proposed Date', 'Vehicle', 'Services', 'Labour (hrs)', 'Mechanic', 'Status'], bkWidths, true, 8);
+    nonQuoteBookings.forEach((b: any) => {
+      const qi = b.quote_items || {};
+      wrappedRow([
+        safeFormatDate(b.created_at),
+        safeFormatDate(b.date),
+        b.vehicle_rego || NIL,
+        (b.service_ids || []).join(', ') || b.description || NIL,
+        qi.labourHours ? String(qi.labourHours) : NIL,
+        mechanicNames?.[b.mechanic_id] || NIL,
+        b.status || NIL,
+      ], bkWidths, false, 8);
+    });
   }
   y += 4;
 
@@ -8258,11 +8259,166 @@ function buildDataExportPdf(customerEmail: string, data: Awaited<ReturnType<type
   return Buffer.from(doc.output('arraybuffer'));
 }
 
+// Gather everything Torqued holds about a WORKSHOP (mechanic) account, keyed by email.
+async function gatherMechanicDataExport(mechanicEmail: string) {
+  const supabase = getSupabaseAdmin();
+  if (!supabase) throw new Error('DB not configured');
+  const emailLower = mechanicEmail.trim().toLowerCase();
+
+  const { data: profile } = await supabase
+    .from('profiles')
+    .select('id, name, legal_name, email, phone, address, nzbn, owner_name, owner_phone, years_in_trade, bio, labour_rate, shop_fee')
+    .ilike('email', emailLower).eq('role', 'mechanic').maybeSingle();
+
+  if (!profile) return { profile: null, jobs: [], staff: [], documents: [] };
+
+  const jobs = (await supabase
+    .from('bookings')
+    .select('id, vehicle_rego, customer_name, service_ids, description, total_price, status, payment_status, refunded_amount, date, created_at, completed_at')
+    .eq('mechanic_id', profile.id)
+    .order('created_at', { ascending: false })).data || [];
+
+  const staff = (await supabase.from('mechanic_staff').select('name, role').eq('mechanic_id', profile.id)).data || [];
+  const documents = (await supabase.from('mechanic_documents').select('file_name, description, uploaded_at').eq('mechanic_id', profile.id)).data || [];
+
+  return { profile, jobs, staff, documents };
+}
+
+function buildMechanicDataExportPdf(mechanicEmail: string, data: Awaited<ReturnType<typeof gatherMechanicDataExport>>): Buffer {
+  const { profile, jobs, staff, documents } = data;
+  const name = profile?.name || 'Workshop';
+  const doc = new jsPDF({ unit: 'mm', format: 'a4' });
+  const FONT = 'helvetica';
+  const marginX = 15;
+  const pageBottom = 280;
+  let y = 20;
+
+  const ensureRoom = (need: number) => { if (y + need > pageBottom) { doc.addPage(); y = 20; } };
+  const sectionTitle = (title: string) => {
+    ensureRoom(12);
+    doc.setFont(FONT, 'bold'); doc.setFontSize(12); doc.setTextColor(21, 4, 2);
+    doc.text(title, marginX, y); y += 4;
+    doc.setDrawColor(200, 200, 200); doc.line(marginX, y, 195, y); y += 7;
+  };
+  const row = (cells: string[], widths: number[], bold = false) => {
+    ensureRoom(6);
+    doc.setFont(FONT, bold ? 'bold' : 'normal'); doc.setFontSize(9); doc.setTextColor(21, 4, 2);
+    let x = marginX;
+    cells.forEach((c, i) => { doc.text(String(c ?? ''), x, y, { maxWidth: widths[i] - 2 }); x += widths[i]; });
+    y += 6;
+  };
+  const wrappedRow = (cells: string[], widths: number[], bold = false, fontSize = 8.5) => {
+    const lineH = fontSize * 0.42;
+    doc.setFont(FONT, bold ? 'bold' : 'normal'); doc.setFontSize(fontSize);
+    const wrapped = cells.map((c, i) => doc.splitTextToSize(String(c ?? ''), widths[i] - 3));
+    const rowLines = Math.max(1, ...wrapped.map(w => w.length));
+    const rowHeight = rowLines * lineH + 2;
+    ensureRoom(rowHeight);
+    doc.setTextColor(21, 4, 2);
+    let x = marginX;
+    wrapped.forEach((lines, i) => { doc.text(lines, x, y); x += widths[i]; });
+    y += rowHeight;
+  };
+  const empty = (label: string) => { ensureRoom(6); doc.setFont(FONT, 'normal'); doc.setFontSize(9); doc.setTextColor(120, 120, 120); doc.text(label, marginX, y); y += 8; };
+
+  doc.setFont(FONT, 'bold'); doc.setFontSize(18); doc.setTextColor(21, 4, 2);
+  doc.text('Workshop Account Data Export', marginX, y); y += 9;
+  doc.setFont(FONT, 'normal'); doc.setFontSize(10); doc.setTextColor(80, 80, 80);
+  doc.text(`Prepared for: ${name} (${mechanicEmail})`, marginX, y); y += 6;
+  doc.text(`Exported: ${new Date().toLocaleString('en-NZ', { dateStyle: 'long', timeStyle: 'short' })}`, marginX, y); y += 12;
+
+  if (!profile) {
+    doc.setFont(FONT, 'normal'); doc.setFontSize(10); doc.setTextColor(120, 120, 120);
+    doc.text('No workshop account found for this email address.', marginX, y);
+    return Buffer.from(doc.output('arraybuffer'));
+  }
+
+  sectionTitle('Business Details');
+  row(['Trading name', profile.name || NIL], [50, 140], true);
+  row(['Legal name', profile.legal_name || NIL], [50, 140]);
+  row(['Email', profile.email || mechanicEmail], [50, 140]);
+  row(['Phone', profile.phone || NIL], [50, 140]);
+  row(['Address', profile.address || NIL], [50, 140]);
+  row(['NZBN', profile.nzbn || NIL], [50, 140]);
+  row(['Owner', profile.owner_name || NIL], [50, 140]);
+  row(['Owner phone', profile.owner_phone || NIL], [50, 140]);
+  row(['Years in trade', profile.years_in_trade ? String(profile.years_in_trade) : NIL], [50, 140]);
+  row(['Labour rate', profile.labour_rate ? `$${profile.labour_rate}/hr` : NIL], [50, 140]);
+  y += 4;
+
+  const gross = jobs.reduce((s: number, j: any) => s + (j.payment_status === 'confirmed' ? (parseFloat(j.total_price) || 0) : 0), 0);
+  const refunded = jobs.reduce((s: number, j: any) => s + (Number(j.refunded_amount) || 0), 0);
+  sectionTitle('Revenue Summary');
+  row(['Gross revenue (paid jobs)', `$${gross.toFixed(2)}`], [70, 120], true);
+  row(['Platform commission (4%)', `$${(gross * 0.04).toFixed(2)}`], [70, 120]);
+  row(['Net payout', `$${(gross * 0.96).toFixed(2)}`], [70, 120]);
+  row(['Refunded to customers', `$${refunded.toFixed(2)}`], [70, 120]);
+  y += 4;
+
+  sectionTitle(`Jobs Handled (${jobs.length})`);
+  if (jobs.length === 0) empty('No jobs on file.');
+  else {
+    const jWidths = [18, 20, 55, 18, 22, 27, 20];
+    wrappedRow(['Date', 'Vehicle', 'Services', 'Total', 'Status', 'Payment', 'Refunded'], jWidths, true, 8);
+    jobs.forEach((j: any) => wrappedRow([
+      safeFormatDate(j.date || j.created_at),
+      j.vehicle_rego || NIL,
+      (j.service_ids || []).join(', ') || j.description || NIL,
+      `$${(parseFloat(j.total_price) || 0).toFixed(2)}`,
+      j.status || NIL,
+      j.payment_status || NIL,
+      j.refunded_amount ? `$${Number(j.refunded_amount).toFixed(2)}` : NIL,
+    ], jWidths, false, 8));
+  }
+  y += 4;
+
+  sectionTitle(`Staff Roster (${staff.length})`);
+  if (staff.length === 0) empty('No staff on file.');
+  else {
+    row(['Name', 'Role'], [80, 100], true);
+    staff.forEach((s: any) => row([s.name || NIL, s.role || NIL], [80, 100]));
+  }
+  y += 4;
+
+  sectionTitle(`Documents on File (${documents.length})`);
+  if (documents.length === 0) empty('No documents on file.');
+  else {
+    wrappedRow(['File name', 'Description', 'Uploaded'], [70, 80, 30], true);
+    documents.forEach((d: any) => wrappedRow([d.file_name || NIL, d.description || NIL, safeFormatDate(d.uploaded_at)], [70, 80, 30]));
+  }
+  y += 8;
+
+  ensureRoom(30);
+  doc.setDrawColor(200, 200, 200); doc.line(marginX, y, 195, y); y += 7;
+  doc.setFont(FONT, 'normal'); doc.setFontSize(8); doc.setTextColor(110, 110, 110);
+  const footerLines2 = doc.splitTextToSize(
+    'Your account data is automatically deleted 30 days after you close your account, except where we are legally required to retain it (for example, completed job/transaction records for tax purposes).',
+    180
+  );
+  footerLines2.forEach((line: string) => { ensureRoom(5); doc.text(line, marginX, y); y += 4.5; });
+  y += 3; ensureRoom(6);
+  doc.text('Privacy Policy: https://torqued.site/privacy-policy.pdf', marginX, y); y += 5;
+  ensureRoom(6);
+  doc.text('Questions about this export? Contact hello@torqued.site', marginX, y);
+
+  return Buffer.from(doc.output('arraybuffer'));
+}
+
 function generateDataExportEmailHtml(name: string): string {
   return emailWrap(`<tr><td style="padding:36px 32px;">
 ${emailTitle('Your data export is ready')}
 ${emailGreeting(name)}
 ${emailPara(`As requested, we've attached a PDF summary of the personal data Torqued holds about you — your details, vehicles, bookings, transactions, quotes, and service history.`)}
+${emailPara(`Full details on how long we keep your data (and when it's deleted) are in the attached document and our <a href="https://torqued.site/privacy-policy.pdf" style="color:${EMAIL_RED};">Privacy Policy</a>.`)}
+${emailPara(`If anything looks wrong or you have questions, just reply to this email or reach us at <a href="mailto:hello@torqued.site" style="color:${EMAIL_RED};">hello@torqued.site</a>.`)}
+</td></tr>`);
+}
+
+function generateWorkshopDataExportEmailHtml(name: string): string {
+  return emailWrap(`<tr><td style="padding:36px 32px;">
+${emailTitle('Your workshop data export is ready')}
+${emailGreeting(name)}
+${emailPara(`As requested, we've attached a PDF summary of the data Torqued holds about your workshop account — your business details, jobs handled, revenue, staff roster, and documents on file.`)}
 ${emailPara(`Full details on how long we keep your data (and when it's deleted) are in the attached document and our <a href="https://torqued.site/privacy-policy.pdf" style="color:${EMAIL_RED};">Privacy Policy</a>.`)}
 ${emailPara(`If anything looks wrong or you have questions, just reply to this email or reach us at <a href="mailto:hello@torqued.site" style="color:${EMAIL_RED};">hello@torqued.site</a>.`)}
 </td></tr>`);
@@ -8310,18 +8466,23 @@ app.post('/api/admin/privacy-request', async (req, res) => {
 
     // If export request: build and email the full data-export PDF now, then mark resolved.
     let exportEmailed = false;
-    if (requestType === 'export') {
+    if (requestType === 'export' || requestType === 'export_workshop') {
       try {
-        const data = await gatherCustomerDataExport(emailLower);
-        const pdfBuffer = buildDataExportPdf(emailLower, data);
+        const isWorkshop = requestType === 'export_workshop';
+        const data = isWorkshop ? await gatherMechanicDataExport(emailLower) : await gatherCustomerDataExport(emailLower);
+        const pdfBuffer = isWorkshop
+          ? buildMechanicDataExportPdf(emailLower, data as Awaited<ReturnType<typeof gatherMechanicDataExport>>)
+          : buildDataExportPdf(emailLower, data as Awaited<ReturnType<typeof gatherCustomerDataExport>>);
         const transporter = getMailTransporter();
         if (transporter) {
           await transporter.sendMail({
             from: process.env.SMTP_FROM || '"Torqued" <torquedapp.nz@gmail.com>',
             to: emailLower,
-            subject: 'Your Torqued data export',
-            html: generateDataExportEmailHtml(data.profile?.name || ''),
-            attachments: [{ filename: 'Torqued-Data-Export.pdf', content: pdfBuffer, contentType: 'application/pdf' }],
+            subject: isWorkshop ? 'Your Torqued workshop data export' : 'Your Torqued data export',
+            html: isWorkshop
+              ? generateWorkshopDataExportEmailHtml((data as any).profile?.name || '')
+              : generateDataExportEmailHtml((data as any).profile?.name || ''),
+            attachments: [{ filename: isWorkshop ? 'Torqued-Workshop-Data-Export.pdf' : 'Torqued-Data-Export.pdf', content: pdfBuffer, contentType: 'application/pdf' }],
           });
           exportEmailed = true;
           await supabase.from('privacy_requests').update({

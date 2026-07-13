@@ -23,7 +23,7 @@ interface AuthContextType {
   isAuthReady: boolean;
   // Mechanic auth (email + password)
   loginMechanic: (email: string, password: string) => Promise<void>;
-  signUpMechanic: (email: string, password: string, name: string) => Promise<{ error?: string; needsConfirmation?: boolean }>;
+  signUpMechanic: (email: string, name: string) => Promise<{ error?: string; needsConfirmation?: boolean }>;
   resendMechanicLink: (email: string) => Promise<string | null>;
   markSubscriptionActive: () => void;
   // Shared
@@ -217,17 +217,18 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     if (error) throw new Error(error.message);
   };
 
-  // Account is created pre-confirmed server-side, so we log the mechanic in
-  // immediately. They still receive a branded welcome email.
-  const signUpMechanic = async (email: string, password: string, name: string): Promise<{ error?: string; needsConfirmation?: boolean }> => {
+  // No password is collected at signup — that's set later in onboarding. The
+  // server generates one, creates the account pre-confirmed, and returns it
+  // once so we can establish the session silently right here.
+  const signUpMechanic = async (email: string, name: string): Promise<{ error?: string; needsConfirmation?: boolean }> => {
     const res = await fetch('/api/mechanic/register', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ email, password, name }),
+      body: JSON.stringify({ email, name }),
     });
     const data = await res.json();
     if (!res.ok) return { error: data.error || 'Sign up failed' };
-    const { error } = await supabase.auth.signInWithPassword({ email, password });
+    const { error } = await supabase.auth.signInWithPassword({ email, password: data.tempPassword });
     if (error) return { error: error.message };
     return {};
   };

@@ -353,7 +353,7 @@ export const Landing: React.FC<LandingProps> = ({ onGetQuote, onMechanicPortal }
               <CreditCard className="text-torqued-red" size={32} />
             </div>
             <h3 className="text-2xl font-bold text-foreground">Flexible Payments</h3>
-            <p className="text-muted">Afterpay, Klarna, Finance Now & more. Fix now, pay later on your terms.</p>
+            <p className="text-muted">Pay in 4 with Afterpay and Klarna. Fix now, pay later on your terms.</p>
           </div>
           <div className="space-y-4 text-center">
             <div className="w-16 h-16 bg-background border border-border rounded-2xl flex items-center justify-center mx-auto shadow-sm">
@@ -417,8 +417,7 @@ export const Landing: React.FC<LandingProps> = ({ onGetQuote, onMechanicPortal }
         <div className="max-w-6xl mx-auto flex flex-col md:flex-row justify-between items-center gap-8">
           <Logo variant={theme === 'dark' ? 'light' : 'dark'} />
           <div className="text-center md:text-right">
-            <p className="font-display italic text-2xl mb-2 text-foreground">MORE DRIVE. LESS HASSLE.</p>
-            <p className="text-muted text-sm">© 2026 Torqued Automotive Repair Marketplace. NZ & AU.</p>
+            <p className="text-muted text-sm">© 2026 Torqued NZ.</p>
             <div className="flex justify-center md:justify-end gap-4 mt-2 text-xs text-muted">
               <a href="/privacy-policy.pdf" target="_blank" rel="noreferrer" className="hover:text-foreground underline underline-offset-2 transition-colors">Privacy Policy</a>
               <a href="mailto:hello@torqued.site" className="hover:text-foreground transition-colors">hello@torqued.site</a>
