@@ -10,7 +10,7 @@ type View = 'landing' | 'customer' | 'mechanic' | 'mechanic-demo' | 'admin';
 
 function pathToView(path: string): View | null {
   if (path.startsWith('/customer')) return 'customer';
-  if (path.startsWith('/mechanic-demo')) return 'mechanic-demo';
+  if (path.startsWith('/demo')) return 'mechanic-demo';
   if (path.startsWith('/mechanic')) return 'mechanic';
   if (path.startsWith('/admin')) return 'admin';
   if (path === '/' || path === '') return 'landing';
@@ -22,7 +22,7 @@ export default function App() {
   const { isAuthReady, user, userRole } = useAuth();
 
   const navigateTo = useCallback((next: View) => {
-    const path = next === 'landing' ? '/' : `/${next}`;
+    const path = next === 'landing' ? '/' : next === 'mechanic-demo' ? '/demo' : `/${next}`;
     window.history.pushState({ view: next }, '', path);
     setView(next);
   }, []);
