@@ -1078,6 +1078,46 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
     return () => { cancelled = true; };
   }, [rego, mechanicsByDistance, selectedServices, addWaterPump, waterPump]);
 
+  // "Learn more" expansion on a mechanic-list card — lazy-loads bio/phone (public
+  // profile endpoint) and operating hours (availability endpoint) only once per
+  // mechanic, the first time its card is expanded.
+  const [expandedMechanicId, setExpandedMechanicId] = useState<string | null>(null);
+  const [mechanicDetails, setMechanicDetails] = useState<Record<string, {
+    bio: string | null; phone: string | null;
+    slots: { day_of_week: number; start_time: string; end_time: string }[];
+    loading: boolean;
+  }>>({});
+  const toggleMechanicDetails = async (mechanicId: string) => {
+    if (expandedMechanicId === mechanicId) { setExpandedMechanicId(null); return; }
+    setExpandedMechanicId(mechanicId);
+    if (mechanicDetails[mechanicId]) return;
+    setMechanicDetails(prev => ({ ...prev, [mechanicId]: { bio: null, phone: null, slots: [], loading: true } }));
+    try {
+      const [profileRes, availRes] = await Promise.all([
+        fetch(`/api/mechanic/public/${mechanicId}`).then(r => r.json()).catch(() => null),
+        fetch(`/api/mechanic/availability?mechanicId=${encodeURIComponent(mechanicId)}`).then(r => r.json()).catch(() => null),
+      ]);
+      setMechanicDetails(prev => ({
+        ...prev,
+        [mechanicId]: {
+          bio: profileRes?.mechanic?.bio || null,
+          phone: profileRes?.mechanic?.phone || null,
+          slots: availRes?.slots || [],
+          loading: false,
+        },
+      }));
+    } catch {
+      setMechanicDetails(prev => ({ ...prev, [mechanicId]: { bio: null, phone: null, slots: [], loading: false } }));
+    }
+  };
+  const DAY_NAMES = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
+  const formatHour = (t: string) => {
+    const [h, m] = t.split(':').map(Number);
+    const period = h >= 12 ? 'pm' : 'am';
+    const h12 = h % 12 === 0 ? 12 : h % 12;
+    return m ? `${h12}:${String(m).padStart(2, '0')}${period}` : `${h12}${period}`;
+  };
+
   // OTP Verification States
   const [showOTPModal, setShowOTPModal] = useState(false);
   const [otpCode, setOtpCode] = useState('');
@@ -4250,21 +4290,18 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                       </div>
                     )}
                     <div className="flex flex-col sm:flex-row gap-6">
-                      <div className="flex gap-4 flex-1">
+                      <div className="flex gap-4 flex-1 min-w-0">
                         <div className="relative">
                           <img src={mechanic.logo} alt={mechanic.name} className="w-16 h-16 sm:w-20 sm:h-20 rounded-2xl object-cover ring-1 ring-border group-hover/card:ring-torqued-red/30 transition-all" />
                         </div>
-                        <div className="flex-1 space-y-1">
-                          <h3 className="text-xl sm:text-2xl leading-tight tracking-tight font-black">{mechanic.name}</h3>
-                          <div className="flex items-center gap-1.5 text-xs text-muted font-medium">
-                            <MapPin size={12} className="text-torqued-red" />
-                            <span>
-                              {mechanic.suburb}
-                              {customerCoords && mechanic.latitude && mechanic.longitude && mechanic.distance < 900
-                                ? ` • ${mechanic.distance.toFixed(1)} km away`
-                                : ''}
-                            </span>
-                          </div>
+                        <div className="flex-1 min-w-0 space-y-1">
+                          <h3 className="text-xl sm:text-2xl leading-tight tracking-tight font-black truncate">{mechanic.name}</h3>
+                          {customerCoords && mechanic.latitude && mechanic.longitude && mechanic.distance < 900 && (
+                            <div className="flex items-center gap-1.5 text-xs text-muted font-medium">
+                              <MapPin size={12} className="text-torqued-red" />
+                              <span>{mechanic.distance.toFixed(1)} km away</span>
+                            </div>
+                          )}
                           <div className="flex items-center gap-1.5 mt-2">
                             <Star size={12} className="text-yellow-400 fill-current" />
                             <span className="text-sm font-bold">{mechanic.rating}</span>
@@ -4272,12 +4309,15 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                           </div>
                         </div>
                       </div>
-                      <div className="flex sm:flex-col justify-between sm:justify-center items-center sm:items-end gap-1.5 border-t sm:border-t-0 border-border pt-4 sm:pt-0">
-                        <p className="text-[10px] font-bold uppercase text-muted tracking-widest">Est. Quote</p>
-                        <p className="text-2xl sm:text-3xl font-black text-torqued-red tracking-tighter">${mechanicPrices[mechanic.id] ?? totalPrice}</p>
+                      <div className="flex sm:flex-col justify-between sm:justify-center items-center sm:items-end gap-1.5 border-t sm:border-t-0 border-border pt-4 sm:pt-0 shrink-0">
+                        <p className="text-[10px] font-bold uppercase text-muted tracking-widest whitespace-nowrap">Est. Quote</p>
+                        <p className="text-2xl sm:text-3xl font-black text-torqued-red tracking-tight whitespace-nowrap">${(mechanicPrices[mechanic.id] ?? totalPrice).toLocaleString()}</p>
+                        {mechanic.labourRate ? (
+                          <p className="text-[10px] font-bold text-muted whitespace-nowrap">Labour rate: ${mechanic.labourRate}/hr</p>
+                        ) : null}
                       </div>
                     </div>
-                    
+
                     {mechanic.address && (
                       <a 
                         href={mechanic.mapsUrl} 
@@ -4296,13 +4336,45 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                       </a>
                     )}
                     
+                    {expandedMechanicId === mechanic.id && (
+                      <div className="p-4 bg-background border border-border rounded-2xl space-y-3">
+                        {mechanicDetails[mechanic.id]?.loading ? (
+                          <p className="text-xs text-muted">Loading workshop details…</p>
+                        ) : (
+                          <>
+                            {mechanicDetails[mechanic.id]?.bio && (
+                              <p className="text-sm text-foreground leading-relaxed">{mechanicDetails[mechanic.id]?.bio}</p>
+                            )}
+                            <div className="grid sm:grid-cols-2 gap-3">
+                              <div>
+                                <p className="text-[10px] font-bold uppercase text-muted tracking-widest mb-1">Hours</p>
+                                {mechanicDetails[mechanic.id]?.slots?.length ? (
+                                  <ul className="text-xs text-foreground space-y-0.5">
+                                    {mechanicDetails[mechanic.id]!.slots.map(s => (
+                                      <li key={s.day_of_week + s.start_time}>{DAY_NAMES[s.day_of_week]}: {formatHour(s.start_time)} – {formatHour(s.end_time)}</li>
+                                    ))}
+                                  </ul>
+                                ) : (
+                                  <p className="text-xs text-muted">Hours not listed</p>
+                                )}
+                              </div>
+                              <div>
+                                <p className="text-[10px] font-bold uppercase text-muted tracking-widest mb-1">Phone</p>
+                                <p className="text-xs text-foreground">{mechanicDetails[mechanic.id]?.phone || 'Not listed'}</p>
+                              </div>
+                            </div>
+                          </>
+                        )}
+                      </div>
+                    )}
+
                     <div className="flex flex-col sm:flex-row items-center justify-between pt-4 border-t border-border gap-4">
                       <div className="flex items-center gap-2 text-emerald-500 w-full sm:w-auto">
                         <div className="w-2 h-2 bg-emerald-500 rounded-full animate-pulse shadow-[0_0_8px_rgba(16,185,129,0.5)]" />
                         <span className="text-xs font-bold uppercase tracking-widest">Next Available: {mechanic.nextAvailable}</span>
                       </div>
                       <div className="flex gap-2 w-full sm:w-auto">
-                        <Button variant="outline" size="sm" className="flex-1 sm:flex-initial border-border text-foreground hover:bg-card h-10 px-6 font-bold uppercase tracking-widest text-[10px]">Profile</Button>
+                        <Button variant="outline" size="sm" className="flex-1 sm:flex-initial border-border text-foreground hover:bg-card h-10 px-6 font-bold uppercase tracking-widest text-[10px]" onClick={() => toggleMechanicDetails(mechanic.id)}>{expandedMechanicId === mechanic.id ? 'Hide' : 'Learn more'}</Button>
                         <Button size="sm" className="flex-[2] sm:flex-initial bg-torqued-red hover:bg-red-700 text-white h-10 px-8 font-bold uppercase tracking-widest text-[10px] shadow-lg shadow-torqued-red/20" onClick={() => chooseMechanic(mechanic)}>{selectedServices.includes('diag_inspection') ? 'Book Diagnostic' : 'Select & Schedule'}</Button>
                       </div>
                     </div>

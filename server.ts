@@ -393,7 +393,7 @@ app.get('/api/mechanic/public/:id', async (req, res) => {
     let data: any;
     const first = await supabase
       .from('profiles')
-      .select('id, name, address, phone, banner_image, labour_rate, technicians, parts_lead_days, rating, review_count, latitude, longitude, offers_ppi, wof_disabled, service_areas, diagnostic_tools, certifications')
+      .select('id, name, address, phone, bio, banner_image, labour_rate, technicians, parts_lead_days, rating, review_count, latitude, longitude, offers_ppi, wof_disabled, service_areas, diagnostic_tools, certifications')
       .eq('role', 'mechanic')
       .eq('subscription_active', true)
       .eq('id', id)
@@ -402,7 +402,7 @@ app.get('/api/mechanic/public/:id', async (req, res) => {
     if (first.error && /wof_disabled/.test(first.error.message || '')) {
       const second = await supabase
         .from('profiles')
-        .select('id, name, address, phone, banner_image, labour_rate, technicians, parts_lead_days, rating, review_count, latitude, longitude, offers_ppi, service_areas, diagnostic_tools, certifications')
+        .select('id, name, address, phone, bio, banner_image, labour_rate, technicians, parts_lead_days, rating, review_count, latitude, longitude, offers_ppi, service_areas, diagnostic_tools, certifications')
         .eq('role', 'mechanic')
         .eq('subscription_active', true)
         .eq('id', id)
