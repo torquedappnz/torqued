@@ -5,6 +5,7 @@ import dotenv from 'dotenv';
 import nodemailer from 'nodemailer';
 import { createClient as createSupabaseClient } from '@supabase/supabase-js';
 import crypto from 'crypto';
+import { jsPDF } from 'jspdf';
 
 dotenv.config();
 
@@ -8035,6 +8036,168 @@ app.get('/api/mechanic/history-direct', async (req, res) => {
 // Admin — Privacy Act & AI Controls
 // ─────────────────────────────────────────────────────────────────────────────
 
+// Gather every data point Torqued holds about a customer, keyed by email.
+async function gatherCustomerDataExport(customerEmail: string) {
+  const supabase = getSupabaseAdmin();
+  if (!supabase) throw new Error('DB not configured');
+  const emailLower = customerEmail.trim().toLowerCase();
+
+  const { data: profile } = await supabase
+    .from('profiles').select('id, name, email, phone')
+    .ilike('email', emailLower).maybeSingle();
+
+  const vehicles = profile
+    ? (await supabase.from('vehicles').select('rego, make, model, year, variant, mileage').eq('owner_id', profile.id)).data || []
+    : [];
+
+  const bookings = (await supabase
+    .from('bookings')
+    .select('id, vehicle_rego, service_ids, description, quote_note, total_price, quoted_price, status, payment_status, payment_method, refunded_amount, date, created_at, completed_at, is_cold_quote')
+    .ilike('email', emailLower)
+    .order('created_at', { ascending: false })).data || [];
+
+  const regoSet = new Set<string>([...vehicles.map((v: any) => v.rego), ...bookings.map((b: any) => b.vehicle_rego)].filter(Boolean));
+  const serviceHistory = regoSet.size > 0
+    ? (await supabase.from('vehicle_history')
+        .select('rego, service_date, work_done, mileage, provider, price, source_type')
+        .in('rego', Array.from(regoSet))
+        .order('service_date', { ascending: false })).data || []
+    : [];
+
+  return { profile, vehicles, bookings, serviceHistory };
+}
+
+// Build the plain-text "Personal Data Export" PDF (no branded header — a neutral,
+// Arial-set compliance document rather than a marketing/branded one).
+function buildDataExportPdf(customerEmail: string, data: Awaited<ReturnType<typeof gatherCustomerDataExport>>): Buffer {
+  const { profile, vehicles, bookings, serviceHistory } = data;
+  const name = profile?.name || 'Customer';
+  const doc = new jsPDF({ unit: 'mm', format: 'a4' });
+  const FONT = 'helvetica'; // closest built-in PDF equivalent to Arial (same metrics family)
+  const marginX = 15;
+  const pageBottom = 280;
+  let y = 20;
+
+  const ensureRoom = (need: number) => {
+    if (y + need > pageBottom) { doc.addPage(); y = 20; }
+  };
+  const sectionTitle = (title: string) => {
+    ensureRoom(12);
+    doc.setFont(FONT, 'bold'); doc.setFontSize(12); doc.setTextColor(21, 4, 2);
+    doc.text(title, marginX, y); y += 4;
+    doc.setDrawColor(200, 200, 200); doc.line(marginX, y, 195, y); y += 7;
+  };
+  const row = (cells: string[], widths: number[], bold = false) => {
+    ensureRoom(6);
+    doc.setFont(FONT, bold ? 'bold' : 'normal'); doc.setFontSize(9); doc.setTextColor(21, 4, 2);
+    let x = marginX;
+    cells.forEach((c, i) => { doc.text(String(c ?? ''), x, y, { maxWidth: widths[i] - 2 }); x += widths[i]; });
+    y += 6;
+  };
+  const empty = (label: string) => { ensureRoom(6); doc.setFont(FONT, 'normal'); doc.setFontSize(9); doc.setTextColor(120, 120, 120); doc.text(label, marginX, y); y += 8; };
+
+  doc.setFont(FONT, 'bold'); doc.setFontSize(18); doc.setTextColor(21, 4, 2);
+  doc.text('Personal Data Export', marginX, y); y += 9;
+  doc.setFont(FONT, 'normal'); doc.setFontSize(10); doc.setTextColor(80, 80, 80);
+  doc.text(`Prepared for: ${name} (${customerEmail})`, marginX, y); y += 6;
+  doc.text(`Exported: ${new Date().toLocaleString('en-NZ', { dateStyle: 'long', timeStyle: 'short' })}`, marginX, y); y += 12;
+
+  sectionTitle('Personal Details');
+  row(['Name', name], [50, 140], true);
+  row(['Email', profile?.email || customerEmail], [50, 140]);
+  row(['Phone', profile?.phone || '—'], [50, 140]);
+  y += 4;
+
+  sectionTitle(`Vehicles (${vehicles.length})`);
+  if (vehicles.length === 0) empty('No vehicles on file.');
+  else {
+    row(['Rego', 'Make', 'Model', 'Year'], [30, 45, 65, 30], true);
+    vehicles.forEach((v: any) => row([v.rego || '—', v.make || '—', v.model || '—', v.year ? String(v.year) : '—'], [30, 45, 65, 30]));
+  }
+  y += 4;
+
+  const nonQuoteBookings = bookings.filter((b: any) => !b.is_cold_quote && b.status !== 'quoted');
+  sectionTitle(`Bookings — past, future, cancelled & refunded (${nonQuoteBookings.length})`);
+  if (nonQuoteBookings.length === 0) empty('No bookings on file.');
+  else {
+    row(['Date', 'Vehicle', 'Services', 'Status'], [30, 30, 80, 40], true);
+    nonQuoteBookings.forEach((b: any) => row([
+      b.date ? new Date(b.date).toLocaleDateString('en-NZ') : (b.created_at ? new Date(b.created_at).toLocaleDateString('en-NZ') : '—'),
+      b.vehicle_rego || '—',
+      (b.service_ids || []).join(', ') || b.description || '—',
+      b.status || '—',
+    ], [30, 30, 80, 40]));
+  }
+  y += 4;
+
+  sectionTitle(`Transactions (${nonQuoteBookings.length})`);
+  if (nonQuoteBookings.length === 0) empty('No transactions on file.');
+  else {
+    row(['Date', 'Amount', 'Payment status', 'Method', 'Refunded'], [28, 28, 45, 40, 30], true);
+    nonQuoteBookings.forEach((b: any) => row([
+      b.date ? new Date(b.date).toLocaleDateString('en-NZ') : (b.created_at ? new Date(b.created_at).toLocaleDateString('en-NZ') : '—'),
+      `$${(parseFloat(b.quoted_price ?? b.total_price) || 0).toFixed(2)}`,
+      b.payment_status || '—',
+      b.payment_method || '—',
+      b.refunded_amount ? `$${Number(b.refunded_amount).toFixed(2)}` : '—',
+    ], [28, 28, 45, 40, 30]));
+  }
+  y += 4;
+
+  const quotes = bookings.filter((b: any) => b.is_cold_quote || b.status === 'quoted');
+  sectionTitle(`Quotes generated (${quotes.length})`);
+  if (quotes.length === 0) empty('No quotes on file.');
+  else {
+    row(['Date', 'Vehicle', 'Description', 'Status'], [30, 30, 90, 30], true);
+    quotes.forEach((b: any) => row([
+      b.created_at ? new Date(b.created_at).toLocaleDateString('en-NZ') : '—',
+      b.vehicle_rego || '—',
+      (b.service_ids || []).join(', ') || b.description || b.quote_note || '—',
+      b.status || '—',
+    ], [30, 30, 90, 30]));
+  }
+  y += 4;
+
+  sectionTitle(`Service History (${serviceHistory.length})`);
+  if (serviceHistory.length === 0) empty('No service history on file.');
+  else {
+    row(['Rego', 'Date', 'Work Done', 'Mileage', 'Provider'], [25, 28, 65, 27, 40], true);
+    serviceHistory.forEach((h: any) => row([
+      h.rego || '—',
+      h.service_date ? new Date(h.service_date).toLocaleDateString('en-NZ') : '—',
+      h.work_done || '—',
+      h.mileage ? `${Number(h.mileage).toLocaleString()} km` : '—',
+      h.provider || '—',
+    ], [25, 28, 65, 27, 40]));
+  }
+  y += 8;
+
+  ensureRoom(30);
+  doc.setDrawColor(200, 200, 200); doc.line(marginX, y, 195, y); y += 7;
+  doc.setFont(FONT, 'normal'); doc.setFontSize(8); doc.setTextColor(110, 110, 110);
+  const footerLines = doc.splitTextToSize(
+    'Your account data is automatically deleted 30 days after you close your account, except where we are legally required to retain it (for example, completed job/transaction records for tax purposes). Vehicle service history you have provided is only deleted on request.',
+    180
+  );
+  footerLines.forEach((line: string) => { ensureRoom(5); doc.text(line, marginX, y); y += 4.5; });
+  y += 3; ensureRoom(6);
+  doc.text('Privacy Policy: https://torqued.site/privacy-policy.pdf', marginX, y); y += 5;
+  ensureRoom(6);
+  doc.text('Questions about this export? Contact hello@torqued.site', marginX, y);
+
+  return Buffer.from(doc.output('arraybuffer'));
+}
+
+function generateDataExportEmailHtml(name: string): string {
+  return emailWrap(`<tr><td style="padding:36px 32px;">
+${emailTitle('Your data export is ready')}
+${emailGreeting(name)}
+${emailPara(`As requested, we've attached a PDF summary of the personal data Torqued holds about you — your details, vehicles, bookings, transactions, quotes, and service history.`)}
+${emailPara(`Full details on how long we keep your data (and when it's deleted) are in the attached document and our <a href="https://torqued.site/privacy-policy.pdf" style="color:${EMAIL_RED};">Privacy Policy</a>.`)}
+${emailPara(`If anything looks wrong or you have questions, just reply to this email or reach us at <a href="mailto:hello@torqued.site" style="color:${EMAIL_RED};">hello@torqued.site</a>.`)}
+</td></tr>`);
+}
+
 // POST /api/admin/privacy-request — log a privacy act request
 app.post('/api/admin/privacy-request', async (req, res) => {
   try {
@@ -8045,22 +8208,17 @@ app.post('/api/admin/privacy-request', async (req, res) => {
     const supabase = getSupabaseAdmin();
     if (!supabase) return res.status(500).json({ error: 'DB not configured' });
 
-    const { error } = await supabase.from('privacy_requests').insert({
-      customer_email: String(customerEmail).trim().toLowerCase(),
+    const emailLower = String(customerEmail).trim().toLowerCase();
+    const { data: logged, error } = await supabase.from('privacy_requests').insert({
+      customer_email: emailLower,
       request_type: requestType,
       notes: notes || null,
       status: 'pending',
-    });
+    }).select('id').single();
 
     if (error) {
-      // Table may not exist yet — create it lazily via raw SQL
-      // Table doesn't exist yet — insert will fail gracefully; admin should create table in Supabase
-      await supabase.from('privacy_requests').insert({
-        customer_email: String(customerEmail).trim().toLowerCase(),
-        request_type: requestType,
-        notes: notes || null,
-        status: 'pending',
-      });
+      console.error('[privacy-request] insert failed:', error.message);
+      return res.status(500).json({ error: 'Could not log request. Has the privacy_requests table been created in Supabase?' });
     }
 
     // If delete request: soft-delete customer data in profiles
@@ -8068,7 +8226,7 @@ app.post('/api/admin/privacy-request', async (req, res) => {
       const { data: profile } = await supabase
         .from('profiles')
         .select('id')
-        .ilike('email', String(customerEmail).trim())
+        .ilike('email', emailLower)
         .maybeSingle();
       if (profile) {
         await supabase.from('profiles').update({
@@ -8080,7 +8238,33 @@ app.post('/api/admin/privacy-request', async (req, res) => {
       }
     }
 
-    res.json({ success: true });
+    // If export request: build and email the full data-export PDF now, then mark resolved.
+    let exportEmailed = false;
+    if (requestType === 'export') {
+      try {
+        const data = await gatherCustomerDataExport(emailLower);
+        const pdfBuffer = buildDataExportPdf(emailLower, data);
+        const transporter = getMailTransporter();
+        if (transporter) {
+          await transporter.sendMail({
+            from: process.env.SMTP_FROM || '"Torqued" <torquedapp.nz@gmail.com>',
+            to: emailLower,
+            subject: 'Your Torqued data export',
+            html: generateDataExportEmailHtml(data.profile?.name || ''),
+            attachments: [{ filename: 'Torqued-Data-Export.pdf', content: pdfBuffer, contentType: 'application/pdf' }],
+          });
+          exportEmailed = true;
+          await supabase.from('privacy_requests').update({
+            status: 'resolved', resolved_by: 'system (auto-export)', resolved_at: new Date().toISOString(),
+          }).eq('id', logged!.id);
+        }
+      } catch (e) {
+        console.error('[privacy-request] export failed:', e);
+        // Leave the request logged as pending so an admin can action it manually.
+      }
+    }
+
+    res.json({ success: true, exportEmailed });
   } catch (err) {
     console.error('[privacy-request]', err);
     res.status(500).json({ error: 'Server error' });
