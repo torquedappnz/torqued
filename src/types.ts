@@ -123,40 +123,6 @@ export interface Recommendation {
   priority: 'low' | 'medium' | 'high';
 }
 
-export interface Supplier {
-  id: string;
-  name: string;
-  logo: string;
-  rating: number;
-  deliveryEstimate: string;
-}
-
-export interface PartOffer {
-  id: string;
-  partId: string;
-  supplierId: string;
-  price: number;
-  availability: 'in-stock' | 'to-order' | 'out-of-stock';
-  deliveryTime: string;
-}
-
-export interface RequiredPart {
-  id: string;
-  name: string;
-  oemNumber?: string;
-  quantity: number;
-  selectedOfferId?: string;
-}
-
-export interface ProcurementItem {
-  id: string;
-  reg: string;
-  model: string;
-  partsCount: number;
-  suppliers: string[];
-  orderTotal: number;
-}
-
 export interface DeliveryItem {
   id: string;
   supplier: string;

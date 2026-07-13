@@ -57,15 +57,8 @@ import { authPasskey, registerPasskey, passkeysSupported, hasPasskey } from '../
 import { SERVICES } from '../constants';
 import {
   InventoryPart,
-  Supplier,
-  PartOffer,
-  RequiredPart,
-  ProcurementItem,
   DeliveryItem
 } from '../types';
-
-const SUPPLIERS: Supplier[] = [];
-const PART_OFFERS: PartOffer[] = [];
 
 
 // ── Vehicle Health Lookup (mechanic side) ─────────────────────────────────────
@@ -841,9 +834,7 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
             : 'Awaiting Payment',
           rawStatus: row.status,
           payment_status: row.payment_status,
-          partsMatch: 0,
           profit: Math.round((parseFloat(row.total_price) || 0) * 0.65),
-          requiredParts: [],
           quoteItems: row.quote_items || null,
         }));
         setIncomingJobs(prev => {
@@ -1100,16 +1091,12 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
       setHistAccessMsg('Could not connect. Please try again.');
     }
   };
-  const [procurementQueue, setProcurementQueue] = useState<ProcurementItem[]>([]);
   const [diagnosticStep, setDiagnosticStep] = useState<'review' | 'inspect' | 'quote' | 'sent'>('review');
   const [diagnosticFindings, setDiagnosticFindings] = useState('');
   const [customQuotePrice, setCustomQuotePrice] = useState('580');
   const [deliveredParts, setDeliveredParts] = useState<DeliveryItem[]>([]);
   const [isAddingPart, setIsAddingPart] = useState(false);
   const [newPart, setNewPart] = useState<Partial<InventoryPart>>({ name: '', quantity: 0, unitPrice: 0, unit: 'each' });
-  const [showProcurement, setShowProcurement] = useState(false);
-  const [selectedJobForProcurement, setSelectedJobForProcurement] = useState<string | null>(null);
-  const [procurementSelections, setProcurementSelections] = useState<Record<string, string>>({});
   const [bookingLinkCopied, setBookingLinkCopied] = useState(false);
   const [profileData, setProfileData] = useState({
     name: '',
@@ -1240,29 +1227,6 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
       payment_status: 'confirmed', description: job.description, is_cold_quote: false,
     }, ...prev]);
 
-    // Auto-order parts if they are not in stock
-    if (job.partsMatch < 100 && job.requiredParts) {
-      const partsCount = job.requiredParts.length;
-      const totalOrder = job.requiredParts.reduce((sum, p) => {
-        const bestOffer = PART_OFFERS.filter(o => o.partId === p.id).sort((a, b) => a.price - b.price)[0];
-        return sum + (bestOffer ? bestOffer.price * p.quantity : 0);
-      }, 0);
-      
-      const uniqueSuppliers = Array.from(new Set(job.requiredParts.map(p => {
-        const bestOffer = PART_OFFERS.filter(o => o.partId === p.id).sort((a, b) => a.price - b.price)[0];
-        return bestOffer ? SUPPLIERS.find(s => s.id === bestOffer.supplierId)?.name : null;
-      }).filter(Boolean))) as string[];
-
-      setDeliveredParts([{ 
-        id: Math.random().toString(), 
-        supplier: uniqueSuppliers.length > 1 ? `${uniqueSuppliers[0]} + ${uniqueSuppliers.length - 1} more` : uniqueSuppliers[0] || 'Auto-Distributor', 
-        items: partsCount, 
-        eta: 'Tomorrow 9:00 AM', 
-        status: 'Order Sent', 
-        icon: '🚚' 
-      }, ...deliveredParts]);
-    }
-
     setActiveTab('calendar');
   };
 
@@ -1363,70 +1327,6 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
         <div className="lg:col-span-2 space-y-6">
-          {/* Procurement Review Section */}
-          {procurementQueue.length > 0 && (
-            <Card className="p-6 border-torqued-red/30 bg-torqued-red/[0.02]">
-              <div className="flex justify-between items-center mb-6">
-                <div className="flex items-center gap-3">
-                  <div className="w-10 h-10 bg-torqued-red rounded-xl flex items-center justify-center text-white">
-                    <CheckCircle2 size={20} />
-                  </div>
-                  <div>
-                    <h3 className="text-xl text-foreground">Confirm to Order</h3>
-                    <p className="text-xs text-muted uppercase font-bold tracking-tight">Final verification before supplier dispatch</p>
-                  </div>
-                </div>
-                <div className="text-right">
-                   <p className="text-[10px] font-bold uppercase text-muted">Total Order</p>
-                   <p className="text-xl font-bold text-torqued-red">
-                     {formatCurrency(procurementQueue.reduce((sum, j) => sum + (j.orderTotal || 0), 0))}
-                   </p>
-                </div>
-              </div>
-              
-              <div className="space-y-4">
-                {procurementQueue.map(item => (
-                   <div key={item.id} className="bg-card p-4 rounded-2xl border border-border flex items-center justify-between group hover:border-torqued-red transition-all">
-                    <div className="flex items-center gap-4">
-                      <div className="w-12 h-12 bg-white/10 rounded-xl flex items-center justify-center font-bold text-muted">
-                        {item.reg.slice(0, 2)}
-                      </div>
-                      <div>
-                        <div className="flex items-center gap-2">
-                          <h4 className="font-bold text-foreground">{item.reg} - {item.model}</h4>
-                          <span className="text-[10px] bg-background/50 px-2 py-0.5 rounded font-bold text-muted uppercase">{item.partsCount} Items</span>
-                        </div>
-                        <p className="text-xs text-muted">Suppliers: {item.suppliers?.join(', ')}</p>
-                      </div>
-                    </div>
-                    <div className="flex items-center gap-3">
-                      <div className="text-right mr-4">
-                        <p className="text-[10px] font-bold uppercase text-white/40">Shipment</p>
-                        <p className="text-xs font-bold text-emerald-600 italic">Tomorrow AM Delivery</p>
-                      </div>
-                      <Button 
-                        size="sm" 
-                        onClick={() => {
-                          setDeliveredParts([{ 
-                            id: Math.random().toString(), 
-                            supplier: item.suppliers?.[0] || 'Multiple', 
-                            items: item.partsCount, 
-                            eta: 'Tomorrow 9:00 AM', 
-                            status: 'Order Placed', 
-                            icon: '🚚' 
-                          }, ...deliveredParts]);
-                          setProcurementQueue(procurementQueue.filter(q => q.id !== item.id));
-                        }}
-                      >
-                        Confirm & Order
-                      </Button>
-                    </div>
-                  </div>
-                ))}
-              </div>
-            </Card>
-          )}
-
           <Card className="p-6 space-y-6">
             <div className="flex justify-between items-center">
               <h3 className="text-xl">Weekly Revenue</h3>
@@ -2027,63 +1927,8 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                 </div>
               </div>
 
-              <div className="bg-background text-foreground p-4 rounded-2xl space-y-3 border border-border shadow-inner">
-                <div className="flex items-center gap-2 text-torqued-red font-bold uppercase tracking-widest text-[10px]">
-                  <AlertCircle size={14} /> Auto Inventory Sync
-                </div>
-                <div className="space-y-3">
-                  {(job as any).partsMatch < 100 ? (
-                    <div className="space-y-2">
-                       <p className="text-[10px] font-bold uppercase text-muted">Parts to Order</p>
-                       <div className="space-y-1.5">
-                         {(job as any).requiredParts?.map((p: any) => {
-                           const bestOffer = PART_OFFERS.filter(o => o.partId === p.id).sort((a, b) => a.price - b.price)[0];
-                           const supplier = SUPPLIERS.find(s => s.id === bestOffer?.supplierId);
-                           return (
-                             <div key={p.id} className="flex justify-between items-center text-[10px] bg-card p-1.5 rounded-lg border border-border">
-                               <span className="font-medium text-foreground">{p.name}</span>
-                               <div className="text-right">
-                                 <span className="text-torqued-red font-bold block">{formatCurrency(bestOffer?.price || 0)}</span>
-                                 <span className="text-[8px] opacity-60 italic">{supplier?.name}</span>
-                               </div>
-                             </div>
-                           );
-                         })}
-                       </div>
-                       <p className="text-[10px] text-muted pt-1">
-                         Estimated Lead Time: <span className="text-foreground font-bold italic">Tomorrow AM</span>
-                       </p>
-                    </div>
-                  ) : (
-                    <p className="text-xs leading-relaxed text-foreground/80">
-                      Job matches your in-stock parts. <br />
-                    </p>
-                  )}
-                  <div className="pt-2 border-t border-border">
-                    <span className="text-foreground font-bold text-xs font-accent">Profit Margin: {formatCurrency(job.profit)} (excl. labour).</span>
-                  </div>
-                </div>
-                <div className="pt-2 flex justify-between items-center border-t border-border">
-                  <span className="text-[10px] font-bold uppercase text-muted">Parts Availability</span>
-                  <div className="flex items-center gap-3">
-                    <span className={cn("text-[10px] font-bold uppercase", (job as any).partsMatch < 50 ? "text-torqued-red" : "text-emerald-500 font-accent")}>
-                      {(job as any).partsMatch}% In Workshop Stock
-                    </span>
-                    {(job as any).partsMatch < 100 && (
-                      <Button 
-                        variant="outline" 
-                        size="sm" 
-                        className="h-7 py-0 px-2 text-[9px] border-border text-foreground hover:bg-card"
-                        onClick={() => {
-                          setSelectedJobForProcurement(job.id);
-                          setShowProcurement(true);
-                        }}
-                      >
-                        Details
-                      </Button>
-                    )}
-                  </div>
-                </div>
+              <div className="bg-background text-foreground p-4 rounded-2xl border border-border shadow-inner">
+                <span className="text-foreground font-bold text-xs font-accent">Profit Margin: {formatCurrency(job.profit)} (excl. labour).</span>
               </div>
             </div>
 
@@ -3181,200 +3026,6 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
         </div>
       )}
     </div>
-    );
-  };
-
-  const renderProcurementModal = () => {
-    const job = incomingJobs.find(j => j.id === selectedJobForProcurement);
-    if (!job) return null;
-
-    const totalOrder = job.requiredParts?.reduce((sum, p) => {
-      const selection = procurementSelections[p.id];
-      const offer = PART_OFFERS.find(o => o.id === selection);
-      return sum + (offer ? offer.price * p.quantity : 0);
-    }, 0) || 0;
-
-    return (
-      <div className="fixed inset-0 bg-black/80 backdrop-blur-sm z-50 flex items-center justify-center p-4">
-        <motion.div 
-          initial={{ opacity: 0, scale: 0.95, y: 20 }}
-          animate={{ opacity: 1, scale: 1, y: 0 }}
-          className="bg-background w-full max-w-5xl max-h-[90vh] rounded-3xl overflow-hidden flex flex-col shadow-2xl border border-border"
-        >
-          {/* Header */}
-          <div className="p-6 border-b border-border flex justify-between items-center bg-card text-foreground">
-            <div className="flex items-center gap-4">
-              <div className="w-12 h-12 bg-background rounded-xl flex items-center justify-center border border-border">
-                <Package className="text-torqued-red" size={24} />
-              </div>
-              <div>
-                <h2 className="text-2xl font-bold">Parts Procurement Pipeline</h2>
-                <p className="text-muted text-xs font-mono uppercase tracking-widest">{job.model} • {job.reg}</p>
-              </div>
-            </div>
-            <button 
-              onClick={() => setShowProcurement(false)}
-              className="p-2 hover:bg-card rounded-full transition-colors text-muted hover:text-foreground"
-            >
-              <X size={24} />
-            </button>
-          </div>
-
-          <div className="flex-1 overflow-hidden flex bg-background">
-            {/* Left: Component List */}
-            <div className="w-1/3 border-r border-border bg-card/30 overflow-y-auto p-6 space-y-4">
-              <h3 className="text-xs font-bold uppercase text-muted tracking-wider">Required Items</h3>
-              {job.requiredParts?.map(part => {
-                const selectedOffer = PART_OFFERS.find(o => o.id === procurementSelections[part.id]);
-                return (
-                  <div 
-                    key={part.id} 
-                    className={cn(
-                      "p-4 rounded-2xl cursor-pointer border transition-all",
-                      procurementSelections[part.id] 
-                        ? "bg-torqued-red/10 border-torqued-red shadow-sm" 
-                        : "bg-card border-border hover:bg-card/80"
-                    )}
-                  >
-                    <p className="text-xs font-bold text-muted mb-1">{part.oemNumber}</p>
-                    <h4 className="font-bold text-sm text-foreground">{part.name}</h4>
-                    <div className="flex justify-between items-center mt-3">
-                      <span className="text-[10px] bg-background px-2 py-0.5 rounded text-muted">Qty: {part.quantity}</span>
-                      {selectedOffer && (
-                        <span className="text-sm font-bold text-torqued-red">{formatCurrency(selectedOffer.price)}</span>
-                      )}
-                    </div>
-                  </div>
-                );
-              })}
-            </div>
-
-            {/* Right: Supplier Comparison (The "Fresho" style view) */}
-            <div className="flex-1 overflow-y-auto p-8 space-y-12 text-foreground">
-              {job.requiredParts?.map(part => (
-                <div key={part.id} className="space-y-4">
-                  <div className="flex justify-between items-end">
-                    <div>
-                      <h3 className="text-xl font-bold">{part.name}</h3>
-                      <p className="text-sm text-muted">Compare best value from {SUPPLIERS.length} matching suppliers</p>
-                    </div>
-                    <span className="text-[10px] font-bold text-muted font-mono italic">OEM MATCH: {part.oemNumber}</span>
-                  </div>
-                  
-                  <div className="grid grid-cols-1 gap-3">
-                    {PART_OFFERS.filter(o => o.partId === part.id).map(offer => {
-                      const supplier = SUPPLIERS.find(s => s.id === offer.supplierId)!;
-                      const isSelected = procurementSelections[part.id] === offer.id;
-                      const isBestValue = offer.price === Math.min(...PART_OFFERS.filter(o => o.partId === part.id).map(o => o.price));
-
-                      return (
-                        <div 
-                          key={offer.id}
-                          onClick={() => setProcurementSelections(prev => ({ ...prev, [part.id]: offer.id }))}
-                          className={cn(
-                            "flex items-center justify-between p-4 rounded-xl border-2 cursor-pointer transition-all",
-                            isSelected 
-                              ? "border-torqued-red bg-torqued-red/5" 
-                              : "border-border bg-card hover:border-muted"
-                          )}
-                        >
-                          <div className="flex items-center gap-4">
-                            <div className="w-10 h-10 bg-background rounded-lg flex items-center justify-center text-xl border border-border">
-                              {supplier.logo}
-                            </div>
-                            <div>
-                              <div className="flex items-center gap-2">
-                                <h5 className="font-bold text-sm text-foreground">{supplier.name}</h5>
-                                {isBestValue && (
-                                  <span className="text-[8px] bg-emerald-500/10 text-emerald-500 px-1.5 py-0.5 rounded-full font-bold uppercase tracking-wider border border-emerald-500/20">Best Value</span>
-                                )}
-                              </div>
-                              <div className="flex items-center gap-3 mt-1">
-                                <span className="text-[10px] text-muted flex items-center gap-1">
-                                  <Star size={10} className="fill-yellow-400 text-yellow-400" /> {supplier.rating}
-                                </span>
-                                <span className={cn(
-                                  "text-[10px] font-bold px-1.5 rounded",
-                                  offer.availability === 'in-stock' ? "text-emerald-500 bg-emerald-500/10" : "text-yellow-600 bg-yellow-500/10"
-                                )}>
-                                  {offer.availability === 'in-stock' ? 'In Stock' : 'To Order'}
-                                </span>
-                              </div>
-                            </div>
-                          </div>
-                          
-                          <div className="text-right">
-                            <div className="flex items-center gap-2 justify-end mb-1">
-                               <Clock size={12} className="text-muted" />
-                               <span className="text-[10px] font-bold text-muted truncate max-w-[100px]">{offer.deliveryTime} Delivery</span>
-                            </div>
-                            <p className="text-xl font-bold text-foreground">{formatCurrency(offer.price)}</p>
-                          </div>
-                        </div>
-                      );
-                    })}
-                  </div>
-                </div>
-              ))}
-            </div>
-          </div>
-
-          {/* Footer Summary */}
-          <div className="p-6 bg-card border-t border-border flex justify-between items-center text-foreground">
-            <div className="flex gap-8">
-              <div>
-                <p className="text-[10px] font-bold uppercase text-muted mb-1">Items Selected</p>
-                <p className="text-lg font-bold">{Object.keys(procurementSelections).length} / {job.requiredParts?.length}</p>
-              </div>
-              <div>
-                <p className="text-[10px] font-bold uppercase text-muted mb-1">Consolidated Total</p>
-                <div className="flex items-baseline gap-2">
-                  <p className="text-2xl font-black text-torqued-red tracking-tighter shadow-torqued-red/20 drop-shadow-xl">{formatCurrency(totalOrder)}</p>
-                  <p className="text-[10px] text-muted">Excl. GST</p>
-                </div>
-              </div>
-            </div>
-            
-            <div className="flex gap-3">
-              <Button 
-                variant="outline" 
-                onClick={() => setProcurementSelections({})}
-                className="px-6"
-              >
-                Clear All
-              </Button>
-              <Button 
-                disabled={Object.keys(procurementSelections).length === 0}
-                className="px-10 bg-torqued-red hover:bg-red-700"
-                onClick={() => {
-                  const selectedSuppliers = Array.from(new Set(
-                    Object.values(procurementSelections).map(offerId => {
-                      const offer = PART_OFFERS.find(o => o.id === offerId);
-                      return SUPPLIERS.find(s => s.id === offer?.supplierId)?.name || 'Unknown';
-                    })
-                  ));
-
-                  const queueItem = {
-                    id: job.id,
-                    reg: job.reg,
-                    model: job.model,
-                    partsCount: Object.keys(procurementSelections).length,
-                    suppliers: selectedSuppliers,
-                    orderTotal: totalOrder,
-                  };
-
-                  setProcurementQueue([...procurementQueue, queueItem]);
-                  setProcurementSelections({});
-                  setShowProcurement(false);
-                  setActiveTab('dashboard');
-                }}
-              >
-                Queue for Order Confirmation
-              </Button>
-            </div>
-          </div>
-        </motion.div>
-      </div>
     );
   };
 
@@ -5143,7 +4794,6 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
         {renderContent()}</>}
       </main>
       {selectedJobId && renderHealthReport()}
-      {showProcurement && renderProcurementModal()}
 
       {/* Cold quote: create a booking for a customer with no prior Torqued relationship */}
       {showColdQuote && (
