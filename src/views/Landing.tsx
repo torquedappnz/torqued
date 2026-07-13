@@ -412,6 +412,18 @@ export const Landing: React.FC<LandingProps> = ({ onGetQuote, onMechanicPortal }
         </div>
       </section>
 
+      {/* Workshop promo */}
+      <section className="bg-background py-16 px-4 border-t border-border">
+        <div className="max-w-4xl mx-auto bg-torqued-red/5 border border-torqued-red/20 rounded-3xl p-8 md:p-10 flex flex-col md:flex-row items-center justify-between gap-6 text-center md:text-left">
+          <div className="space-y-1.5">
+            <span className="text-[10px] font-black uppercase tracking-widest text-torqued-red bg-torqued-red/10 px-2 py-1 rounded-full">Workshops</span>
+            <h3 className="text-2xl font-black tracking-tight text-foreground">50% off your first 3 months</h3>
+            <p className="text-muted text-sm">New Torqued workshops get half-price access to the platform for their first three months.</p>
+          </div>
+          <Button size="lg" className="bg-torqued-red text-white shrink-0" onClick={onMechanicPortal}>Torqued for Workshops</Button>
+        </div>
+      </section>
+
       {/* Footer */}
       <footer className="bg-card text-foreground py-12 px-4 border-t border-border">
         <div className="max-w-6xl mx-auto flex flex-col md:flex-row justify-between items-center gap-8">
