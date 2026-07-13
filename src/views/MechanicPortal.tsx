@@ -216,6 +216,10 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
   const [justActivated, setJustActivated] = useState(false);
   // Onboarding wizard
   const [onboardingComplete, setOnboardingComplete] = useState<boolean | null>(null);
+  // Separate from onboardingComplete: admin-onboarded accounts start with
+  // onboarding_complete already true (business details pre-filled by admin) but
+  // still need to sign the contract themselves on first login.
+  const [agreementSigned, setAgreementSigned] = useState(true);
   const [obStep, setObStep] = useState(0);
   const [obSaving, setObSaving] = useState(false);
   const [ob, setOb] = useState<{
@@ -249,8 +253,25 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
     if (!user) return;
     fetch(`/api/mechanic/onboarding-status?id=${user.id}`)
       .then(r => r.json())
-      .then(d => { setOnboardingComplete(!!d.complete); if (!d.complete) setOb(o => ({ ...o, name: user.user_metadata?.name || o.name })); })
-      .catch(() => setOnboardingComplete(true));
+      .then(d => {
+        setOnboardingComplete(!!d.complete);
+        setAgreementSigned(!!d.agreementSigned);
+        if (!d.complete) {
+          setOb(o => ({ ...o, name: user.user_metadata?.name || o.name }));
+        } else if (!d.agreementSigned && d.profile) {
+          // Admin-onboarded account: business details are already filled in — only
+          // the contract-signing step is outstanding, so jump straight to it.
+          setOb(o => ({
+            ...o,
+            name: d.profile.name || o.name, legal_name: d.profile.legal_name || o.legal_name,
+            address: d.profile.address || o.address, nzbn: d.profile.nzbn || o.nzbn,
+            owner_name: d.profile.owner_name || o.owner_name, owner_phone: d.profile.owner_phone || o.owner_phone,
+            phone: d.profile.phone || o.phone, years_in_trade: d.profile.years_in_trade ? String(d.profile.years_in_trade) : o.years_in_trade,
+          }));
+          setObStep(4);
+        }
+      })
+      .catch(() => { setOnboardingComplete(true); setAgreementSigned(true); });
   }, [user]);
 
   // Capacity settings
@@ -851,18 +872,7 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
       .catch(() => {});
   }, [user]);
 
-  const [stripeSubscriptionUrl, setStripeSubscriptionUrl] = useState<string | null>(null);
-  const [showStripeSubscriptionModal, setShowStripeSubscriptionModal] = useState(false);
-  const [stripeFormStep, setStripeFormStep] = useState<'input' | 'processing' | 'success'>('input');
-  const [stripeLoadingMessage, setStripeLoadingMessage] = useState('Initiating subscription... Please wait.');
-  const [cardNum, setCardNum] = useState('');
-  const [cardExp, setCardExp] = useState('');
-  const [cardCvc, setCardCvc] = useState('');
-  const [cardName, setCardName] = useState('');
-  const [cardPostalCode, setCardPostalCode] = useState('');
-  const [cardError, setCardError] = useState('');
   const [searchQuery, setSearchQuery] = useState('');
-  const [isSubscriptionLoading, setIsSubscriptionLoading] = useState(false);
   const [billingStartDate, setBillingStartDate] = useState<string | null>(null);
   const [activeTab, setActiveTab ] = useState('dashboard');
   const [jobsSubtab, setJobsSubtab] = useState<'accept' | 'today' | 'upcoming' | 'history' | 'cold'>('accept');
@@ -4099,40 +4109,61 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
 
   // Self-contained reset/onboarding link: ?reset_token=<signed>. Captured once at mount.
   const [resetToken] = useState(() => new URLSearchParams(window.location.search).get('reset_token'));
-  if (resetToken && passwordSetStatus !== 'done') {
+  const [passwordSetConfirmed, setPasswordSetConfirmed] = useState(false);
+  if (resetToken && !passwordSetConfirmed) {
     return (
       <div className="min-h-screen bg-background text-foreground flex items-center justify-center p-4">
         <div className="w-full max-w-md bg-card border border-border rounded-3xl p-8 space-y-6 shadow-xl">
           <Logo />
-          <div className="space-y-1">
-            <h2 className="text-2xl font-black tracking-tighter">Set your password</h2>
-            <p className="text-sm text-muted">Choose a password for your Torqued workshop account.</p>
-          </div>
-          <div className="space-y-3">
-            <input type="password" value={newPassword} onChange={e => setNewPassword(e.target.value)} placeholder="New password (min 8 characters)" className="w-full bg-background border border-border rounded-xl px-4 h-12 text-sm text-foreground placeholder:text-muted focus:outline-none focus:border-torqued-red" />
-            <input type="password" value={newPasswordConfirm} onChange={e => setNewPasswordConfirm(e.target.value)} placeholder="Confirm password" className="w-full bg-background border border-border rounded-xl px-4 h-12 text-sm text-foreground placeholder:text-muted focus:outline-none focus:border-torqued-red" />
-            {passwordSetError && <p className="text-xs text-torqued-red font-bold">{passwordSetError}</p>}
-            <button
-              disabled={passwordSetStatus === 'saving' || newPassword.length < 8 || newPassword !== newPasswordConfirm}
-              className="w-full h-12 bg-torqued-red text-white rounded-xl font-bold text-sm disabled:opacity-40"
-              onClick={async () => {
-                if (newPassword !== newPasswordConfirm) { setPasswordSetError('Passwords do not match.'); return; }
-                if (newPassword.length < 8) { setPasswordSetError('Password must be at least 8 characters.'); return; }
-                setPasswordSetStatus('saving'); setPasswordSetError(null);
-                try {
-                  const r = await fetch('/api/auth/set-password', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ token: resetToken, password: newPassword }) });
-                  const d = await r.json();
-                  if (!r.ok) { setPasswordSetStatus('error'); setPasswordSetError(d.error || 'Could not set password.'); return; }
-                  // Sign them straight in with the new password.
-                  try { await loginMechanic(d.email, newPassword); } catch {}
-                  window.history.replaceState({}, document.title, window.location.pathname);
-                  setPasswordSetStatus('done');
-                } catch (e: any) { setPasswordSetStatus('error'); setPasswordSetError(e?.message || 'Could not set password.'); }
-              }}
-            >
-              {passwordSetStatus === 'saving' ? 'Setting password…' : 'Set password & sign in →'}
-            </button>
-          </div>
+          {passwordSetStatus === 'done' ? (
+            <div className="space-y-4 text-center">
+              <div className="w-14 h-14 bg-emerald-500 text-white rounded-full flex items-center justify-center mx-auto"><CheckCircle2 size={28} /></div>
+              <div className="space-y-1">
+                <h2 className="text-2xl font-black tracking-tighter">Password set</h2>
+                <p className="text-sm text-muted">Your password has been updated. Sign in below with your new password.</p>
+              </div>
+              <button
+                className="w-full h-12 bg-torqued-red text-white rounded-xl font-bold text-sm"
+                onClick={() => { window.history.replaceState({}, document.title, window.location.pathname); setPasswordSetConfirmed(true); }}
+              >
+                Continue to sign in →
+              </button>
+            </div>
+          ) : (
+            <>
+              <div className="space-y-1">
+                <h2 className="text-2xl font-black tracking-tighter">Set your password</h2>
+                <p className="text-sm text-muted">Choose a password for your Torqued workshop account.</p>
+              </div>
+              <div className="space-y-3">
+                <input type="password" value={newPassword} onChange={e => setNewPassword(e.target.value)} placeholder="New password (min 8 characters)" className="w-full bg-background border border-border rounded-xl px-4 h-12 text-sm text-foreground placeholder:text-muted focus:outline-none focus:border-torqued-red" />
+                <input type="password" value={newPasswordConfirm} onChange={e => setNewPasswordConfirm(e.target.value)} placeholder="Confirm password" className="w-full bg-background border border-border rounded-xl px-4 h-12 text-sm text-foreground placeholder:text-muted focus:outline-none focus:border-torqued-red" />
+                {passwordSetError && <p className="text-xs text-torqued-red font-bold">{passwordSetError}</p>}
+                <button
+                  disabled={passwordSetStatus === 'saving' || newPassword.length < 8 || newPassword !== newPasswordConfirm}
+                  className="w-full h-12 bg-torqued-red text-white rounded-xl font-bold text-sm disabled:opacity-40"
+                  onClick={async () => {
+                    if (newPassword !== newPasswordConfirm) { setPasswordSetError('Passwords do not match.'); return; }
+                    if (newPassword.length < 8) { setPasswordSetError('Password must be at least 8 characters.'); return; }
+                    setPasswordSetStatus('saving'); setPasswordSetError(null);
+                    const controller = new AbortController();
+                    const timeout = setTimeout(() => controller.abort(), 15000);
+                    try {
+                      const r = await fetch('/api/auth/set-password', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ token: resetToken, password: newPassword }), signal: controller.signal });
+                      const d = await r.json();
+                      if (!r.ok) { setPasswordSetStatus('error'); setPasswordSetError(d.error || 'Could not set password.'); return; }
+                      setPasswordSetStatus('done');
+                    } catch (e: any) {
+                      setPasswordSetStatus('error');
+                      setPasswordSetError(e?.name === 'AbortError' ? 'That took too long. Please check your connection and try again.' : (e?.message || 'Could not set password.'));
+                    } finally { clearTimeout(timeout); }
+                  }}
+                >
+                  {passwordSetStatus === 'saving' ? 'Setting password…' : 'Set password →'}
+                </button>
+              </div>
+            </>
+          )}
         </div>
       </div>
     );
@@ -4195,8 +4226,10 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
     );
   }
 
-  // Onboarding wizard — shown after login, before subscription, until completed
-  if (user && onboardingComplete === false) {
+  // Onboarding wizard — shown after login, before subscription, until completed.
+  // Also shown (jumped straight to the contract step) for admin-onboarded accounts
+  // that have business details filled in but haven't signed the contract yet.
+  if (user && (onboardingComplete === false || !agreementSigned)) {
     const obInput = "w-full bg-card border border-border rounded-xl px-4 h-12 text-sm text-foreground placeholder:text-muted focus:outline-none focus:border-torqued-red";
     const obLabel = "text-[10px] font-black uppercase tracking-widest text-muted block mb-1";
     const OB_STEPS = 5;
@@ -4415,6 +4448,7 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                       });
                     } catch (e) { console.error('Contract email failed (non-blocking):', e); }
                     setOnboardingComplete(true);
+                    setAgreementSigned(true);
                   } catch {} finally { setObSaving(false); }
                 }}>I Agree & Complete Registration</Button>
               </div>
@@ -4733,331 +4767,6 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                 Thanks for signing up — we're reviewing your account and will be in touch if we need anything else from you. Keep an eye on your inbox.
               </p>
             </div>
-          </motion.div>
-        </main>
-      </div>
-    );
-  }
-
-  if (!userProfile?.subscriptionActive && !justActivated) {
-    return (
-      <div className="min-h-screen bg-background text-foreground flex flex-col">
-{/* Navigation */}
-        <nav className="p-4 md:px-8 flex justify-between items-center bg-background/80 border-b border-border backdrop-blur-sm">
-          <Logo />
-          <Button size="sm" variant="outline" className="border-border" onClick={() => { setIncomingJobs([]); setCustomers([]); setBilling(null); setJobNotes({}); setVehiclePhotos({}); setProfileData({ name: '', nzbn: '', phone: '', address: '', serviceAreas: [], diagnosticTools: [], certifications: [], labourRate: 145, shopFee: 25, offersPpi: false, bio: '', profilePhotoUrl: '', bannerImage: '' }); logout(); }}>
-            Sign Out
-          </Button>
-        </nav>
-
-        <main className="flex-1 flex items-center justify-center p-6 py-20 relative overflow-hidden">
-          {/* Subtle background glow */}
-          <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-96 h-96 bg-torqued-red/10 blur-[120px] rounded-full -z-10" />
-
-          <motion.div
-            initial={{ opacity: 0, y: 30 }}
-            animate={{ opacity: 1, y: 0 }}
-            className="w-full max-w-xl bg-card border border-border shadow-2xl rounded-3xl p-8 sm:p-12 space-y-8 text-center"
-          >
-            <div className="w-20 h-20 bg-torqued-red/10 border border-torqued-red/20 text-torqued-red rounded-2xl flex items-center justify-center mx-auto shadow-inner">
-              <Wrench size={38} className="animate-pulse" />
-            </div>
-
-            <div className="space-y-3">
-              <h2 className="text-3xl sm:text-5xl font-black tracking-tighter uppercase text-foreground leading-none">
-                Mechanic Portal <span className="text-torqued-red font-normal text-3xl sm:text-5xl">Hub</span>
-              </h2>
-              <p className="text-sm sm:text-base text-muted">
-                Unlock automated parts diagnostics, custom quotes, invoice management, and direct high-value diesel and euro leads.
-              </p>
-            </div>
-
-            <div className="space-y-6">
-              <div className="p-4 bg-card border border-border rounded-2xl text-left flex items-center gap-4">
-                <div className="w-10 h-10 rounded-full bg-torqued-red/10 border border-torqued-red/20 flex items-center justify-center text-torqued-red font-bold text-sm overflow-hidden">
-                  {(user.user_metadata?.full_name ?? user.email ?? '?').charAt(0).toUpperCase()}
-                </div>
-                <div className="flex-1 min-w-0">
-                  <p className="text-xs font-bold text-foreground truncate">{user.user_metadata?.full_name ?? user.email}</p>
-                  <p className="text-[10px] text-white/50 truncate font-mono">{user.email}</p>
-                </div>
-              </div>
-
-              <div className="space-y-4 border-t border-border pt-6">
-                <div className="flex justify-between text-left items-center">
-                  <div>
-                    <p className="font-bold text-sm text-foreground">Torqued Garage Portal Plan</p>
-                    <p className="text-[10px] text-muted">Unlimited leads + 4% commission on jobs</p>
-                  </div>
-                  <span className="font-black italic text-torqued-red text-lg">$99.00 <span className="text-[9px] block font-normal text-muted not-italic text-right">/ month</span></span>
-                </div>
-
-                <Button
-                   fullWidth
-                   disabled={isSubscriptionLoading}
-                   size="lg"
-                   className="bg-torqued-red hover:bg-red-700 text-white font-black uppercase text-xs tracking-widest h-14 flex items-center justify-center gap-2"
-                   onClick={async () => {
-                     if (!user) return;
-                     setIsSubscriptionLoading(true);
-                     try {
-                       const response = await fetch('/api/stripe/create-subscription', {
-                         method: 'POST',
-                         headers: { 'Content-Type': 'application/json' },
-                         body: JSON.stringify({
-                           email: user.email,
-                           mechanicId: user.id,
-                         })
-                       });
-                       const session = await response.json();
-                       if (session.url && !session.isMock) {
-                         // Redirect straight to Stripe's hosted subscription checkout
-                         window.location.href = session.url;
-                       } else if (session.url) {
-                         setStripeSubscriptionUrl(session.url);
-                         setStripeFormStep('input');
-                         setShowStripeSubscriptionModal(true);
-                       } else {
-                         alert(session.error || 'Could not start checkout. Please try again.');
-                       }
-                     } catch (err) {
-                       console.error('Subscription session creation failed:', err);
-                       alert('Could not connect to the payment gateway. Please try again.');
-                     } finally {
-                       setIsSubscriptionLoading(false);
-                     }
-                   }}
-                >
-                  Activate Garage Hub via Stripe
-                </Button>
-              </div>
-            </div>
-
-            {/* Premium Integrated Stripe Elements Sheet */}
-            <AnimatePresence>
-              {showStripeSubscriptionModal && (
-                <div className="fixed inset-0 z-[110] flex items-center justify-center p-4 overflow-y-auto bg-black/80">
-                  <motion.div
-                    initial={{ opacity: 0 }}
-                    animate={{ opacity: 1 }}
-                    exit={{ opacity: 0 }}
-                    onClick={() => {
-                      if (stripeFormStep !== 'processing') {
-                        setShowStripeSubscriptionModal(false);
-                      }
-                    }}
-                    className="absolute inset-0 bg-background/50 backdrop-blur-sm"
-                  />
-                  <motion.div
-                    initial={{ opacity: 0, scale: 0.95, y: 30 }}
-                    animate={{ opacity: 1, scale: 1, y: 0 }}
-                    exit={{ opacity: 0, scale: 0.95, y: 30 }}
-                    className="relative w-full max-w-lg bg-zinc-950 border border-white/10 shadow-2xl rounded-3xl overflow-hidden p-6 md:p-8 space-y-6"
-                  >
-                    {/* Stripe Branded Header */}
-                    <div className="flex justify-between items-center pb-4 border-b border-white/10">
-                      <div className="flex items-center gap-2">
-                        <span className="text-sm font-black uppercase text-white bg-white/5 py-1 px-2.5 rounded-lg border border-white/10 tracking-wider flex items-center gap-1.5 font-mono">
-                          <span className="w-2.5 h-2.5 bg-torqued-red rounded-full animate-pulse" />
-                          Secure Subscription Portal
-                        </span>
-                      </div>
-                      <div className="text-[10px] text-white/40 font-bold uppercase tracking-wider flex items-center gap-1">
-                        🔒 SSL Certified
-                      </div>
-                    </div>
-
-                    {stripeFormStep === 'input' && (
-                      <div className="space-y-5">
-                        <div className="space-y-1.5 text-left">
-                          <h3 className="text-xl font-black tracking-tight text-white">Garage Portal Hub Activation 🔧</h3>
-                          <p className="text-xs text-white/60">
-                            Join high-performing NZ workshops. Unlock instant direct customer leads, live service history overrides, and calendar scheduler.
-                          </p>
-                        </div>
-
-                        {/* Subscription Summary Panel */}
-                        <div className="p-4 bg-white/5 border border-white/10 rounded-2xl space-y-2">
-                          <div className="flex justify-between items-center text-xs">
-                            <span className="text-white/40">Tier Selected:</span>
-                            <span className="font-extrabold text-white">Torqued Garage Explorer</span>
-                          </div>
-                          <div className="flex justify-between items-center text-xs">
-                            <span className="text-white/40">Commission Rate:</span>
-                            <span className="font-extrabold text-emerald-400">4% of completed work payouts</span>
-                          </div>
-                          <div className="flex justify-between items-center text-xs pt-1.5 border-t border-white/10">
-                            <span className="text-white/60 font-bold">Stripe Recurrent Charge:</span>
-                            <span className="font-black text-sm text-torqued-red font-mono">
-                              $99.00 <span className="text-[9px] text-white/40 font-normal">NZD / month</span>
-                            </span>
-                          </div>
-                        </div>
-
-                        {/* Stripe Security Redirect and Payment Options */}
-                        <div className="space-y-6">
-                          <div className="bg-emerald-500/10 border border-emerald-500/20 p-4 rounded-2xl flex items-start gap-3">
-                            <div className="w-8 h-8 rounded-lg bg-emerald-500/10 text-emerald-400 flex items-center justify-center shrink-0">
-                              <Lock size={16} />
-                            </div>
-                            <div className="text-left space-y-1">
-                              <h4 className="text-xs font-bold text-emerald-400 uppercase tracking-wider">Checkout Session Initiated</h4>
-                              <p className="text-[11px] text-white/70 leading-relaxed">
-                                Complete your activation securely. Stripe processes payments securely on their own premium, SSL-encrypted hosted page.
-                              </p>
-                            </div>
-                          </div>
-
-                          <div className="space-y-3">
-                            <div className="flex justify-between items-center text-xs text-white/40 px-1">
-                              <span>Supported Payment Types:</span>
-                              <span className="font-mono text-[10px] text-emerald-400">Secure Direct Sync</span>
-                            </div>
-                            <div className="grid grid-cols-3 gap-2">
-                              <div className="p-3 bg-white/5 border border-white/10 rounded-xl text-center space-y-0.5">
-                                <span className="text-sm">💳</span>
-                                <p className="text-[9px] font-black uppercase text-white/60 tracking-wider">Cards</p>
-                              </div>
-                              <div className="p-3 bg-[#FFC0CB]/10 border border-[#FFC0CB]/25 rounded-xl text-center space-y-0.5">
-                                <span className="text-xs font-bold text-[#FFC0CB]">Klarna.</span>
-                                <p className="text-[9px] font-black uppercase text-[#FFC0CB]/80 tracking-wider">Buy Now</p>
-                              </div>
-                              <div className="p-3 bg-[#B2F6E1]/10 border border-[#B2F6E1]/25 rounded-xl text-center space-y-0.5">
-                                <span className="text-xs font-black text-[#B2F6E1]">afterpay</span>
-                                <p className="text-[9px] font-black uppercase text-[#B2F6E1]/80 tracking-wider">4 Payments</p>
-                              </div>
-                            </div>
-                          </div>
-
-                          <div className="space-y-3">
-                            <a
-                              href={stripeSubscriptionUrl || '#'}
-                              target="_blank"
-                              rel="noopener noreferrer"
-                              className="w-full bg-torqued-red hover:bg-red-700 text-white font-black uppercase text-xs tracking-widest h-14 rounded-2xl flex items-center justify-center gap-2 hover:shadow-lg hover:shadow-torqued-red/20 transition-all cursor-pointer"
-                              onClick={() => {
-                                // Transition to processing/polling check screen
-                                setStripeFormStep('processing');
-                                setStripeLoadingMessage('Awaiting completed payment confirmation from Stripe secure webhook...');
-
-                                // Since we don't have webhook setup on high-velocity client side in local dev, let's auto-verify after 6 seconds to trigger completion!
-                                setTimeout(() => {
-                                  setStripeLoadingMessage('Stripe signature validated. Authorizing Garage Hub subscription...');
-                                }, 2500);
-
-                                setTimeout(async () => {
-                                  if (user) {
-                                    try {
-                                      await fetch('/api/mechanic/activate', {
-                                        method: 'POST', headers: { 'Content-Type': 'application/json' },
-                                        body: JSON.stringify({ mechanicId: user.id }),
-                                      });
-                                      setJustActivated(true); markSubscriptionActive();
-                                    } catch (err) {
-                                      console.error('Subscription update failed:', err);
-                                    }
-                                  }
-                                  setStripeFormStep('success');
-                                }, 5000);
-                              }}
-                            >
-                              Proceed to Secure Stripe Checkout 🡥
-                            </a>
-                            <p className="text-[10px] text-white/40 text-center">
-                              Safe & secure connection directly to your Stripe merchant portal checkout settings.
-                            </p>
-                          </div>
-
-                          {/* Bypass Shortcut Option */}
-                          <div className="pt-4 border-t border-white/5 space-y-3">
-                            <div className="flex justify-between items-center">
-                              <span className="text-[9px] font-bold text-white/30 uppercase tracking-widest">Sandbox Simulation</span>
-                              <span className="text-[8px] bg-white/5 text-white/40 px-1.5 py-0.5 rounded uppercase font-bold">Fast-Track</span>
-                            </div>
-                            <Button
-                              variant="ghost"
-                              fullWidth
-                              className="text-[10px] font-semibold text-white/40 hover:text-white uppercase tracking-widest border border-white/5 h-11 rounded-xl hover:bg-white/5 font-mono"
-                              onClick={() => {
-                                setStripeFormStep('processing');
-                                setStripeLoadingMessage('Simulating subscription payment bypass...');
-                                setTimeout(() => {
-                                  setStripeLoadingMessage('Activating garage hub permissions...');
-                                }, 1200);
-                                setTimeout(async () => {
-                                  if (user) {
-                                    try {
-                                      await fetch('/api/mechanic/activate', {
-                                        method: 'POST', headers: { 'Content-Type': 'application/json' },
-                                        body: JSON.stringify({ mechanicId: user.id }),
-                                      });
-                                      setJustActivated(true); markSubscriptionActive();
-                                    } catch (err) {
-                                      console.error('Subscription update failed:', err);
-                                    }
-                                  }
-                                  setStripeFormStep('success');
-                                }, 2500);
-                              }}
-                            >
-                              Skip Redirect (Direct Simulation)
-                            </Button>
-                          </div>
-                        </div>
-                      </div>
-                    )}
-
-                    {stripeFormStep === 'processing' && (
-                      <div className="py-12 space-y-6 text-center">
-                        <div className="relative w-24 h-24 mx-auto flex items-center justify-center">
-                          <div className="absolute inset-0 border-4 border-torqued-red/20 rounded-full" />
-                          <div className="absolute inset-0 border-4 border-t-torqued-red rounded-full animate-spin" />
-                          <CreditCard size={32} className="text-torqued-red animate-pulse" />
-                        </div>
-                        <div className="space-y-2">
-                          <h4 className="text-lg font-black tracking-tighter text-white">Activating Premium Subscription...</h4>
-                          <p className="text-xs text-white/50 font-bold font-mono text-center tracking-tight animate-pulse text-torqued-red bg-torqued-red/10 max-w-sm mx-auto py-2 p-3 rounded-xl border border-torqued-red/15">
-                            {stripeLoadingMessage}
-                          </p>
-                        </div>
-                      </div>
-                    )}
-
-                    {stripeFormStep === 'success' && (
-                      <div className="py-10 space-y-6 text-center">
-                        <div className="w-20 h-20 bg-emerald-500 text-white rounded-full flex items-center justify-center mx-auto shadow-xl shadow-emerald-500/20">
-                          <CheckCircle2 size={44} />
-                        </div>
-                        <div className="space-y-2">
-                          <h4 className="text-2xl font-black tracking-tight text-white">Workshop Subscribed! 🎉</h4>
-                          <p className="text-xs text-white/60 max-w-sm mx-auto leading-relaxed">
-                            Welcome to Torqued! Your workshop dashboard is ready! Your workshop dashboard has been successfully enabled with immediate full feature permissions.
-                          </p>
-                        </div>
-                        <Button
-                          fullWidth
-                          onClick={() => {
-                            setShowStripeSubscriptionModal(false);
-                          }}
-                          className="bg-torqued-red hover:bg-red-700 text-white font-black uppercase text-[10px] tracking-widest h-12 rounded-xl"
-                        >
-                          Enter Workshop Dashboard
-                        </Button>
-                      </div>
-                    )}
-                  </motion.div>
-                </div>
-              )}
-            </AnimatePresence>
-
-            {onBack && (
-              <button
-                className="text-[10px] font-bold text-white/40 hover:text-white tracking-widest uppercase block mx-auto pt-2"
-                onClick={onBack}
-              >
-                ← Back to Landing Page
-              </button>
-            )}
           </motion.div>
         </main>
       </div>

@@ -170,6 +170,8 @@ export const AdminPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) => {
   const [adminAddressMsg, setAdminAddressMsg] = useState<string | null>(null);
   const [adminAddrSuggestions, setAdminAddrSuggestions] = useState<{ display_name: string }[]>([]);
   const adminAddrTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const [onbAddrSuggestions, setOnbAddrSuggestions] = useState<{ display_name: string }[]>([]);
+  const onbAddrTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [adminLabourRate, setAdminLabourRate] = useState('');
   const [adminLabourRateBusy, setAdminLabourRateBusy] = useState(false);
   const [adminLabourRateMsg, setAdminLabourRateMsg] = useState<string | null>(null);
@@ -696,7 +698,36 @@ export const AdminPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) => {
                 <input value={onb.legal_name} placeholder="Legal name (if different)" onChange={e => setOnb(o => ({ ...o, legal_name: e.target.value }))} className={inp} />
                 <input value={onb.email} placeholder="Email *" onChange={e => setOnb(o => ({ ...o, email: e.target.value }))} className={inp} />
                 <input value={onb.nzbn} placeholder="NZBN (13 digits) *" onChange={e => setOnb(o => ({ ...o, nzbn: e.target.value }))} className={inp} />
-                <input value={onb.address} placeholder="Full address *" onChange={e => setOnb(o => ({ ...o, address: e.target.value }))} className={`${inp} sm:col-span-2`} />
+                <div className="relative sm:col-span-2">
+                  <input
+                    value={onb.address}
+                    placeholder="Full address *"
+                    onChange={e => {
+                      const val = e.target.value;
+                      setOnb(o => ({ ...o, address: val }));
+                      if (onbAddrTimer.current) clearTimeout(onbAddrTimer.current);
+                      if (val.length < 3) { setOnbAddrSuggestions([]); return; }
+                      onbAddrTimer.current = setTimeout(async () => {
+                        try {
+                          const res = await fetch(`https://nominatim.openstreetmap.org/search?format=json&countrycodes=nz&limit=5&q=${encodeURIComponent(val)}`, { headers: { 'User-Agent': 'TorquedNZ/1.0 (torquedapp.nz@gmail.com)' } });
+                          setOnbAddrSuggestions(await res.json() || []);
+                        } catch { setOnbAddrSuggestions([]); }
+                      }, 380);
+                    }}
+                    className={`${inp} w-full`}
+                  />
+                  {onbAddrSuggestions.length > 0 && (
+                    <div className="absolute z-50 left-0 right-0 top-full mt-1 bg-card border border-border rounded-xl overflow-hidden shadow-2xl">
+                      {onbAddrSuggestions.map((s, i) => (
+                        <button key={i} type="button"
+                          className="w-full text-left px-3 py-2 text-xs text-foreground hover:bg-torqued-red/10 border-b border-border last:border-0"
+                          onClick={() => { setOnb(o => ({ ...o, address: s.display_name })); setOnbAddrSuggestions([]); }}>
+                          {s.display_name}
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                </div>
                 <input value={onb.phone} placeholder="Workshop phone" onChange={e => setOnb(o => ({ ...o, phone: e.target.value }))} className={inp} />
                 <input value={onb.years_in_trade} placeholder="Years in trade *" type="number" onChange={e => setOnb(o => ({ ...o, years_in_trade: e.target.value }))} className={inp} />
                 <input value={onb.owner_name} placeholder="Owner name *" onChange={e => setOnb(o => ({ ...o, owner_name: e.target.value }))} className={inp} />

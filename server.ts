@@ -68,7 +68,7 @@ function getMailTransporter() {
     // override this default.
     return {
       sendMail: (mailOptions: Parameters<typeof transporter.sendMail>[0]) =>
-        transporter.sendMail({ replyTo: 'hello@torqued.nz', ...mailOptions }),
+        transporter.sendMail({ replyTo: 'hello@torqued.site', ...mailOptions }),
     };
   }
   return null;
@@ -84,6 +84,13 @@ function getSupabaseAdmin() {
 function getOrigin(req: express.Request): string {
   // SITE_URL env var is the canonical production origin — always wins when set
   if (process.env.SITE_URL) return process.env.SITE_URL.replace(/\/$/, '');
+  // In production, always use the canonical domain rather than trusting the
+  // request's Origin/Referer header — a stale browser tab (e.g. still on an
+  // old *.vercel.app preview alias) would otherwise leak that old domain into
+  // generated links (reset/onboarding emails, etc).
+  if (process.env.VERCEL_ENV === 'production' || process.env.NODE_ENV === 'production') {
+    return 'https://torqued.site';
+  }
   if (req.headers.origin && typeof req.headers.origin === 'string') {
     return req.headers.origin;
   }
@@ -3309,7 +3316,7 @@ ${emailPara('Need a hand? Just reply to this email and our team will help you ge
       await transporter.sendMail({
         from: process.env.SMTP_FROM || '"Torqued" <torquedapp.nz@gmail.com>',
         to: email,
-        subject: 'Welcome to Torqued — 4 steps to go live',
+        subject: `Welcome to Torqued — ${compActivate ? 3 : 4} steps to go live`,
         html,
       }).catch(e => console.warn('Onboard email failed (non-blocking):', e?.message));
     }
@@ -3332,7 +3339,14 @@ app.post('/api/mechanic/save-onboarding', async (req, res) => {
     const allowed = ['name','legal_name','nzbn','address','phone','owner_name','owner_phone','years_in_trade','bio','profile_photo_url','bank_account_name','bank_account_number','labour_rate','shop_fee','technicians','parts_lead_days','service_areas','diagnostic_tools','certifications','banner_image','cancellation_notice_hours','cancellation_partial_refund_pct','billing_start_date','agreement_signed_at','agreement_signed_by','offers_ppi','wants_wof'];
     const update: Record<string, any> = {};
     for (const k of allowed) if (fields[k] !== undefined) update[k] = fields[k];
-    if (complete) { update.onboarding_complete = true; update.review_status = 'pending'; }
+    if (complete) {
+      update.onboarding_complete = true;
+      // Admin-onboarded accounts are already 'approved' when they sign the contract
+      // (business details were pre-filled and vetted by admin) — don't downgrade
+      // them back to 'pending' just because this endpoint runs again.
+      const { data: existing } = await supabase.from('profiles').select('review_status').eq('id', mechanicId).maybeSingle();
+      if (existing?.review_status !== 'approved') update.review_status = 'pending';
+    }
 
     let { error } = await supabase.from('profiles').update(update).eq('id', mechanicId);
     // If migration 012 hasn't been run yet, the cancellation columns won't exist — retry without them
@@ -3380,15 +3394,12 @@ app.post('/api/mechanic/email-contract', async (req, res) => {
       <tr><td style="padding:36px 32px;">
         ${emailTitle("We've received your Torqued application")}
         ${emailGreeting(ownerName || workshopName || null)}
-        ${emailPara('Thank you for signing up to Torqued. Please allow us a few business hours to review your account sign-up.')}
-        ${emailPara("Make sure to keep an eye out on your emails, as we may need some documents from you.")}
-        ${emailPara("We look forward to working with you, to maximise your workshop's potential.")}
-        ${emailPara(`Attached is the Legal Jargon (Terms and Conditions) you are agreeing to — if you have any questions, please contact us at <a href="mailto:torquedapp.nz@gmail.com" style="color:${EMAIL_RED};font-weight:700;">torquedapp.nz@gmail.com</a>.`)}
-        ${emailPara('Thanks for choosing Torqued.')}
+        ${emailPara("Thanks for your interest in Torqued — we'll review your sign-up, and will be in touch soon.")}
+        ${emailPara(`A copy of the onboarding agreement you signed is attached for your records. Questions? Reach us at <a href="mailto:hello@torqued.site" style="color:${EMAIL_RED};font-weight:700;">hello@torqued.site</a>.`)}
       </td></tr>
     `);
     await transporter.sendMail({
-      from: `"Torqued" <${process.env.SMTP_USER}>`,
+      from: '"Torqued" <hello@torqued.site>',
       to: email,
       subject: "We've received your Torqued application",
       html,
@@ -3474,10 +3485,20 @@ app.get('/api/mechanic/onboarding-status', async (req, res) => {
     if (!id) return res.status(400).json({ error: 'id required' });
     const supabase = getSupabaseAdmin();
     if (!supabase) return res.json({ complete: true });
-    const { data } = await supabase.from('profiles').select('onboarding_complete').eq('id', id).single();
-    res.json({ complete: !!data?.onboarding_complete });
+    const { data } = await supabase.from('profiles')
+      .select('onboarding_complete, agreement_signed_at, name, legal_name, address, nzbn, owner_name, owner_phone, phone, years_in_trade')
+      .eq('id', id).single();
+    res.json({
+      complete: !!data?.onboarding_complete,
+      agreementSigned: !!data?.agreement_signed_at,
+      profile: data ? {
+        name: data.name, legal_name: data.legal_name, address: data.address, nzbn: data.nzbn,
+        owner_name: data.owner_name, owner_phone: data.owner_phone, phone: data.phone,
+        years_in_trade: data.years_in_trade,
+      } : null,
+    });
   } catch {
-    res.json({ complete: true });
+    res.json({ complete: true, agreementSigned: true, profile: null });
   }
 });
 

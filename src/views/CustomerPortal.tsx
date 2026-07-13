@@ -626,7 +626,6 @@ function mapMechanicRecord(m: any): Mechanic {
     rating: m.rating || 5.0,
     reviews: m.review_count || 0,
     labourRate: m.labour_rate || undefined,
-    specialisations: ['General Service', 'Diagnostics'],
     nextAvailable: 'Tomorrow, 8am',
     isFeatured: true,
     estimatedPrice: 0,
@@ -1052,6 +1051,32 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
         : m)
       .sort((a, b) => a.distance - b.distance);
   }, [realMechanics, customerCoords]);
+
+  // Per-mechanic estimated price for the mechanic-list step. Each workshop has its
+  // own labour_rate/shop_fee, so the headline "Est. Quote" must be re-priced per
+  // mechanic via the same endpoint (passing ?mechanic=<id>) rather than reusing one
+  // generic total for every card.
+  const [mechanicPrices, setMechanicPrices] = useState<Record<string, number>>({});
+  useEffect(() => {
+    if (!rego || mechanicsByDistance.length === 0 || selectedServices.length === 0) return;
+    let cancelled = false;
+    mechanicsByDistance.forEach(async (m) => {
+      if (!m.id || mechanicPrices[m.id] !== undefined) return;
+      try {
+        const r = await fetch(`/api/fleet-prices?rego=${encodeURIComponent(rego)}&mechanic=${encodeURIComponent(m.id)}`);
+        const fp = await r.json();
+        if (cancelled) return;
+        let t = selectedServices.reduce((sum, id) => sum + (Number(fp?.[id]?.high) || 0), 0);
+        if (addWaterPump && waterPump && (selectedServices.includes('timing') || selectedServices.includes('timing_chain_full'))) {
+          t += Number(fp?.['thermostat_housing']?.high) || waterPump.high;
+        }
+        const isDiagOnly = selectedServices.length === 1 && selectedServices[0] === 'diag_inspection';
+        if (t > 0 && !isDiagOnly && fp?.shopFee) t += fp.shopFee;
+        if (t > 0) setMechanicPrices(prev => ({ ...prev, [m.id]: t }));
+      } catch { /* keep the generic totalPrice fallback for this card */ }
+    });
+    return () => { cancelled = true; };
+  }, [rego, mechanicsByDistance, selectedServices, addWaterPump, waterPump]);
 
   // OTP Verification States
   const [showOTPModal, setShowOTPModal] = useState(false);
@@ -4249,7 +4274,7 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                       </div>
                       <div className="flex sm:flex-col justify-between sm:justify-center items-center sm:items-end gap-1.5 border-t sm:border-t-0 border-border pt-4 sm:pt-0">
                         <p className="text-[10px] font-bold uppercase text-muted tracking-widest">Est. Quote</p>
-                        <p className="text-2xl sm:text-3xl font-black text-torqued-red tracking-tighter">${totalPrice + (idx * 20)}</p>
+                        <p className="text-2xl sm:text-3xl font-black text-torqued-red tracking-tighter">${mechanicPrices[mechanic.id] ?? totalPrice}</p>
                       </div>
                     </div>
                     
@@ -4271,12 +4296,6 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                       </a>
                     )}
                     
-                    <div className="flex flex-wrap gap-2">
-                      {mechanic.specialisations.map(s => (
-                        <span key={s} className="text-[10px] font-bold uppercase bg-card border border-border px-3 py-1 rounded-xl text-muted">{s}</span>
-                      ))}
-                    </div>
-
                     <div className="flex flex-col sm:flex-row items-center justify-between pt-4 border-t border-border gap-4">
                       <div className="flex items-center gap-2 text-emerald-500 w-full sm:w-auto">
                         <div className="w-2 h-2 bg-emerald-500 rounded-full animate-pulse shadow-[0_0_8px_rgba(16,185,129,0.5)]" />
@@ -4895,9 +4914,9 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                   <label className="text-[11px] font-black uppercase tracking-widest text-muted block">Direct Secure Payments (Via Stripe)</label>
                   <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
                     {[
-                      { name: 'Credit or Debit Card', label: 'Credit or Debit Card', icon: <CreditCard size={18} />, color: 'bg-blue-600', internalName: 'Credit or Debit Card' },
-                      { name: 'Afterpay', label: 'Pay in 4 Today', icon: <Repeat size={20} strokeWidth={2.5} />, color: 'bg-[#B2FCE4]', iconText: 'text-black', internalName: 'Afterpay' },
-                      { name: 'Klarna', label: 'Pay in 4 Today', icon: <span className="text-base font-black italic leading-none">K.</span>, color: 'bg-[#FFB3C7]', iconText: 'text-black', internalName: 'Klarna' },
+                      { name: 'Credit or Debit Card', label: 'Credit or Debit Card', sublabel: '', icon: <CreditCard size={18} />, color: 'bg-blue-600', internalName: 'Credit or Debit Card' },
+                      { name: 'Afterpay', label: 'Afterpay', sublabel: 'Pay in 4 Today', icon: <Repeat size={20} strokeWidth={2.5} />, color: 'bg-[#B2FCE4]', iconText: 'text-black', internalName: 'Afterpay' },
+                      { name: 'Klarna', label: 'Klarna', sublabel: 'Pay in 4 Today', icon: <span className="text-base font-black italic leading-none">K.</span>, color: 'bg-[#FFB3C7]', iconText: 'text-black', internalName: 'Klarna' },
                     ].map(method => (
                       <button
                         key={method.name}
@@ -4914,7 +4933,10 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                         )}>
                           {method.icon}
                         </div>
-                        <span className="text-[10px] font-black uppercase tracking-tight text-center">{method.label}</span>
+                        <span className="flex flex-col items-center gap-0.5">
+                          <span className="text-[10px] font-black uppercase tracking-tight text-center">{method.label}</span>
+                          {method.sublabel && <span className={cn("text-[9px] font-semibold uppercase tracking-wide text-center", paymentMethod === method.internalName ? "text-white/80" : "text-muted")}>{method.sublabel}</span>}
+                        </span>
                         {paymentMethod === method.internalName && <div className="absolute top-2 right-2"><CheckCircle2 size={12} /></div>}
                       </button>
                     ))}
