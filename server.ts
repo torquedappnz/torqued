@@ -8052,25 +8052,68 @@ async function gatherCustomerDataExport(customerEmail: string) {
 
   const bookings = (await supabase
     .from('bookings')
-    .select('id, vehicle_rego, service_ids, description, quote_note, total_price, quoted_price, status, payment_status, payment_method, refunded_amount, date, created_at, completed_at, is_cold_quote')
+    .select('id, vehicle_rego, service_ids, description, quote_note, quote_items, total_price, quoted_price, status, payment_status, payment_method, refunded_amount, mechanic_id, date, created_at, completed_at, mileage_out, is_cold_quote')
     .ilike('email', emailLower)
     .order('created_at', { ascending: false })).data || [];
 
+  // Resolve mechanic names for the quotes table ("Mechanic selected")
+  const mechanicIds = [...new Set(bookings.map((b: any) => b.mechanic_id).filter(Boolean))];
+  const mechanicNames: Record<string, string> = {};
+  if (mechanicIds.length > 0) {
+    const { data: mechs } = await supabase.from('profiles').select('id, name').in('id', mechanicIds);
+    (mechs || []).forEach((m: any) => { mechanicNames[m.id] = m.name; });
+  }
+
   const regoSet = new Set<string>([...vehicles.map((v: any) => v.rego), ...bookings.map((b: any) => b.vehicle_rego)].filter(Boolean));
-  const serviceHistory = regoSet.size > 0
+  const importedHistory = regoSet.size > 0
     ? (await supabase.from('vehicle_history')
         .select('rego, service_date, work_done, mileage, provider, price, source_type')
         .in('rego', Array.from(regoSet))
         .order('service_date', { ascending: false })).data || []
     : [];
 
-  return { profile, vehicles, bookings, serviceHistory };
+  // Unify imported/self-reported history with completed Torqued jobs so the
+  // Service History section is the full picture, flagged by source.
+  const torquedHistory = bookings
+    .filter((b: any) => b.status === 'completed')
+    .map((b: any) => ({
+      rego: b.vehicle_rego, service_date: b.completed_at || b.date, mileage: b.mileage_out,
+      work_done: (b.service_ids || []).join(', ') || b.description || null,
+      provider: mechanicNames[b.mechanic_id] ? `${mechanicNames[b.mechanic_id]} (via Torqued)` : 'Torqued workshop',
+      price: b.total_price, bookedWithTorqued: true,
+    }));
+  const serviceHistory = [
+    ...importedHistory.map((h: any) => ({ ...h, bookedWithTorqued: false })),
+    ...torquedHistory,
+  ].sort((a, b) => new Date(b.service_date || 0).getTime() - new Date(a.service_date || 0).getTime());
+
+  return { profile, vehicles, bookings, serviceHistory, mechanicNames };
 }
 
 // Build the plain-text "Personal Data Export" PDF (no branded header — a neutral,
 // Arial-set compliance document rather than a marketing/branded one).
+const NIL = 'NIL';
+
+// Parses ISO timestamps (bookings.date/created_at/completed_at) AND NZ-format
+// DD/MM/YYYY strings (AI-scanned service history) without misreading either as
+// the other — JS's native Date() assumes US MM/DD/YYYY for slash-separated
+// strings, which silently mangles or invalidates NZ dates.
+function safeFormatDate(input: any): string {
+  if (!input) return NIL;
+  const s = String(input);
+  let d: Date;
+  const dmy = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{2,4})$/);
+  if (dmy) {
+    const [, dd, mm, yyyy] = dmy;
+    d = new Date(Number(yyyy.length === 2 ? '20' + yyyy : yyyy), Number(mm) - 1, Number(dd));
+  } else {
+    d = new Date(s);
+  }
+  return isNaN(d.getTime()) ? NIL : d.toLocaleDateString('en-NZ');
+}
+
 function buildDataExportPdf(customerEmail: string, data: Awaited<ReturnType<typeof gatherCustomerDataExport>>): Buffer {
-  const { profile, vehicles, bookings, serviceHistory } = data;
+  const { profile, vehicles, bookings, serviceHistory, mechanicNames } = data;
   const name = profile?.name || 'Customer';
   const doc = new jsPDF({ unit: 'mm', format: 'a4' });
   const FONT = 'helvetica'; // closest built-in PDF equivalent to Arial (same metrics family)
@@ -8094,6 +8137,21 @@ function buildDataExportPdf(customerEmail: string, data: Awaited<ReturnType<type
     cells.forEach((c, i) => { doc.text(String(c ?? ''), x, y, { maxWidth: widths[i] - 2 }); x += widths[i]; });
     y += 6;
   };
+  // Row that wraps long cell text onto multiple lines and grows the row height
+  // to fit the tallest cell — prevents wrapped text overlapping the next row
+  // (the bug in the original fixed-6mm-per-row implementation).
+  const wrappedRow = (cells: string[], widths: number[], bold = false, fontSize = 8.5) => {
+    const lineH = fontSize * 0.42;
+    doc.setFont(FONT, bold ? 'bold' : 'normal'); doc.setFontSize(fontSize);
+    const wrapped = cells.map((c, i) => doc.splitTextToSize(String(c ?? ''), widths[i] - 3));
+    const rowLines = Math.max(1, ...wrapped.map(w => w.length));
+    const rowHeight = rowLines * lineH + 2;
+    ensureRoom(rowHeight);
+    doc.setTextColor(21, 4, 2);
+    let x = marginX;
+    wrapped.forEach((lines, i) => { doc.text(lines, x, y); x += widths[i]; });
+    y += rowHeight;
+  };
   const empty = (label: string) => { ensureRoom(6); doc.setFont(FONT, 'normal'); doc.setFontSize(9); doc.setTextColor(120, 120, 120); doc.text(label, marginX, y); y += 8; };
 
   doc.setFont(FONT, 'bold'); doc.setFontSize(18); doc.setTextColor(21, 4, 2);
@@ -8105,14 +8163,14 @@ function buildDataExportPdf(customerEmail: string, data: Awaited<ReturnType<type
   sectionTitle('Personal Details');
   row(['Name', name], [50, 140], true);
   row(['Email', profile?.email || customerEmail], [50, 140]);
-  row(['Phone', profile?.phone || '—'], [50, 140]);
+  row(['Phone', profile?.phone || NIL], [50, 140]);
   y += 4;
 
   sectionTitle(`Vehicles (${vehicles.length})`);
   if (vehicles.length === 0) empty('No vehicles on file.');
   else {
     row(['Rego', 'Make', 'Model', 'Year'], [30, 45, 65, 30], true);
-    vehicles.forEach((v: any) => row([v.rego || '—', v.make || '—', v.model || '—', v.year ? String(v.year) : '—'], [30, 45, 65, 30]));
+    vehicles.forEach((v: any) => row([v.rego || NIL, v.make || NIL, v.model || NIL, v.year ? String(v.year) : NIL], [30, 45, 65, 30]));
   }
   y += 4;
 
@@ -8120,13 +8178,13 @@ function buildDataExportPdf(customerEmail: string, data: Awaited<ReturnType<type
   sectionTitle(`Bookings — past, future, cancelled & refunded (${nonQuoteBookings.length})`);
   if (nonQuoteBookings.length === 0) empty('No bookings on file.');
   else {
-    row(['Date', 'Vehicle', 'Services', 'Status'], [30, 30, 80, 40], true);
-    nonQuoteBookings.forEach((b: any) => row([
-      b.date ? new Date(b.date).toLocaleDateString('en-NZ') : (b.created_at ? new Date(b.created_at).toLocaleDateString('en-NZ') : '—'),
-      b.vehicle_rego || '—',
-      (b.service_ids || []).join(', ') || b.description || '—',
-      b.status || '—',
-    ], [30, 30, 80, 40]));
+    wrappedRow(['Date', 'Vehicle', 'Services', 'Status'], [26, 26, 88, 40], true);
+    nonQuoteBookings.forEach((b: any) => wrappedRow([
+      safeFormatDate(b.date || b.created_at),
+      b.vehicle_rego || NIL,
+      (b.service_ids || []).join(', ') || b.description || NIL,
+      b.status || NIL,
+    ], [26, 26, 88, 40]));
   }
   y += 4;
 
@@ -8135,11 +8193,11 @@ function buildDataExportPdf(customerEmail: string, data: Awaited<ReturnType<type
   else {
     row(['Date', 'Amount', 'Payment status', 'Method', 'Refunded'], [28, 28, 45, 40, 30], true);
     nonQuoteBookings.forEach((b: any) => row([
-      b.date ? new Date(b.date).toLocaleDateString('en-NZ') : (b.created_at ? new Date(b.created_at).toLocaleDateString('en-NZ') : '—'),
+      safeFormatDate(b.date || b.created_at),
       `$${(parseFloat(b.quoted_price ?? b.total_price) || 0).toFixed(2)}`,
-      b.payment_status || '—',
-      b.payment_method || '—',
-      b.refunded_amount ? `$${Number(b.refunded_amount).toFixed(2)}` : '—',
+      b.payment_status || NIL,
+      b.payment_method || NIL,
+      b.refunded_amount ? `$${Number(b.refunded_amount).toFixed(2)}` : NIL,
     ], [28, 28, 45, 40, 30]));
   }
   y += 4;
@@ -8148,27 +8206,39 @@ function buildDataExportPdf(customerEmail: string, data: Awaited<ReturnType<type
   sectionTitle(`Quotes generated (${quotes.length})`);
   if (quotes.length === 0) empty('No quotes on file.');
   else {
-    row(['Date', 'Vehicle', 'Description', 'Status'], [30, 30, 90, 30], true);
-    quotes.forEach((b: any) => row([
-      b.created_at ? new Date(b.created_at).toLocaleDateString('en-NZ') : '—',
-      b.vehicle_rego || '—',
-      (b.service_ids || []).join(', ') || b.description || b.quote_note || '—',
-      b.status || '—',
-    ], [30, 30, 90, 30]));
+    const qWidths = [20, 20, 55, 22, 22, 26, 15];
+    wrappedRow(['Date', 'Vehicle', 'Description / notes', 'Amount', 'Labour', 'Mechanic', 'Status'], qWidths, true, 8);
+    quotes.forEach((b: any) => {
+      const qi = b.quote_items || {};
+      const labourAmt = qi.labourHours && qi.labourRate ? `$${(qi.labourHours * qi.labourRate).toFixed(2)}` : NIL;
+      const amount = (b.quoted_price ?? b.total_price) ? `$${Number(b.quoted_price ?? b.total_price).toFixed(2)}` : NIL;
+      const mechanic = mechanicNames?.[b.mechanic_id] || NIL;
+      wrappedRow([
+        safeFormatDate(b.created_at),
+        b.vehicle_rego || NIL,
+        (b.service_ids || []).join(', ') || b.description || b.quote_note || NIL,
+        amount,
+        labourAmt,
+        mechanic,
+        b.status || NIL,
+      ], qWidths, false, 8);
+    });
   }
   y += 4;
 
   sectionTitle(`Service History (${serviceHistory.length})`);
   if (serviceHistory.length === 0) empty('No service history on file.');
   else {
-    row(['Rego', 'Date', 'Work Done', 'Mileage', 'Provider'], [25, 28, 65, 27, 40], true);
-    serviceHistory.forEach((h: any) => row([
-      h.rego || '—',
-      h.service_date ? new Date(h.service_date).toLocaleDateString('en-NZ') : '—',
-      h.work_done || '—',
-      h.mileage ? `${Number(h.mileage).toLocaleString()} km` : '—',
-      h.provider || '—',
-    ], [25, 28, 65, 27, 40]));
+    const shWidths = [20, 22, 58, 22, 33, 25];
+    wrappedRow(['Rego', 'Date', 'Work Done', 'Mileage', 'Provider', 'Booked w/ Torqued'], shWidths, true);
+    serviceHistory.forEach((h: any) => wrappedRow([
+      h.rego || NIL,
+      safeFormatDate(h.service_date),
+      h.work_done || NIL,
+      h.mileage ? `${Number(h.mileage).toLocaleString()} km` : NIL,
+      h.provider || NIL,
+      h.bookedWithTorqued ? 'True' : 'False',
+    ], shWidths));
   }
   y += 8;
 
