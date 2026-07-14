@@ -1066,9 +1066,9 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
         const r = await fetch(`/api/fleet-prices?rego=${encodeURIComponent(rego)}&mechanic=${encodeURIComponent(m.id)}`);
         const fp = await r.json();
         if (cancelled) return;
-        let t = selectedServices.reduce((sum, id) => sum + (Number(fp?.[id]?.high) || 0), 0);
+        let t = selectedServices.reduce((sum, id) => sum + (Number(fp?.prices?.[id]?.high) || 0), 0);
         if (addWaterPump && waterPump && (selectedServices.includes('timing') || selectedServices.includes('timing_chain_full'))) {
-          t += Number(fp?.['thermostat_housing']?.high) || waterPump.high;
+          t += Number(fp?.prices?.['thermostat_housing']?.high) || waterPump.high;
         }
         const isDiagOnly = selectedServices.length === 1 && selectedServices[0] === 'diag_inspection';
         if (t > 0 && !isDiagOnly && fp?.shopFee) t += fp.shopFee;
@@ -2650,6 +2650,33 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
   const chooseMechanic = (mechanic: Mechanic) => {
     setSelectedMechanic({ ...mechanic, estimatedPrice: totalPrice });
     setMechanicPackages([]);
+    // Re-fetch fleet pricing scoped to this specific mechanic so the Job Breakdown
+    // (labour, oil price, shop fee) reflects their real labour_rate/shop_fee instead
+    // of the generic platform-average quote used on the mechanic-list step.
+    if (rego) {
+      fetch(`/api/fleet-prices?rego=${encodeURIComponent(rego)}&mechanic=${encodeURIComponent(mechanic.id)}`)
+        .then(r => r.json())
+        .then((fp: any) => {
+          if (fp?.shopFee) setFleetShopFee(fp.shopFee);
+          if (fp?.waterPump) setWaterPump(fp.waterPump);
+          if (fp?.prices && Object.keys(fp.prices).length > 0) {
+            setFleetPricesRaw(fp.prices);
+            setVehiclePrices(prev => {
+              const fleetHighs: Record<string, number> = {};
+              for (const [svcId, p] of Object.entries(fp.prices as Record<string, any>)) fleetHighs[svcId] = p.high;
+              return { ...prev, ...fleetHighs };
+            });
+            const isDiagOnly = selectedServices.length === 1 && selectedServices[0] === 'diag_inspection';
+            let recomputed = selectedServices.reduce((sum, id) => sum + (Number(fp.prices?.[id]?.high) || 0), 0);
+            if (addWaterPump && waterPump && (selectedServices.includes('timing') || selectedServices.includes('timing_chain_full'))) {
+              recomputed += Number(fp.prices?.['thermostat_housing']?.high) || waterPump.high;
+            }
+            if (recomputed > 0 && !isDiagOnly && fp.shopFee) recomputed += fp.shopFee;
+            if (recomputed > 0) setSelectedMechanic(prev => prev ? { ...prev, estimatedPrice: recomputed } : null);
+          }
+        })
+        .catch(() => {/* keep the generic pricing already loaded */});
+    }
     fetch(`/api/mechanic/${mechanic.id}/package-price${vehicle?.rego ? `?rego=${vehicle.rego}` : ''}`)
       .then(r => r.json())
       .then(d => {
