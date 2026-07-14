@@ -81,6 +81,13 @@ function getSupabaseAdmin() {
   return createSupabaseClient(url, key);
 }
 
+// Services that never get the workshop's shop fee (freight/sundries/consumables)
+// added to their total: Standard/Gold Service already carry their own $10 freight
+// line, Diagnostic Inspection and PPI are fixed flat fees, and Transmission/
+// Differential already bake their own fee into their price calc. Every other
+// priced service (cambelt, brakes, spark plugs, WOF, etc.) gets the fee added.
+const SHOP_FEE_EXCLUDED_SERVICES = new Set(['oil', 'full', 'diag_inspection', 'ppi', 'transmission', 'differential']);
+
 // Maps a customer-facing SERVICES id (src/constants.ts) to the part_categories
 // slug that represents the part it consumes. Shared by the reorder-queue
 // trigger (accept-job) and the mechanic-inventory pricing override in
@@ -4778,6 +4785,18 @@ app.get('/api/fleet-prices', async (req, res) => {
 
           await applyMechanicInventoryOverrides(supabase, mechanicId, efPrices, oilCapacityL);
 
+          // Workshop fee (freight/sundries/consumables) applies to every service
+          // EXCEPT Standard/Gold Service (already carry their own $10 freight line),
+          // Diagnostic Inspection and PPI (fixed flat fees), and Transmission/
+          // Differential (which already bake their own fee into the calc above).
+          for (const [svcId, p] of Object.entries(efPrices)) {
+            if (SHOP_FEE_EXCLUDED_SERVICES.has(svcId) || !p || typeof p.low !== 'number') continue;
+            p.low += efShopFeeResolved;
+            p.high += efShopFeeResolved;
+            p.midpoint = Math.round(p.midpoint + efShopFeeResolved);
+            p.shopFee = efShopFeeResolved;
+          }
+
           return res.json({
             prices: efPrices,
             timingDrive: efTimingDrive,
@@ -4912,6 +4931,7 @@ app.get('/api/fleet-prices', async (req, res) => {
     }
 
     const shopFee = mechanicId ? (Number((rateRes as any).data?.shop_fee) || null) : null;
+    const shopFeeResolved = shopFee || PLATFORM_SHOP_FEE_FALLBACK;
 
     // Transmission fluid: resolve type then derive capacity and per-litre cost
     const transFluidTypeRaw = String(specRes.data?.transmission_fluid_type || '');
@@ -5153,6 +5173,17 @@ app.get('/api/fleet-prices', async (req, res) => {
     const wpCoolantLow = 60, wpCoolantHigh = 90;
     const wpLabour    = Math.round(1.0 * NZD_LABOUR_RATE);
     await applyMechanicInventoryOverrides(supabase, mechanicId, prices, oilCapacity);
+
+    // Workshop fee applies to every service except Standard/Gold Service,
+    // Diagnostic Inspection, PPI, and Transmission (see SHOP_FEE_EXCLUDED_SERVICES).
+    for (const [svcId, p] of Object.entries(prices)) {
+      if (SHOP_FEE_EXCLUDED_SERVICES.has(svcId) || !p || typeof (p as any).low !== 'number') continue;
+      (p as any).low += shopFeeResolved;
+      (p as any).high += shopFeeResolved;
+      (p as any).midpoint = Math.round((p as any).midpoint + shopFeeResolved);
+      (p as any).shopFee = shopFeeResolved;
+    }
+
     res.json({
       prices, timingDrive, vehicleId,
       shopFee: shopFee,

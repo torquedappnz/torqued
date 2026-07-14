@@ -3601,6 +3601,38 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                   </button>
                 </div>
 
+                {/* Pre-Purchase Inspection: what's actually checked */}
+                {selectedServices.includes('ppi') && (
+                  <motion.div
+                    initial={{ opacity: 0, y: -8 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    className="p-4 bg-card border border-border rounded-2xl space-y-3"
+                  >
+                    <div>
+                      <p className="text-sm font-bold">What's inspected</p>
+                      <p className="text-xs text-muted mt-0.5">A visual & functional assessment covering the following. Does not include high-voltage (hybrid/EV) battery testing.</p>
+                    </div>
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-6 gap-y-3">
+                      {[
+                        { heading: 'Structural / Body', items: ['Panel alignment & gaps', 'Paint overspray / filler (signs of prior repair)', 'Underbody rust (critical in NZ)', 'Chassis rail inspection', 'Boot / firewall / engine bay (accident repair signs)'] },
+                        { heading: 'Drivetrain & Engine', items: ['Engine oil condition & level', 'Coolant condition & level', 'Brake fluid condition & level', 'Transmission fluid', 'Belts & hoses condition', 'Leaks (oil / coolant / power steering)', 'Cold start behaviour & idle quality', 'Transmission shift quality (auto / manual)', 'AWD / 4WD engagement (if applicable)'] },
+                        { heading: 'Brakes & Suspension', items: ['Brake pad thickness', 'Brake rotor thickness', 'Brake fluid moisture content', 'Shock absorber condition', 'Bushes, ball joints, wheel bearings, CV joints', 'Steering rack play & boots'] },
+                        { heading: 'Tyres', items: ['Tread depth (front, rear & spare)', 'Tyre age (DOT code)', 'Uneven wear patterns (alignment / suspension)'] },
+                        { heading: 'Electrical & Safety', items: ['All exterior & interior lights', '12V battery health (load test — excludes HV battery)', 'OBD-II live fault code scan', 'A/C & heating function', 'Windscreen wipers & washers'] },
+                      ].map(section => (
+                        <div key={section.heading}>
+                          <p className="text-[10px] font-black uppercase tracking-widest text-torqued-red mb-1">{section.heading}</p>
+                          <ul className="space-y-0.5">
+                            {section.items.map(item => (
+                              <li key={item} className="text-xs text-muted leading-relaxed">{item}</li>
+                            ))}
+                          </ul>
+                        </div>
+                      ))}
+                    </div>
+                  </motion.div>
+                )}
+
                 {/* Unlisted job request panel */}
                 {showUnlistedQuote && (
                   <motion.div
@@ -4821,7 +4853,7 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                                   <span>${fp.labourLow}</span>
                                 </div>
                               )}
-                              {id === 'differential' && fp.shopFee > 0 && (
+                              {fp.shopFee > 0 && (
                                 <div className="flex justify-between text-xs text-muted"><span>Shop fee</span><span>${fp.shopFee}</span></div>
                               )}
                               {(id === 'brake_fluid' || id === 'coolant_flush') && fp.sundries > 0 && (
