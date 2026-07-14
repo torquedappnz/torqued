@@ -4,15 +4,17 @@ import { CustomerPortal } from './views/CustomerPortal';
 import { MechanicPortal } from './views/MechanicPortal';
 import { MechanicDemo } from './views/MechanicDemo';
 import { AdminPortal } from './views/AdminPortal';
+import { PrivacyPolicy } from './views/PrivacyPolicy';
 import { useAuth } from './context/AuthContext';
 
-type View = 'landing' | 'customer' | 'mechanic' | 'mechanic-demo' | 'admin';
+type View = 'landing' | 'customer' | 'mechanic' | 'mechanic-demo' | 'admin' | 'privacy-policy';
 
 function pathToView(path: string): View | null {
   if (path.startsWith('/customer')) return 'customer';
   if (path.startsWith('/demo')) return 'mechanic-demo';
   if (path.startsWith('/mechanic')) return 'mechanic';
   if (path.startsWith('/admin')) return 'admin';
+  if (path.startsWith('/privacy-policy')) return 'privacy-policy';
   if (path === '/' || path === '') return 'landing';
   return null;
 }
@@ -76,6 +78,8 @@ export default function App() {
         return <MechanicDemo onBack={() => navigateTo('landing')} />;
       case 'admin':
         return <AdminPortal onBack={() => navigateTo('landing')} />;
+      case 'privacy-policy':
+        return <PrivacyPolicy onBack={() => navigateTo('landing')} />;
       default:
         return <Landing onGetQuote={() => navigateTo('customer')} onMechanicPortal={() => navigateTo('mechanic')} />;
     }

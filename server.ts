@@ -281,7 +281,7 @@ function emailWrap(content: string): string {
 <table width="100%" cellpadding="0" cellspacing="0" style="max-width:520px;background:${EMAIL_CARD};border-radius:20px;overflow:hidden;border:1px solid #e2e0dc;">
 <tr><td style="background:${EMAIL_CARD};padding:22px 32px;border-bottom:3px solid ${EMAIL_RED};text-align:center;"><img src="${LOGO_URL}" width="180" height="60" alt="Torqued" style="display:inline-block;border:0;width:180px;height:60px;" /></td></tr>
 ${content}
-<tr><td style="background:#f8f7f5;border-top:1px solid #e2e0dc;padding:16px 32px;text-align:center;"><p style="margin:0;font-size:10px;font-family:${EMAIL_BODY_FONT};color:#aaa;">Torqued NZ &nbsp;·&nbsp; <a href="mailto:hello@torqued.site" style="color:#aaa;text-decoration:none;">hello@torqued.site</a> &nbsp;·&nbsp; <a href="https://torqued.site/privacy-policy.pdf" style="color:#aaa;text-decoration:none;">Privacy Policy</a></p></td></tr>
+<tr><td style="background:#f8f7f5;border-top:1px solid #e2e0dc;padding:16px 32px;text-align:center;"><p style="margin:0;font-size:10px;font-family:${EMAIL_BODY_FONT};color:#aaa;">Torqued NZ &nbsp;·&nbsp; <a href="mailto:hello@torqued.site" style="color:#aaa;text-decoration:none;">hello@torqued.site</a> &nbsp;·&nbsp; <a href="https://torqued.site/privacy-policy" style="color:#aaa;text-decoration:none;">Privacy Policy</a></p></td></tr>
 </table></td></tr></table></body></html>`;
 }
 
@@ -8588,7 +8588,7 @@ function buildDataExportPdf(customerEmail: string, data: Awaited<ReturnType<type
   );
   footerLines.forEach((line: string) => { ensureRoom(5); doc.text(line, marginX, y); y += 4.5; });
   y += 3; ensureRoom(6);
-  doc.text('Privacy Policy: https://torqued.site/privacy-policy.pdf', marginX, y); y += 5;
+  doc.text('Privacy Policy: https://torqued.site/privacy-policy', marginX, y); y += 5;
   ensureRoom(6);
   doc.text('Questions about this export? Contact hello@torqued.site', marginX, y);
 
@@ -8733,7 +8733,7 @@ function buildMechanicDataExportPdf(mechanicEmail: string, data: Awaited<ReturnT
   );
   footerLines2.forEach((line: string) => { ensureRoom(5); doc.text(line, marginX, y); y += 4.5; });
   y += 3; ensureRoom(6);
-  doc.text('Privacy Policy: https://torqued.site/privacy-policy.pdf', marginX, y); y += 5;
+  doc.text('Privacy Policy: https://torqued.site/privacy-policy', marginX, y); y += 5;
   ensureRoom(6);
   doc.text('Questions about this export? Contact hello@torqued.site', marginX, y);
 
@@ -8745,7 +8745,7 @@ function generateDataExportEmailHtml(name: string): string {
 ${emailTitle('Your data export is ready')}
 ${emailGreeting(name)}
 ${emailPara(`As requested, we've attached a PDF summary of the personal data Torqued holds about you — your details, vehicles, bookings, transactions, quotes, and service history.`)}
-${emailPara(`Full details on how long we keep your data (and when it's deleted) are in the attached document and our <a href="https://torqued.site/privacy-policy.pdf" style="color:${EMAIL_RED};">Privacy Policy</a>.`)}
+${emailPara(`Full details on how long we keep your data (and when it's deleted) are in the attached document and our <a href="https://torqued.site/privacy-policy" style="color:${EMAIL_RED};">Privacy Policy</a>.`)}
 ${emailPara(`If anything looks wrong or you have questions, just reply to this email or reach us at <a href="mailto:hello@torqued.site" style="color:${EMAIL_RED};">hello@torqued.site</a>.`)}
 </td></tr>`);
 }
@@ -8755,7 +8755,7 @@ function generateWorkshopDataExportEmailHtml(name: string): string {
 ${emailTitle('Your workshop data export is ready')}
 ${emailGreeting(name)}
 ${emailPara(`As requested, we've attached a PDF summary of the data Torqued holds about your workshop account — your business details, jobs handled, revenue, staff roster, and documents on file.`)}
-${emailPara(`Full details on how long we keep your data (and when it's deleted) are in the attached document and our <a href="https://torqued.site/privacy-policy.pdf" style="color:${EMAIL_RED};">Privacy Policy</a>.`)}
+${emailPara(`Full details on how long we keep your data (and when it's deleted) are in the attached document and our <a href="https://torqued.site/privacy-policy" style="color:${EMAIL_RED};">Privacy Policy</a>.`)}
 ${emailPara(`If anything looks wrong or you have questions, just reply to this email or reach us at <a href="mailto:hello@torqued.site" style="color:${EMAIL_RED};">hello@torqued.site</a>.`)}
 </td></tr>`);
 }

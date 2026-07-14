@@ -431,7 +431,7 @@ export const Landing: React.FC<LandingProps> = ({ onGetQuote, onMechanicPortal }
           <div className="text-center md:text-right">
             <p className="text-muted text-sm">© 2026 Torqued NZ.</p>
             <div className="flex justify-center md:justify-end gap-4 mt-2 text-xs text-muted">
-              <a href="/privacy-policy.pdf" target="_blank" rel="noreferrer" className="hover:text-foreground underline underline-offset-2 transition-colors">Privacy Policy</a>
+              <a href="/privacy-policy" target="_blank" rel="noreferrer" className="hover:text-foreground underline underline-offset-2 transition-colors">Privacy Policy</a>
               <a href="mailto:hello@torqued.site" className="hover:text-foreground transition-colors">hello@torqued.site</a>
             </div>
           </div>
