@@ -5655,19 +5655,32 @@ app.get('/api/mechanic/next-available', async (req, res) => {
 
     const partsLead = leadDaysOverride !== null ? leadDaysOverride : Math.max(0, Number(profileRes.data?.parts_lead_days ?? 1));
     // day_of_week in our schema: 0=Mon … 6=Sun. Convert a JS Date to that index.
-    const toMonZero = (d: Date) => (d.getDay() + 6) % 7;
+    const toMonZero = (d: Date) => (d.getUTCDay() + 6) % 7;
     const openDows = new Set<number>((slotsRes.data ?? []).map((s: any) => Number(s.day_of_week)));
     const hasAvailabilityConfigured = openDows.size > 0;
     const closed = (periodsRes.data ?? []).map((p: any) => ({ start: p.start_date, end: p.end_date }));
     const isClosed = (iso: string) => closed.some(c => iso >= c.start && iso <= c.end);
 
+    // "Today" must be NZ's calendar date, not the server process's — Vercel functions
+    // run in UTC, and NZ is 12-13hrs ahead, so a naive `new Date()` is still on
+    // "yesterday" for most of the NZ morning, silently offering a same-day drop-off
+    // (which customers must never be able to book — call the workshop directly for that).
+    // Anchor "today" to NZ's Y-M-D, then represent it as a UTC-midnight instant and do
+    // all arithmetic with the UTC-suffixed Date methods so no runtime timezone (server
+    // or otherwise) can shift the calendar day again during this calculation.
+    const nzParts = new Intl.DateTimeFormat('en-CA', { timeZone: 'Pacific/Auckland', year: 'numeric', month: '2-digit', day: '2-digit' }).formatToParts(new Date());
+    const nzY = Number(nzParts.find(p => p.type === 'year')!.value);
+    const nzM = Number(nzParts.find(p => p.type === 'month')!.value);
+    const nzD = Number(nzParts.find(p => p.type === 'day')!.value);
+    const todayNZ = new Date(Date.UTC(nzY, nzM - 1, nzD));
+
     // Earliest possible drop-off: tomorrow, plus parts lead (business days) if needed.
     const addBiz = (from: Date, days: number) => {
       const d = new Date(from); let added = 0;
-      while (added < days) { d.setDate(d.getDate() + 1); const dow = d.getDay(); if (dow !== 0 && dow !== 6) added++; }
+      while (added < days) { d.setUTCDate(d.getUTCDate() + 1); const dow = d.getUTCDay(); if (dow !== 0 && dow !== 6) added++; }
       return d;
     };
-    const start = needsParts ? addBiz(new Date(), partsLead + 1) : addBiz(new Date(), 1);
+    const start = needsParts ? addBiz(todayNZ, partsLead + 1) : addBiz(todayNZ, 1);
 
     const isBookable = (d: Date) => {
       const dow = toMonZero(d);
@@ -5675,7 +5688,7 @@ app.get('/api/mechanic/next-available', async (req, res) => {
       if (isClosed(iso)) return false;
       // If the workshop set specific hours, respect them; otherwise default to Mon–Fri.
       if (hasAvailabilityConfigured) return openDows.has(dow);
-      return d.getDay() !== 0 && d.getDay() !== 6;
+      return d.getUTCDay() !== 0 && d.getUTCDay() !== 6;
     };
 
     const out: { date: string; day: string; label: string }[] = [];
@@ -5684,11 +5697,11 @@ app.get('/api/mechanic/next-available', async (req, res) => {
     for (let i = 0; i < 90 && out.length < count; i++) {
       if (isBookable(cursor)) {
         const iso = cursor.toISOString().slice(0, 10);
-        const dnum = cursor.getDate();
+        const dnum = cursor.getUTCDate();
         const suffix = dnum % 10 === 1 && dnum !== 11 ? 'st' : dnum % 10 === 2 && dnum !== 12 ? 'nd' : dnum % 10 === 3 && dnum !== 13 ? 'rd' : 'th';
-        out.push({ date: iso, day: dayNames[cursor.getDay()], label: `${dayNames[cursor.getDay()]} ${dnum}${suffix}` });
+        out.push({ date: iso, day: dayNames[cursor.getUTCDay()], label: `${dayNames[cursor.getUTCDay()]} ${dnum}${suffix}` });
       }
-      cursor.setDate(cursor.getDate() + 1);
+      cursor.setUTCDate(cursor.getUTCDate() + 1);
     }
     res.json({ dates: out, earliest: out[0]?.date ?? null, partsLead, needsParts });
   } catch (err: any) {
