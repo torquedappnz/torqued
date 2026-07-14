@@ -215,6 +215,7 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
   const [agreementSigned, setAgreementSigned] = useState(true);
   const [obStep, setObStep] = useState(0);
   const [obSaving, setObSaving] = useState(false);
+  const [obError, setObError] = useState('');
   const [ob, setOb] = useState<{
     name: string; legal_name: string; nzbn: string; address: string; phone: string;
     owner_name: string; owner_phone: string; years_in_trade: string; bio: string;
@@ -4269,15 +4270,21 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                 <div><label className={obLabel}>Signer's Title</label><input className={obInput} placeholder="e.g. Director, Owner" value={ob.signer_title} onChange={e=>setOb({...ob, signer_title: e.target.value})} /></div>
               </div>
               {obSaving && <p className="text-xs text-muted">Processing…</p>}
+              {obError && <p className="text-xs text-torqued-red font-semibold">{obError}</p>}
               <div className="flex gap-3">
                 <Button variant="outline" className="border-border text-white" onClick={()=>setObStep(3)}>Back</Button>
                 <Button fullWidth className="bg-torqued-red text-white" disabled={obSaving || !ob.owner_name} onClick={async()=>{
                   setObSaving(true);
+                  setObError('');
                   try {
-                    await fetch('/api/mechanic/save-onboarding', {
+                    const saveRes = await fetch('/api/mechanic/save-onboarding', {
                       method:'POST', headers:{'Content-Type':'application/json'},
                       body: JSON.stringify({ mechanicId: user.id, fields: { ...ob, agreement_signed_at: new Date().toISOString(), agreement_signed_by: ob.owner_name }, complete: true }),
                     });
+                    if (!saveRes.ok) {
+                      const d = await saveRes.json().catch(() => ({}));
+                      throw new Error(d?.error || 'Could not save your agreement. Please try again.');
+                    }
                     try {
                       const pdfBase64 = generateContractPdf(ob.signer_title || 'Owner');
                       await fetch('/api/mechanic/email-contract', {
@@ -4287,7 +4294,9 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                     } catch (e) { console.error('Contract email failed (non-blocking):', e); }
                     setOnboardingComplete(true);
                     setAgreementSigned(true);
-                  } catch {} finally { setObSaving(false); }
+                  } catch (e: any) {
+                    setObError(e?.message || 'Could not save your agreement. Please try again.');
+                  } finally { setObSaving(false); }
                 }}>I Agree & Complete Registration</Button>
               </div>
               <p className="text-[10px] text-muted text-center">By clicking above, you confirm you have authority to sign on behalf of {ob.legal_name || ob.name} and agree to the Torqued Mechanic Agreement. A PDF copy will be emailed to you.</p>

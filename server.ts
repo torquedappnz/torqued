@@ -3626,7 +3626,11 @@ app.post('/api/mechanic/save-onboarding', async (req, res) => {
 
     const allowed = ['name','legal_name','nzbn','address','phone','owner_name','owner_phone','years_in_trade','bio','profile_photo_url','bank_account_name','bank_account_number','labour_rate','shop_fee','technicians','parts_lead_days','service_areas','diagnostic_tools','certifications','banner_image','cancellation_notice_hours','cancellation_partial_refund_pct','billing_start_date','agreement_signed_at','agreement_signed_by','offers_ppi','wants_wof'];
     const update: Record<string, any> = {};
-    for (const k of allowed) if (fields[k] !== undefined) update[k] = fields[k];
+    // An empty string on a numeric/date column (e.g. years_in_trade left blank by an
+    // admin-onboarded account that skips straight to the contract step) fails the
+    // whole UPDATE with a Postgres type error — silently dropping every field in the
+    // same request, including agreement_signed_at. Treat '' as "not provided" instead.
+    for (const k of allowed) if (fields[k] !== undefined) update[k] = fields[k] === '' ? null : fields[k];
     if (complete) {
       update.onboarding_complete = true;
       // Admin-onboarded accounts are already 'approved' when they sign the contract
