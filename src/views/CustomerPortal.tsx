@@ -1126,8 +1126,6 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
   const [otpResendCooldown, setOtpResendCooldown] = useState(0);
   const [otpResendMsg, setOtpResendMsg] = useState<string | null>(null);
   // Magic-link verification state
-  const [magicSentTo, setMagicSentTo] = useState<string | null>(null);
-  const [magicFallbackLink, setMagicFallbackLink] = useState<string | null>(null);
   const [magicVerifying, setMagicVerifying] = useState(false);
   // Pending vehicle claim (from transfer invite link ?claim=<token>)
   const [claimToken, setClaimToken] = useState<string | null>(() => new URLSearchParams(window.location.search).get('claim'));
@@ -1325,7 +1323,6 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
       }
       setRego((r.rego || plate));
       persistCustomerSession({ ownerId: r.ownerId ?? null, email: r.email ?? '', rego: r.rego || plate, vehicles: r.vehicles ?? [] });
-      setMagicSentTo(null);
       setView('dashboard');
       await loadVehicleByRego(r.rego || plate);
     } catch (e: any) {
@@ -6831,8 +6828,8 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                       setUserName(newCustomerName);
                       setCustomerEmail(newCustomerEmail);
                       setShowNewCustomerForm(false);
-                      setMagicSentTo(data.maskedEmail || newCustomerEmail);
-                      setMagicFallbackLink(data.fallbackLink || null);
+                      setOtpSentEmail(data.maskedEmail || newCustomerEmail);
+                      setShowOTPModal(true);
                     } catch {
                       setNewCustomerError('Could not connect. Please try again.');
                     } finally {
@@ -7248,44 +7245,6 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
               )}
               <p className="text-[11px] text-muted text-center">Flexible payment options (incl. Afterpay, Klarna) at checkout.</p>
               <button onClick={() => setQuoteReview(null)} className="w-full text-xs text-muted hover:text-foreground">Close</button>
-            </motion.div>
-          </div>
-        )}
-      </AnimatePresence>
-
-      {/* Magic-link sent modal */}
-      <AnimatePresence>
-        {magicSentTo && (
-          <div className="fixed inset-0 z-[120] flex items-center justify-center p-4 bg-black/70 backdrop-blur-sm">
-            <motion.div
-              initial={{ opacity: 0, scale: 0.95, y: 20 }} animate={{ opacity: 1, scale: 1, y: 0 }} exit={{ opacity: 0, scale: 0.95, y: 20 }}
-              className="w-full max-w-md bg-card border border-border rounded-3xl p-8 space-y-5 text-center shadow-2xl"
-            >
-              <div className="w-16 h-16 mx-auto rounded-2xl bg-torqued-red/10 border border-torqued-red/20 flex items-center justify-center text-torqued-red text-3xl">✉️</div>
-              <div className="space-y-2">
-                <h3 className="text-2xl font-black tracking-tight">
-                  {returningCustomerName ? `Welcome back, ${returningCustomerName}` : 'Check your email'}
-                </h3>
-                <p className="text-sm text-muted">
-                  We've emailed a secure verification link to <span className="font-bold text-foreground">{magicSentTo}</span>. Tap it to access your vehicle — it expires in 15 minutes.
-                </p>
-              </div>
-              {magicFallbackLink && (
-                <div className="p-3 bg-amber-500/10 border border-amber-500/30 rounded-xl text-left space-y-2">
-                  <p className="text-[10px] font-black uppercase tracking-widest text-amber-500">Email delivery is down — use this link to continue testing:</p>
-                  <a href={magicFallbackLink} className="text-xs text-torqued-red font-bold break-all underline">{magicFallbackLink}</a>
-                </div>
-              )}
-              {passkeysSupported() && (
-                <>
-                  <div className="flex items-center gap-3 text-[10px] font-black uppercase tracking-widest text-muted/50"><span className="flex-1 h-px bg-border" />faster<span className="flex-1 h-px bg-border" /></div>
-                  <Button fullWidth className="bg-torqued-red text-white" onClick={() => verifyWithPasskey(rego)}>
-                    🔑 Verify instantly with passkey
-                  </Button>
-                  {passkeyError && <p className="text-xs text-torqued-red font-bold">{passkeyError}</p>}
-                </>
-              )}
-              <Button variant="ghost" fullWidth onClick={() => { setMagicSentTo(null); setMagicFallbackLink(null); setPasskeyError(null); }}>Close</Button>
             </motion.div>
           </div>
         )}

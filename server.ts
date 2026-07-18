@@ -1717,6 +1717,31 @@ function hashOtp(code: string): string {
   return crypto.createHash('sha256').update(`${code}:${MAGIC_SECRET}`).digest('hex');
 }
 
+// Generate + email a 6-digit verification code for a rego, DB-backed (customer_otps).
+// Used everywhere a customer needs to prove ownership of a plate — including brand-new
+// registrations — so the experience (and failure modes: expiry, domain, etc.) is
+// consistent instead of mixing in a magic-link email for just this one path.
+async function sendOtpCode(supabase: any, rego: string, email: string, customerName?: string) {
+  const code = crypto.randomInt(100000, 999999).toString();
+  await supabase.from('customer_otps').upsert({
+    rego, code_hash: hashOtp(code), email,
+    expires_at: new Date(Date.now() + 10 * 60 * 1000).toISOString(), attempts: 0,
+  }, { onConflict: 'rego' });
+  const transporter = getMailTransporter();
+  let delivered = false;
+  if (transporter) {
+    try {
+      await transporter.sendMail({
+        from: process.env.SMTP_FROM || '"Torqued" <torquedapp.nz@gmail.com>',
+        to: email, subject: `${code} is your Torqued verification code`,
+        html: generateOtpEmailHtml(rego, code, customerName),
+      });
+      delivered = true;
+    } catch (e) { console.warn('[OTP] send failed:', (e as Error)?.message); }
+  }
+  return { delivered, maskedEmail: maskEmail(email) };
+}
+
 // POST /api/customer/send-code — iOS app: email a 6-digit code (by rego or email). Serverless-safe (DB-backed).
 app.post('/api/customer/send-code', async (req, res) => {
   try {
@@ -1910,8 +1935,8 @@ app.post('/api/customer/register', async (req, res) => {
 
       if (existing) {
         await supabase.from('vehicles').upsert({ rego: formattedRego, owner_id: existing.id }, { onConflict: 'rego' });
-        const r = await sendMagicLink(formattedRego, email, getOrigin(req));
-        return res.json({ success: true, maskedEmail: maskEmail(email), magicSent: true, ...(r.delivered ? {} : { fallbackLink: r.fallbackLink }) });
+        const r = await sendOtpCode(supabase, formattedRego, email, name);
+        return res.json({ success: true, maskedEmail: r.maskedEmail, codeSent: true });
       }
       return res.status(400).json({ error: authError.message });
     }
@@ -1930,9 +1955,9 @@ app.post('/api/customer/register', async (req, res) => {
     // Link vehicle to this customer (create the row if this plate is brand-new)
     await supabase.from('vehicles').upsert({ rego: formattedRego, owner_id: userId }, { onConflict: 'rego' });
 
-    // Email a magic verification link
-    const magic = await sendMagicLink(formattedRego, email, getOrigin(req));
-    res.json({ success: true, maskedEmail: maskEmail(email), magicSent: true, ...(magic.delivered ? {} : { fallbackLink: magic.fallbackLink }) });
+    // Email a 6-digit verification code (consistent with every other customer OTP flow)
+    const otp = await sendOtpCode(supabase, formattedRego, email, name);
+    res.json({ success: true, maskedEmail: otp.maskedEmail, codeSent: true });
   } catch (err) {
     console.error('[customer/register]', err);
     res.status(500).json({ error: 'Registration failed' });
