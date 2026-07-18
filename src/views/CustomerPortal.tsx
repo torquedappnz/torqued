@@ -1066,12 +1066,12 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
         const r = await fetch(`/api/fleet-prices?rego=${encodeURIComponent(rego)}&mechanic=${encodeURIComponent(m.id)}`);
         const fp = await r.json();
         if (cancelled) return;
+        // Each service's own .high already includes the workshop's shop fee where
+        // applicable (server-side) — do not add fp.shopFee again here.
         let t = selectedServices.reduce((sum, id) => sum + (Number(fp?.prices?.[id]?.high) || 0), 0);
         if (addWaterPump && waterPump && (selectedServices.includes('timing') || selectedServices.includes('timing_chain_full'))) {
           t += Number(fp?.prices?.['thermostat_housing']?.high) || waterPump.high;
         }
-        const isDiagOnly = selectedServices.length === 1 && selectedServices[0] === 'diag_inspection';
-        if (t > 0 && !isDiagOnly && fp?.shopFee) t += fp.shopFee;
         if (t > 0) setMechanicPrices(prev => ({ ...prev, [m.id]: t }));
       } catch { /* keep the generic totalPrice fallback for this card */ }
     });
@@ -1790,19 +1790,18 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
   // Services currently selected that will be sent as a precise-quote request.
   const selectedQuoteJobs = selectedServices.filter(id => id !== 'thermostat_housing' && isQuoteJob(id));
 
-  // Calculate total price based on selected services (per-vehicle pricing)
+  // Calculate total price based on selected services (per-vehicle pricing).
+  // The workshop's shop fee is already baked into each priced service's own
+  // high/low (server-side, per service — see /api/fleet-prices), so summing
+  // priceFor(id) across selected services is the full total; adding fleetShopFee
+  // again here would double-charge it.
   const totalPrice = useMemo(() => {
     let t = selectedServices.reduce((sum, id) => sum + priceFor(id), 0);
     if (addWaterPump && waterPump && (selectedServices.includes('timing') || selectedServices.includes('timing_chain_full'))) {
       t += waterPump.high;
     }
-    // Workshop fee applies to every job EXCEPT a standalone $99 diagnostic inspection.
-    const isDiagOnly = selectedServices.length === 1 && selectedServices[0] === 'diag_inspection';
-    if (t > 0 && !isDiagOnly && fleetShopFee) {
-      t += fleetShopFee;
-    }
     return t;
-  }, [selectedServices, vehiclePrices, addWaterPump, waterPump, fleetShopFee]);
+  }, [selectedServices, vehiclePrices, addWaterPump, waterPump]);
 
   const handleConfirmOTP = async () => {
     if (otpCode.trim().length !== 6) {
@@ -2001,9 +2000,9 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
         .filter(id => !(id === 'thermostat_housing' && selectedServices.includes('water_pump')))
         .filter(id => fleetPricesRaw[id]);
       if (pricedServices.length > 0) {
-        const shopFeeAmt = fleetShopFee || 0;
-        const totalLow  = pricedServices.reduce((s, id) => s + (fleetPricesRaw[id].low  || 0), 0) + shopFeeAmt;
-        const totalHigh = pricedServices.reduce((s, id) => s + (fleetPricesRaw[id].high || 0), 0) + shopFeeAmt;
+        // Each service's own low/high already includes the shop fee where applicable.
+        const totalLow  = pricedServices.reduce((s, id) => s + (fleetPricesRaw[id].low  || 0), 0);
+        const totalHigh = pricedServices.reduce((s, id) => s + (fleetPricesRaw[id].high || 0), 0);
         setFleetQuoteRange({ low: totalLow, high: totalHigh });
         setFleetQuoteState('instant');
         return;
@@ -2663,12 +2662,11 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
               for (const [svcId, p] of Object.entries(fp.prices as Record<string, any>)) fleetHighs[svcId] = p.high;
               return { ...prev, ...fleetHighs };
             });
-            const isDiagOnly = selectedServices.length === 1 && selectedServices[0] === 'diag_inspection';
+            // Each service's own .high already includes the shop fee where applicable.
             let recomputed = selectedServices.reduce((sum, id) => sum + (Number(fp.prices?.[id]?.high) || 0), 0);
             if (addWaterPump && waterPump && (selectedServices.includes('timing') || selectedServices.includes('timing_chain_full'))) {
               recomputed += Number(fp.prices?.['thermostat_housing']?.high) || waterPump.high;
             }
-            if (recomputed > 0 && !isDiagOnly && fp.shopFee) recomputed += fp.shopFee;
             if (recomputed > 0) setSelectedMechanic(prev => prev ? { ...prev, estimatedPrice: recomputed } : null);
           }
         })
@@ -2900,12 +2898,13 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
     if (addWaterPump && waterPump && (selectedServices.includes('timing') || selectedServices.includes('timing_chain_full'))) {
       catalogParts.push({ name: 'Water Pump & Thermostat Housing', qty: 1, unitPrice: waterPump.high });
     }
-    const isDiagOnlyBooking = catalogIds.length === 1 && catalogIds[0] === 'diag_inspection';
     const catalogQuoteItems = {
       parts: catalogParts,
       labourHours: 0,
       labourRate: 0,
-      shopFee: (!isDiagOnlyBooking && fleetShopFee) ? fleetShopFee : 0,
+      // Each part's unitPrice (priceFor(id)) already includes that service's own
+      // shop fee where applicable — no separate shop fee line here, or it'd double-count.
+      shopFee: 0,
       vehicleLabel: `${vehicle?.year || ''} ${vehicle?.make || ''} ${vehicle?.model || ''}`.trim() || undefined,
       customerPhone: userProfile?.phone || undefined,
     };
@@ -4893,12 +4892,6 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                   )}
                 </div>
 
-                {fleetShopFee && fleetShopFee > 0 && (
-                  <div className="flex justify-between text-xs text-muted border-t border-border pt-4">
-                    <span>Workshop shop fee (freight, sundries & consumables)</span>
-                    <span>${fleetShopFee}</span>
-                  </div>
-                )}
                 <div className="flex justify-between items-center py-6 border-t border-b border-border">
                   <span className="text-[10px] font-black uppercase text-muted tracking-widest">Total Estimate (incl. GST)</span>
                   {(selectedMechanic?.estimatedPrice || totalPrice) > 0
@@ -4906,11 +4899,9 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                     : <span className="text-lg font-black text-muted">Confirmed by matched workshop</span>
                   }
                 </div>
-                {!fleetShopFee && (
-                  <p className="text-[10px] text-muted italic leading-relaxed">
-                    Estimates include a standard workshop fee covering freight, sundries, and consumables (e.g. rags, thread seal, drip trays) required to complete the service.
-                  </p>
-                )}
+                <p className="text-[10px] text-muted italic leading-relaxed">
+                  Estimates include a standard workshop fee (where applicable, shown per service above) covering freight, sundries, and consumables required to complete the service.
+                </p>
                 {isRepairFromDiagnostic && (
                   <div className="pt-2">
                     <p className="text-[10px] text-emerald-600 font-bold bg-emerald-500/5 p-3 rounded-xl border border-emerald-500/10 italic leading-relaxed text-center">
