@@ -4812,6 +4812,12 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                                   <span>{id === 'transmission' ? 'Transmission fluid' : 'Engine oil'}{fp.fluidCapacityL ? ` (${fp.fluidCapacityL}L)` : ''}</span>
                                   <span>${fp.fluidCostHigh}</span>
                                 </div>
+                                {fp.gearOilCostHigh > 0 && (
+                                  <div className="flex justify-between text-xs text-muted">
+                                    <span>{fp.gearOilType || 'Final drive gear oil'}{fp.gearOilCapacityL ? ` (${fp.gearOilCapacityL}L)` : ''}</span>
+                                    <span>${fp.gearOilCostHigh}</span>
+                                  </div>
+                                )}
                                 <div className="flex justify-between text-xs text-muted">
                                   <span>{fp.filterName || 'Filter'}</span>
                                   <span>${fp.filterCostHigh}</span>

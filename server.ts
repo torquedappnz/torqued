@@ -4279,6 +4279,17 @@ const TRANS_FILTER_COST_EX_GST: Record<string, { low: number; high: number }> = 
 // an engine family with genuine mechanical-AWD siblings). GST-incl 75W-90 GL-4/5 gear oil
 // (reuses TRANS_MANUAL_GEAR fluid pricing, $16-30/L). Recommend every 60,000km or per
 // manufacturer schedule, whichever comes first — separate from transmission service.
+// DQ200 (7-speed dry-clutch DSG) needs a SECOND fluid the generic transmission-
+// service model doesn't otherwise handle: ~1L of 75W-90 GL-4/5 gear oil (VW
+// G004000 spec or equivalent) for the separate final-drive compartment, on top
+// of the ~2L mechatronic/hydraulic fluid already priced via TRANS_DSG_DCT.
+// Labour is also slightly higher than a generic DSG service (1.75hr vs 1.5hr)
+// to cover draining/refilling both compartments.
+const DQ200_ENGINE_FAMILIES = new Set(['VW_EA211_14_TSI', 'VW_EA211_10_TSI_3CYL', 'VW_EA111_14_TSI']);
+const DQ200_GEAR_OIL_CAPACITY_L = 1;
+const DQ200_GEAR_OIL_LOW = 16, DQ200_GEAR_OIL_HIGH = 30; // $/L, 75W-90 GL-4/5
+const DQ200_LABOUR_HRS = 1.75;
+
 const DIFFERENTIAL_SERVICE_BY_VEHICLE: Record<string, {
   tier: 'rear only' | 'front+rear'; capacityL: number; fluidLow: number; fluidHigh: number;
   labourHrs: number; shopFee: number;
@@ -4734,10 +4745,25 @@ app.get('/api/fleet-prices', async (req, res) => {
             const transCostHigh = Math.round(transCapacityL * Number(transFluid.cost_per_litre_high));
             const transFilterLow  = Math.round(transFilterSpec.low  * 1.15);
             const transFilterHigh = Math.round(transFilterSpec.high * 1.15);
+            const isDQ200 = DQ200_ENGINE_FAMILIES.has(efFamilyId);
+            const labourHrs = isDQ200 ? DQ200_LABOUR_HRS : 1.5;
             efPrices['transmission'] = buildConsumableService(
-              transCostLow, transCostHigh, transFilterLow, transFilterHigh, 1.5, 'shop', efShopFeeResolved,
+              transCostLow, transCostHigh, transFilterLow, transFilterHigh, labourHrs, 'shop', efShopFeeResolved,
               transFluid.spec || null, transCapacityL, 'Transmission filter & gasket',
             );
+            if (isDQ200) {
+              // Add the DQ200's separate final-drive gear oil on top of the
+              // mechatronic/hydraulic fluid buildConsumableService already priced.
+              const gearOilLow  = Math.round(DQ200_GEAR_OIL_CAPACITY_L * DQ200_GEAR_OIL_LOW);
+              const gearOilHigh = Math.round(DQ200_GEAR_OIL_CAPACITY_L * DQ200_GEAR_OIL_HIGH);
+              const t = efPrices['transmission'];
+              t.low += gearOilLow; t.high += gearOilHigh;
+              t.midpoint = Math.round(t.midpoint + (gearOilLow + gearOilHigh) / 2);
+              t.partsLow += gearOilLow; t.partsHigh += gearOilHigh;
+              t.gearOilCostLow = gearOilLow; t.gearOilCostHigh = gearOilHigh;
+              t.gearOilCapacityL = DQ200_GEAR_OIL_CAPACITY_L;
+              t.gearOilType = '75W-90 GL-4/5 (final drive)';
+            }
           }
 
           // Fixed-price services
