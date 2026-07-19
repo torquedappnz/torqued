@@ -2399,24 +2399,78 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [manualHistory]);
 
+  const fileToBase64 = (file: File): Promise<string> => new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve((reader.result as string).split(',')[1] || '');
+    reader.onerror = reject;
+    reader.readAsDataURL(file);
+  });
+
+  // Vercel serverless functions hard-cap the request body at ~4.5MB regardless of
+  // our own express.json({limit}) config — a request over that is rejected at the
+  // platform level with a non-JSON response, which surfaces client-side as a
+  // generic network/parse failure ("Could not read that file"). Downscale/
+  // recompress images client-side so their base64 payload comfortably fits;
+  // large PDFs can't be recompressed without a PDF library, so those are
+  // rejected upfront with a clear message instead of failing cryptically.
+  const MAX_UPLOAD_BASE64_BYTES = 3.2 * 1024 * 1024; // leaves headroom under the ~4.5MB platform limit
+  const compressImageFile = (file: File): Promise<{ base64: string; mimeType: string }> => new Promise((resolve, reject) => {
+    const img = new Image();
+    const url = URL.createObjectURL(file);
+    img.onload = () => {
+      URL.revokeObjectURL(url);
+      let { width, height } = img;
+      const tryEncode = (w: number, h: number, quality: number): string => {
+        const canvas = document.createElement('canvas');
+        canvas.width = w; canvas.height = h;
+        const ctx = canvas.getContext('2d');
+        if (!ctx) throw new Error('canvas unsupported');
+        ctx.drawImage(img, 0, 0, w, h);
+        return canvas.toDataURL('image/jpeg', quality);
+      };
+      try {
+        // Cap the longest edge first — most phone photos are far larger than needed for OCR.
+        const maxEdge = 2000;
+        if (width > maxEdge || height > maxEdge) {
+          const scale = maxEdge / Math.max(width, height);
+          width = Math.round(width * scale); height = Math.round(height * scale);
+        }
+        let quality = 0.85;
+        let dataUrl = tryEncode(width, height, quality);
+        while (dataUrl.length * 0.75 > MAX_UPLOAD_BASE64_BYTES && (quality > 0.4 || width > 800)) {
+          if (quality > 0.4) quality -= 0.15;
+          else { width = Math.round(width * 0.85); height = Math.round(height * 0.85); }
+          dataUrl = tryEncode(width, height, quality);
+        }
+        resolve({ base64: dataUrl.split(',')[1] || '', mimeType: 'image/jpeg' });
+      } catch (e) { reject(e); }
+    };
+    img.onerror = reject;
+    img.src = url;
+  });
+  // Returns the base64 payload to upload, or throws a user-facing message if the
+  // file can't be made to fit (oversized PDFs — can't recompress client-side).
+  const prepareUploadPayload = async (file: File): Promise<{ base64: string; mimeType: string }> => {
+    if (file.type.startsWith('image/')) return compressImageFile(file);
+    const base64 = await fileToBase64(file);
+    if (base64.length * 0.75 > MAX_UPLOAD_BASE64_BYTES) {
+      throw new Error(`This PDF is too large to scan (${(file.size / 1024 / 1024).toFixed(1)}MB). Try a photo of the receipt instead, or a smaller PDF.`);
+    }
+    return { base64, mimeType: file.type };
+  };
+
   // Simulate/Perform Rego Lookup
   const handleReceiptUpload = async (file: File | null) => {
     if (!file) return;
     setReceiptError(null);
     setIsParsingReceipt(true);
     try {
-      // Read file as base64 (strip the data: prefix)
-      const base64: string = await new Promise((resolve, reject) => {
-        const reader = new FileReader();
-        reader.onload = () => resolve((reader.result as string).split(',')[1] || '');
-        reader.onerror = reject;
-        reader.readAsDataURL(file);
-      });
+      const { base64, mimeType } = await prepareUploadPayload(file);
 
       const res = await fetch('/api/ai/parse-receipt', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ fileData: base64, mimeType: file.type }),
+        body: JSON.stringify({ fileData: base64, mimeType }),
       });
       const data = await res.json();
       if (!res.ok) { setReceiptError(data.error || 'Could not scan receipt.'); return; }
@@ -2429,19 +2483,12 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
       if (data.price) setEntryPrice(data.price);
       setEntryNotes(data.notes ? `${data.notes} (scanned)` : 'Scanned from receipt');
       setShowHistoryEntry(true);
-    } catch {
-      setReceiptError('Could not read that file. Try a clear photo or PDF.');
+    } catch (e: any) {
+      setReceiptError(e?.message || 'Could not read that file. Try a clear photo or PDF.');
     } finally {
       setIsParsingReceipt(false);
     }
   };
-
-  const fileToBase64 = (file: File): Promise<string> => new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = () => resolve((reader.result as string).split(',')[1] || '');
-    reader.onerror = reject;
-    reader.readAsDataURL(file);
-  });
 
   // Parse MANY receipts/PDFs at once (drag-and-drop or multi-select) into editable records
   const handleMultiUpload = async (files: File[]) => {
@@ -2454,10 +2501,10 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
     for (let i = 0; i < list.length; i++) {
       const file = list[i];
       try {
-        const base64 = await fileToBase64(file);
+        const { base64, mimeType } = await prepareUploadPayload(file);
         const res = await fetch('/api/ai/parse-receipt', {
           method: 'POST', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ fileData: base64, mimeType: file.type }),
+          body: JSON.stringify({ fileData: base64, mimeType }),
         });
         const d = await res.json();
         if (res.ok) {
@@ -2468,8 +2515,8 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
         } else {
           results.push({ id: `${Date.now()}-${i}`, date: '', service: '', provider: '', mileage: '', price: '', notes: `⚠️ Could not read (${d.error || 'parse failed'})`, fileName: file.name });
         }
-      } catch {
-        results.push({ id: `${Date.now()}-${i}`, date: '', service: '', provider: '', mileage: '', price: '', notes: '⚠️ Could not read this file', fileName: file.name });
+      } catch (e: any) {
+        results.push({ id: `${Date.now()}-${i}`, date: '', service: '', provider: '', mileage: '', price: '', notes: `⚠️ ${e?.message || 'Could not read this file'}`, fileName: file.name });
       }
       setBatchProgress({ done: i + 1, total: list.length });
       setParsedBatch([...results]);
