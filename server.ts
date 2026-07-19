@@ -6626,7 +6626,7 @@ Use empty string "" only for fields genuinely not present in the document.`;
       method: 'POST',
       headers: { 'x-api-key': apiKey, 'anthropic-version': '2023-06-01', 'content-type': 'application/json' },
       body: JSON.stringify({
-        model: 'claude-sonnet-4-6',
+        model: CLAUDE_MODEL,
         max_tokens: 1024,
         system: 'Return only valid JSON. No markdown code fences, no explanation.',
         messages: [{ role: 'user', content: [imgBlock, { type: 'text', text: prompt }] }],
@@ -6634,10 +6634,13 @@ Use empty string "" only for fields genuinely not present in the document.`;
     });
     const receiptData = await receiptResp.json();
     if (!receiptResp.ok) throw new Error(receiptData?.error?.message || 'Claude receipt request failed');
-    const text = receiptData.content?.[0]?.text ?? '';
+    const rawText = receiptData.content?.[0]?.text ?? '';
+    // Claude sometimes wraps JSON in a ```json ... ``` fence despite instructions
+    // not to — strip fences before parsing rather than failing the whole scan.
+    const text = rawText.trim().replace(/^```(?:json)?\s*/i, '').replace(/```\s*$/, '').trim();
 
     let parsed: any = {};
-    try { parsed = JSON.parse(text.trim()); }
+    try { parsed = JSON.parse(text); }
     catch { return res.status(422).json({ error: 'Could not read the receipt. Try a clearer photo.' }); }
 
     res.json({
