@@ -7225,8 +7225,8 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                       </div>
                     )}
                     {manualHistory.length > 0 && (
-                      <Button variant="outline" size="sm" fullWidth className="border-border text-foreground mt-1" onClick={generateServiceHistoryPDF}>
-                        <Download size={13} className="mr-1.5" /> Export Service History (PDF)
+                      <Button variant="outline" size="sm" fullWidth className="border-border text-foreground mt-1 flex items-center justify-center gap-1.5" onClick={generateServiceHistoryPDF}>
+                        <Download size={13} className="shrink-0" /> Export Service History (PDF)
                       </Button>
                     )}
                   </>
