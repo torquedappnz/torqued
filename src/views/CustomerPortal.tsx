@@ -655,6 +655,92 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
         .catch(() => resolve(null));
     });
 
+  // Exports the full reviewed/edited service history log (Vehicle Health → Review/Edit)
+  // as a PDF — one row per record: date, provider, source, mileage, work done.
+  const generateServiceHistoryPDF = async () => {
+    const doc = new jsPDF({ unit: 'mm', format: 'a4' });
+    const marginX = 15;
+    const pageWidth = 210, pageHeight = 297;
+    const sourceLabel = (st?: string) => st === 'torqued_job' ? 'Torqued booking' : st === 'ai_autoscan' ? 'Scanned' : 'Manual entry';
+    const vehicleDesc = vehicle ? [vehicle.year, vehicle.make, vehicle.model, vehicle.variant || null].filter(Boolean).join(' ') : 'Vehicle';
+    const rego = (vehicle?.rego || '').toUpperCase();
+
+    // ── Header ──
+    const logo = await loadImageDataUrl('/torqued-logo.png');
+    if (logo) doc.addImage(logo, 'PNG', marginX, 8, 52, 17.4);
+    doc.setFillColor(255, 24, 0); doc.rect(0, 30, pageWidth, 2, 'F');
+    doc.setTextColor(21, 4, 2); doc.setFont('Helvetica', 'bold'); doc.setFontSize(11);
+    doc.text('SERVICE HISTORY', pageWidth - 15, 16, { align: 'right' });
+    doc.setFont('Helvetica', 'normal'); doc.setFontSize(8.5); doc.setTextColor(80, 80, 80);
+    doc.text(`Generated ${new Date().toLocaleDateString('en-NZ', { day: 'numeric', month: 'short', year: 'numeric' })}`, pageWidth - 15, 22, { align: 'right' });
+
+    doc.setTextColor(21, 4, 2); doc.setFont('Helvetica', 'bold'); doc.setFontSize(9.5);
+    doc.text('VEHICLE', marginX, 44);
+    doc.setFont('Helvetica', 'normal'); doc.setFontSize(9);
+    doc.text(vehicleDesc, marginX, 50);
+    doc.text(`Rego: ${rego}`, marginX, 55);
+
+    // ── Table ──
+    const cols = [
+      { key: 'rego', label: 'Rego / Car', w: 24 },
+      { key: 'date', label: 'Date', w: 20 },
+      { key: 'provider', label: 'Provider', w: 38 },
+      { key: 'source', label: 'Source', w: 26 },
+      { key: 'mileage', label: 'Mileage', w: 20 },
+      { key: 'work', label: 'Work Done', w: 52 },
+    ];
+    const tableX = marginX;
+    const colX: number[] = [];
+    { let x = tableX; for (const c of cols) { colX.push(x); x += c.w; } }
+
+    let y = 66;
+    const drawHeader = () => {
+      doc.setFillColor(21, 4, 2);
+      doc.rect(tableX, y - 4.5, cols.reduce((s, c) => s + c.w, 0), 6.5, 'F');
+      doc.setFont('Helvetica', 'bold'); doc.setFontSize(7.5); doc.setTextColor(255, 255, 255);
+      cols.forEach((c, i) => doc.text(c.label, colX[i] + 1.5, y));
+      y += 5;
+      doc.setFont('Helvetica', 'normal'); doc.setTextColor(21, 4, 2);
+    };
+    drawHeader();
+
+    const sorted = [...manualHistory].sort((a, b) => parseServiceDate(b.date) - parseServiceDate(a.date));
+    const carDesc = [vehicle?.make, vehicle?.model].filter(Boolean).join(' ') || rego;
+    doc.setFontSize(7.5);
+    for (const item of sorted) {
+      const cellText: Record<string, string> = {
+        rego: `${rego}${carDesc ? ` / ${carDesc}` : ''}`,
+        date: item.date || '—',
+        provider: item.provider || '—',
+        source: sourceLabel(item.source_type),
+        mileage: item.mileage ? `${Number(item.mileage).toLocaleString()} km` : '—',
+        work: item.service || '—',
+      };
+      const wrapped = cols.map(c => doc.splitTextToSize(cellText[c.key], c.w - 3));
+      const rowHeight = Math.max(...wrapped.map(w => w.length)) * 3.6 + 2;
+
+      if (y + rowHeight > pageHeight - 20) {
+        doc.addPage();
+        y = 20;
+        drawHeader();
+        doc.setFontSize(7.5);
+      }
+      doc.setDrawColor(226, 232, 240);
+      doc.line(tableX, y + rowHeight - 2, tableX + cols.reduce((s, c) => s + c.w, 0), y + rowHeight - 2);
+      cols.forEach((c, i) => doc.text(wrapped[i], colX[i] + 1.5, y));
+      y += rowHeight;
+    }
+
+    if (sorted.length === 0) {
+      doc.setTextColor(150, 150, 150); doc.text('No service history records on file.', tableX + 1.5, y);
+    }
+
+    doc.setFont('Helvetica', 'normal'); doc.setFontSize(7.5); doc.setTextColor(150, 150, 150);
+    doc.text('Exported via Torqued — NZ\'s smarter way to get your car sorted.', marginX, pageHeight - 12);
+
+    doc.save(`Torqued-Service-History-${rego || 'vehicle'}.pdf`);
+  };
+
   // One branded document in the Torqued QUOTE design language. It becomes an INVOICE
   // once paid, and grows BOOKING/PAYMENT + CANCELLATION sections only when relevant.
   const generateBookingPDF = async (job: Job) => {
@@ -7137,6 +7223,11 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                           );
                         })}
                       </div>
+                    )}
+                    {manualHistory.length > 0 && (
+                      <Button variant="outline" size="sm" fullWidth className="border-border text-foreground mt-1" onClick={generateServiceHistoryPDF}>
+                        <Download size={13} className="mr-1.5" /> Export Service History (PDF)
+                      </Button>
                     )}
                   </>
                 )}
