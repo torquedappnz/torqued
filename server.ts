@@ -4285,7 +4285,10 @@ const TRANS_FILTER_COST_EX_GST: Record<string, { low: number; high: number }> = 
 // of the ~2L mechatronic/hydraulic fluid already priced via TRANS_DSG_DCT.
 // Labour is also slightly higher than a generic DSG service (1.75hr vs 1.5hr)
 // to cover draining/refilling both compartments.
-const DQ200_ENGINE_FAMILIES = new Set(['VW_EA211_14_TSI', 'VW_EA211_10_TSI_3CYL', 'VW_EA111_14_TSI']);
+const DQ200_ENGINE_FAMILIES = new Set([
+  'VW_EA211_14_TSI', 'VW_EA211_10_TSI_3CYL', 'VW_EA111_14_TSI',
+  'VW_EA111_12_TSI', 'VW_EA211_12_TSI', 'VW_EA211_15_TSI_EVO', 'VW_EA189_16_TDI',
+]);
 const DQ200_GEAR_OIL_CAPACITY_L = 1;
 const DQ200_GEAR_OIL_LOW = 16, DQ200_GEAR_OIL_HIGH = 30; // $/L, 75W-90 GL-4/5
 const DQ200_LABOUR_HRS = 1.75;
