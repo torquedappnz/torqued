@@ -1391,6 +1391,30 @@ function titleCase(s: string): string {
   return s.toLowerCase().replace(/\b\w/g, c => c.toUpperCase());
 }
 
+// Registry make strings vary ("RANGE ROVER", "MERCEDES", "CITROËN", "VW",
+// "ABARTH") while fleet_vehicles/vehicle_models use one canonical name per
+// brand — normalise before any make match so plate→vehicle conversion always
+// lands on the canonical make.
+const MAKE_SYNONYMS: Record<string, string> = {
+  'vw': 'Volkswagen', 'volkswagon': 'Volkswagen',
+  'mercedes': 'Mercedes-Benz', 'mercedes benz': 'Mercedes-Benz', 'mercedesbenz': 'Mercedes-Benz', 'mb': 'Mercedes-Benz',
+  'range rover': 'Land Rover', 'landrover': 'Land Rover', 'land-rover': 'Land Rover',
+  'citroen': 'Citroen', // diacritic already stripped by normalize below
+  'skoda': 'Skoda',
+  'great wall': 'GWM', 'great wall motors': 'GWM', 'haval': 'GWM',
+  'hsv': 'Holden', 'holden special vehicles': 'Holden',
+  'abarth': 'Fiat',
+  'mini cooper': 'Mini',
+  'tesla motors': 'Tesla',
+  'alfa': 'Alfa Romeo',
+  'ssangyong': 'SsangYong',
+};
+function normalizeMake(raw: string): string {
+  const trimmed = String(raw || '').trim();
+  const key = trimmed.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+  return MAKE_SYNONYMS[key] || trimmed.normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+}
+
 // Calls the FuelSaver (NZ govt) API and normalises the response into the same CarjamVehicle shape.
 // Only fields relevant to vehicle identification are mapped; emissions/cost fields are ignored.
 async function callFuelSaverAPI(plate: string): Promise<CarjamVehicle | null> {
@@ -1408,7 +1432,7 @@ async function callFuelSaverAPI(plate: string): Promise<CarjamVehicle | null> {
     if (d?.ErrorCode !== 0 || !d?.Make) return null;
     const year = d.mvrYear ? parseInt(String(d.mvrYear), 10) : new Date().getFullYear();
     return {
-      make: titleCase(String(d.Make)),
+      make: normalizeMake(titleCase(String(d.Make))),
       model: String(d.Model || ''),
       year,
       variant: String(d.SubModel || '').trim(),
@@ -1573,7 +1597,7 @@ app.get('/api/rego/lookup', async (req, res) => {
 // GET /api/vehicles/lookup?make=xxx&model=xxx&year=xxx — fuzzy search vehicle_models for manual entry matching
 app.get('/api/vehicles/lookup', async (req, res) => {
   try {
-    const make  = String(req.query.make  || '').trim();
+    const make  = normalizeMake(String(req.query.make || ''));
     const model = String(req.query.model || '').trim();
     const year  = Number(req.query.year)  || null;
     if (!make || !model) return res.status(400).json({ error: 'make and model are required' });
@@ -4416,7 +4440,7 @@ app.get('/api/fleet-prices', async (req, res) => {
       const { data: cv } = await supabase
         .from('vehicles').select('make, model, year').eq('rego', rego).single();
       if (!cv?.make) return res.json({ prices: {}, timingDrive: null, vehicleId: null });
-      custVehicle = cv;
+      custVehicle = { ...cv, make: normalizeMake(cv.make) };
 
       // 2. Match vehicle_models — four-tier fallback
       const firstWord = String(cv.model).split(' ')[0];
