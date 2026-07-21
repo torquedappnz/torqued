@@ -1625,6 +1625,16 @@ app.get('/api/vehicles/lookup', async (req, res) => {
     if (!rows.length) rows = await tryQuery(`%${model}%`, false);
     if (!rows.length) rows = await tryQuery(`%${firstWord}%`, false);
 
+    // Defensive dedupe: NULL engine_code bypasses the table's unique
+    // constraint, so identical variants can coexist — never show them twice.
+    const seen = new Set<string>();
+    rows = rows.filter((r: any) => {
+      const k = [r.submodel, r.engine_cc, r.fuel, r.transmission, r.year_from, r.year_to].join('|').toLowerCase();
+      if (seen.has(k)) return false;
+      seen.add(k);
+      return true;
+    });
+
     res.json({ results: rows });
   } catch (err) {
     console.error('[vehicles/lookup]', err);
@@ -4418,6 +4428,9 @@ app.get('/api/fleet-prices', async (req, res) => {
     // disambiguates which of several same-make/model fleet_vehicles rows is
     // theirs (e.g. "Golf" alone matches GTI/TSI/GTE/R/TDI across 5 generations).
     let confirmedSubmodel: string | null = null;
+    // Weaker hint than confirmedSubmodel: the registry's SubModel string for
+    // this plate (never customer-confirmed, so only used to rank candidates).
+    let variantHint: string | null = null;
 
     if (vehicleModelIdParam) {
       // Fast path — customer confirmed their exact variant, skip the fuzzy lookup
@@ -4438,9 +4451,13 @@ app.get('/api/fleet-prices', async (req, res) => {
 
       // 1. Resolve make/model/year from the customer's vehicle record
       const { data: cv } = await supabase
-        .from('vehicles').select('make, model, year').eq('rego', rego).single();
+        .from('vehicles').select('make, model, year, variant').eq('rego', rego).single();
       if (!cv?.make) return res.json({ prices: {}, timingDrive: null, vehicleId: null });
       custVehicle = { ...cv, make: normalizeMake(cv.make) };
+      // Registry SubModel stored at plate lookup (e.g. "GTI TSI 147kW") — used
+      // below to disambiguate when several fleet rows match make/model/year,
+      // so an unconfirmed Polo GTI never falls onto the 1.0/1.4 TSI row.
+      if (!confirmedSubmodel && cv.variant) variantHint = String(cv.variant).trim();
 
       // 2. Match vehicle_models — four-tier fallback
       const firstWord = String(cv.model).split(' ')[0];
@@ -4499,6 +4516,14 @@ app.get('/api/fleet-prices', async (req, res) => {
           if (!fvRows?.length)
             fvRows = await queryFV(String(custVehicle.model || ''), false, confirmedSubmodel + '%');
         }
+        // No picker confirmation — try the registry's SubModel string ("GTI TSI
+        // 147kW" → "GTI…") before falling back to an arbitrary make/model match.
+        if (!fvRows?.length && variantHint) {
+          fvRows = await queryFV(String(custVehicle.model || ''), true, variantHint + '%');
+          const hintWord = variantHint.split(' ')[0];
+          if (!fvRows?.length && hintWord !== variantHint)
+            fvRows = await queryFV(String(custVehicle.model || ''), true, hintWord + '%');
+        }
         if (!fvRows?.length)
           fvRows = await queryFV(String(custVehicle.model || ''), true);
         if (!fvRows?.length && fvFirstWord !== custVehicle.model)
@@ -4527,6 +4552,12 @@ app.get('/api/fleet-prices', async (req, res) => {
             fvRows = await queryAlias(String(custVehicle.model || ''), true, confirmedSubmodel + '%');
             if (!fvRows?.length)
               fvRows = await queryAlias(String(custVehicle.model || ''), false, confirmedSubmodel + '%');
+          }
+          if (!fvRows?.length && variantHint) {
+            fvRows = await queryAlias(String(custVehicle.model || ''), true, variantHint + '%');
+            const hintWord = variantHint.split(' ')[0];
+            if (!fvRows?.length && hintWord !== variantHint)
+              fvRows = await queryAlias(String(custVehicle.model || ''), true, hintWord + '%');
           }
           if (!fvRows?.length)
             fvRows = await queryAlias(String(custVehicle.model || ''), true);
