@@ -523,7 +523,7 @@ app.post('/api/bookings/persist', async (req, res) => {
         .eq('rego', String(bookingData.vehicleId).toUpperCase().trim())
         .ilike('customer_email', String(bookingData.email).trim())
         .neq('status', 'converted')
-        .then(({ error }: any) => { if (error && !/does not exist/.test(error.message)) console.warn('[bookings/persist] draft convert:', error.message); });
+        .then(({ error }: any) => { if (error && !/does not exist|Could not find the table/i.test(error.message)) console.warn('[bookings/persist] draft convert:', error.message); });
     }
 
     res.json({ success: true });
@@ -581,7 +581,7 @@ app.post('/api/booking/draft', async (req, res) => {
     }, { onConflict: 'rego,customer_email' });
     if (error) {
       // Table not migrated yet — degrade silently, never block the booking flow
-      if (/does not exist/.test(error.message)) return res.json({ success: false, pending_migration: true });
+      if (/does not exist|Could not find the table/i.test(error.message)) return res.json({ success: false, pending_migration: true });
       return res.status(500).json({ error: error.message });
     }
     res.json({ success: true });
@@ -613,7 +613,7 @@ async function sweepAbandonedDrafts(): Promise<{ sent: number; scanned: number; 
     .gt('updated_at', notOlderThan)
     .limit(20);
   if (error) {
-    if (/does not exist/.test(error.message)) return { sent: 0, scanned: 0, pending_migration: true };
+    if (/does not exist|Could not find the table/i.test(error.message)) return { sent: 0, scanned: 0, pending_migration: true };
     console.warn('[abandoned-sweep] query:', error.message);
     return { sent: 0, scanned: 0 };
   }
