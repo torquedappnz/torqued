@@ -1053,7 +1053,7 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
     bodyType?: string; fuel?: string;
   } | null>(null);
   const [carjamStolenWarning, setCarjamStolenWarning] = useState(false);
-  const [vehicleModelSpec, setVehicleModelSpec] = useState<{ engine_code: string | null; engine_cc: number | null; fuel: string | null; transmission: string | null; timing_drive: string | null; submodel?: string | null } | null>(null);
+  const [vehicleModelSpec, setVehicleModelSpec] = useState<{ id?: string | null; engine_code: string | null; engine_cc: number | null; fuel: string | null; transmission: string | null; timing_drive: string | null; submodel?: string | null } | null>(null);
   const [vehicleModelOptions, setVehicleModelOptions] = useState<any[]>([]);
   const [showSubmodelPicker, setShowSubmodelPicker] = useState(false);
   const [quoteFallbackCategoryId, setQuoteFallbackCategoryId] = useState<number | null>(null);
@@ -1149,7 +1149,7 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
     mechanicsByDistance.forEach(async (m) => {
       if (!m.id || mechanicPrices[m.id] !== undefined) return;
       try {
-        const r = await fetch(`/api/fleet-prices?rego=${encodeURIComponent(rego)}&mechanic=${encodeURIComponent(m.id)}`);
+        const r = await fetch(`/api/fleet-prices?rego=${encodeURIComponent(rego)}&mechanic=${encodeURIComponent(m.id)}${vehicleModelSpec?.id ? `&vehicleModelId=${encodeURIComponent(vehicleModelSpec.id)}` : ''}`);
         const fp = await r.json();
         if (cancelled) return;
         // Each service's own .high already includes the workshop's shop fee where
@@ -1998,7 +1998,7 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
       setVehicleOilType(specs?.oil_type ?? null);
       // Fetch fleet prices in background and overlay onto vehiclePrices so the
       // Step 2 tally and Step 4 mechanic list reflect real parts_data midpoints.
-      fetch(`/api/fleet-prices?rego=${encodeURIComponent(rego)}`)
+      fetch(`/api/fleet-prices?rego=${encodeURIComponent(rego)}${vehicleModelSpec?.id ? `&vehicleModelId=${encodeURIComponent(vehicleModelSpec.id)}` : ''}`)
         .then(r => r.json())
         .then((fp: any) => {
           if (fp?.vehicleId) setFleetVehicleId(fp.vehicleId);
@@ -2783,7 +2783,7 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
     // (labour, oil price, shop fee) reflects their real labour_rate/shop_fee instead
     // of the generic platform-average quote used on the mechanic-list step.
     if (rego) {
-      fetch(`/api/fleet-prices?rego=${encodeURIComponent(rego)}&mechanic=${encodeURIComponent(mechanic.id)}`)
+      fetch(`/api/fleet-prices?rego=${encodeURIComponent(rego)}&mechanic=${encodeURIComponent(mechanic.id)}${vehicleModelSpec?.id ? `&vehicleModelId=${encodeURIComponent(vehicleModelSpec.id)}` : ''}`)
         .then(r => r.json())
         .then((fp: any) => {
           if (fp?.shopFee) setFleetShopFee(fp.shopFee);
@@ -3278,6 +3278,7 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                               key={i}
                               onClick={() => {
                                 setVehicleModelSpec(opt);
+                                setMechanicPrices({}); // reprice per-mechanic quotes with the confirmed variant
                                 setShowSubmodelPicker(false);
                                 // Re-fetch fleet prices using the confirmed vehicle_models row
                                 if (opt.id) {
@@ -3614,6 +3615,7 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                     return (
                       <button key={i} onClick={() => {
                         setVehicleModelSpec(opt);
+                                setMechanicPrices({}); // reprice per-mechanic quotes with the confirmed variant
                         const regoParam = vehicle?.rego || rego;
                         if (opt.id) {
                           fetch(`/api/fleet-prices?rego=${encodeURIComponent(regoParam)}&vehicleModelId=${encodeURIComponent(opt.id)}`)

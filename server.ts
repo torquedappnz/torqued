@@ -4443,6 +4443,15 @@ app.get('/api/fleet-prices', async (req, res) => {
         vmRows = [vm];
         custVehicle = { make: vm.make, model: vm.model, year: vm.year_from ?? undefined };
         confirmedSubmodel = vm.submodel || null;
+        // Persist the confirmation onto the vehicle record so every later
+        // quote for this rego (any session, mechanic-side, refetches that
+        // omit vehicleModelId) resolves via the variant hint instead of
+        // falling back to an arbitrary same-model match.
+        if (rego && confirmedSubmodel) {
+          supabase.from('vehicles').update({ variant: confirmedSubmodel })
+            .eq('rego', rego)
+            .then(({ error }: any) => { if (error) console.warn('[fleet-prices] variant persist:', error.message); });
+        }
       }
     }
 
