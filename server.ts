@@ -591,59 +591,90 @@ app.post('/api/booking/draft', async (req, res) => {
   }
 });
 
-// GET /api/cron/abandoned-bookings — Vercel cron (every 10 min). Sends ONE
-// recovery email per abandonment: drafts idle 10min-72h, no reminder sent. Guarded by
-// CRON_SECRET when set (Vercel sends it as a Bearer token automatically).
+// Sweep: email one recovery nudge per abandoned draft (idle ≥10 min, ≤72h,
+// no reminder sent). Vercel Hobby only allows daily crons, so this runs two
+// ways: (a) opportunistically off normal API traffic — throttled to once per
+// 5 min per instance — and (b) a daily Vercel cron as backstop. A conditional
+// status flip (draft→emailed) claims each row first, so concurrent serverless
+// instances can never double-send.
+async function sweepAbandonedDrafts(): Promise<{ sent: number; scanned: number; pending_migration?: boolean }> {
+  const supabase = getSupabaseAdmin();
+  const transporter = getMailTransporter();
+  if (!supabase || !transporter) return { sent: 0, scanned: 0 };
+
+  const now = Date.now();
+  const idleSince = new Date(now - 10 * 60 * 1000).toISOString();          // quiet ≥ 10 min
+  const notOlderThan = new Date(now - 72 * 60 * 60 * 1000).toISOString();  // drop stale >72h
+  const { data: drafts, error } = await supabase.from('draft_bookings')
+    .select('*')
+    .eq('status', 'draft')
+    .is('reminder_sent_at', null)
+    .lt('updated_at', idleSince)
+    .gt('updated_at', notOlderThan)
+    .limit(20);
+  if (error) {
+    if (/does not exist/.test(error.message)) return { sent: 0, scanned: 0, pending_migration: true };
+    console.warn('[abandoned-sweep] query:', error.message);
+    return { sent: 0, scanned: 0 };
+  }
+
+  let sent = 0;
+  for (const d of drafts ?? []) {
+    // Claim the row before sending — if another instance got here first,
+    // zero rows come back and we skip.
+    const { data: claimed } = await supabase.from('draft_bookings')
+      .update({ status: 'emailed', reminder_sent_at: new Date().toISOString() })
+      .eq('id', d.id).eq('status', 'draft')
+      .select('id');
+    if (!claimed?.length) continue;
+
+    const firstName = (d.customer_name || '').split(' ')[0] || 'there';
+    const mechName = d.mechanic_name || 'Torqued';
+    const labels: string[] = Array.isArray(d.service_labels) && d.service_labels.length
+      ? d.service_labels : (Array.isArray(d.service_ids) ? d.service_ids : []);
+    const jobsList = labels.join(', ');
+    // 7-day resume token → lands the customer straight back in their garage
+    const link = `https://torqued.site/customer?vt=${makeMagicToken(d.rego, 7 * 24 * 60 * 60 * 1000)}`;
+    try {
+      await transporter.sendMail({
+        from: process.env.SMTP_FROM || '"Torqued" <torquedapp.nz@gmail.com>',
+        to: d.customer_email,
+        replyTo: 'hello@torqued.site',
+        subject: `${firstName}, Secure your service with ${mechName} today!`,
+        html: generateAbandonedBookingEmailHtml(firstName, jobsList, link),
+      });
+      sent++;
+    } catch (e) {
+      console.warn('[abandoned-sweep] send failed for', d.customer_email, (e as Error)?.message);
+      // release the claim so a later sweep retries
+      await supabase.from('draft_bookings').update({ status: 'draft', reminder_sent_at: null }).eq('id', d.id);
+    }
+  }
+  return { sent, scanned: drafts?.length ?? 0 };
+}
+
+// Opportunistic trigger: any API request may kick off a sweep (fire-and-forget,
+// never blocks the response). Module-level throttle keeps it to one sweep per
+// warm instance per 5 minutes.
+let lastAbandonedSweepAt = 0;
+app.use((_req, _res, next) => {
+  const now = Date.now();
+  if (now - lastAbandonedSweepAt > 5 * 60 * 1000) {
+    lastAbandonedSweepAt = now;
+    sweepAbandonedDrafts().catch(() => {});
+  }
+  next();
+});
+
+// GET /api/cron/abandoned-bookings — daily Vercel cron backstop (Hobby plan
+// limit) for periods with no site traffic. Guarded by CRON_SECRET when set
+// (Vercel sends it as a Bearer token automatically).
 app.get('/api/cron/abandoned-bookings', async (req, res) => {
   try {
     const secret = process.env.CRON_SECRET;
     if (secret && req.headers.authorization !== `Bearer ${secret}`)
       return res.status(401).json({ error: 'Unauthorized' });
-    const supabase = getSupabaseAdmin();
-    const transporter = getMailTransporter();
-    if (!supabase || !transporter) return res.status(500).json({ error: 'Not configured' });
-
-    const now = Date.now();
-    const idleSince = new Date(now - 10 * 60 * 1000).toISOString();        // quiet ≥ 10 min
-    const notOlderThan = new Date(now - 72 * 60 * 60 * 1000).toISOString(); // drop stale >72h
-    const { data: drafts, error } = await supabase.from('draft_bookings')
-      .select('*')
-      .eq('status', 'draft')
-      .is('reminder_sent_at', null)
-      .lt('updated_at', idleSince)
-      .gt('updated_at', notOlderThan)
-      .limit(20);
-    if (error) {
-      if (/does not exist/.test(error.message)) return res.json({ sent: 0, pending_migration: true });
-      return res.status(500).json({ error: error.message });
-    }
-
-    let sent = 0;
-    for (const d of drafts ?? []) {
-      const firstName = (d.customer_name || '').split(' ')[0] || 'there';
-      const mechName = d.mechanic_name || 'Torqued';
-      const labels: string[] = Array.isArray(d.service_labels) && d.service_labels.length
-        ? d.service_labels : (Array.isArray(d.service_ids) ? d.service_ids : []);
-      const jobsList = labels.join(', ');
-      // 7-day resume token → lands the customer straight back in their garage
-      const link = `https://torqued.site/customer?vt=${makeMagicToken(d.rego, 7 * 24 * 60 * 60 * 1000)}`;
-      try {
-        await transporter.sendMail({
-          from: process.env.SMTP_FROM || '"Torqued" <torquedapp.nz@gmail.com>',
-          to: d.customer_email,
-          replyTo: 'hello@torqued.site',
-          subject: `${firstName}, Secure your service with ${mechName} today!`,
-          html: generateAbandonedBookingEmailHtml(firstName, jobsList, link),
-        });
-        await supabase.from('draft_bookings')
-          .update({ status: 'emailed', reminder_sent_at: new Date().toISOString() })
-          .eq('id', d.id);
-        sent++;
-      } catch (e) {
-        console.warn('[cron/abandoned] send failed for', d.customer_email, (e as Error)?.message);
-      }
-    }
-    res.json({ sent, scanned: drafts?.length ?? 0 });
+    res.json(await sweepAbandonedDrafts());
   } catch (err) {
     console.error('[cron/abandoned-bookings]', err);
     res.status(500).json({ error: 'Cron failed' });
