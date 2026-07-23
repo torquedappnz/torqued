@@ -4506,68 +4506,49 @@ app.get('/api/fleet-prices', async (req, res) => {
           const { data } = await q.limit(1);
           return data as any[] | null;
         };
-        // A model name alone (e.g. "Golf") can match a dozen fleet_vehicles rows
-        // across generations/trims with wildly different engines — if the
-        // customer confirmed an exact submodel via the picker, use it to
-        // disambiguate FIRST, before falling back to the generic tiers.
+        const queryAlias = async (modelPat: string, withYear: boolean, submodelPat?: string) => {
+          let q = (supabase as any).from('ef_vehicle_aliases')
+            .select('vehicle_id, fleet_vehicles!inner(engine_family_id, body_type, drivetrain)')
+            .ilike('alias_make', custVehicle.make!)
+            .ilike('alias_model', modelPat);
+          if (withYear && custVehicle.year)
+            q = q.lte('year_from', custVehicle.year).or(`year_to.is.null,year_to.gte.${custVehicle.year}`);
+          if (submodelPat) q = q.ilike('alias_variant', submodelPat);
+          const { data } = await q.limit(1);
+          return (data as any[] | null)?.map(r => ({ ...r.fleet_vehicles, vehicle_id: r.vehicle_id })) ?? null;
+        };
+
+        // One tier = exhaust EVERY source (fleet + alias, exact + prefix model,
+        // with + without year) for a given submodel filter before loosening it.
+        // Ordering matters: a submodel-filtered ALIAS match (e.g. Golf GTE
+        // stored as model "Golf GTE") must beat an UNFILTERED direct match,
+        // otherwise a GTE/GTI quietly prices as an arbitrary same-model row.
+        const modelStr = String(custVehicle.model || '');
+        const tryTier = async (submodelPat?: string): Promise<any[] | null> => {
+          const modelPats = fvFirstWord !== custVehicle.model ? [modelStr, fvFirstWord + '%'] : [modelStr];
+          for (const withYear of [true, false]) {
+            for (const mp of modelPats) {
+              let rows = await queryFV(mp, withYear, submodelPat);
+              if (rows?.length) return rows;
+              rows = await queryAlias(mp, withYear, submodelPat);
+              if (rows?.length) return rows;
+            }
+          }
+          return null;
+        };
+
         let fvRows: any[] | null = null;
-        if (confirmedSubmodel) {
-          fvRows = await queryFV(String(custVehicle.model || ''), true, confirmedSubmodel + '%');
-          if (!fvRows?.length)
-            fvRows = await queryFV(String(custVehicle.model || ''), false, confirmedSubmodel + '%');
-        }
-        // No picker confirmation — try the registry's SubModel string ("GTI TSI
-        // 147kW" → "GTI…") before falling back to an arbitrary make/model match.
+        // Tier 1: customer-confirmed variant from the picker
+        if (confirmedSubmodel) fvRows = await tryTier(confirmedSubmodel + '%');
+        // Tier 2: the registry's SubModel string ("GTI TSI 147kW" → "GTI…")
         if (!fvRows?.length && variantHint) {
-          fvRows = await queryFV(String(custVehicle.model || ''), true, variantHint + '%');
+          fvRows = await tryTier(variantHint + '%');
           const hintWord = variantHint.split(' ')[0];
           if (!fvRows?.length && hintWord !== variantHint)
-            fvRows = await queryFV(String(custVehicle.model || ''), true, hintWord + '%');
+            fvRows = await tryTier(hintWord + '%');
         }
-        if (!fvRows?.length)
-          fvRows = await queryFV(String(custVehicle.model || ''), true);
-        if (!fvRows?.length && fvFirstWord !== custVehicle.model)
-          fvRows = await queryFV(fvFirstWord + '%', true);
-        if (!fvRows?.length)
-          fvRows = await queryFV(String(custVehicle.model || ''), false);
-        if (!fvRows?.length && fvFirstWord !== custVehicle.model)
-          fvRows = await queryFV(fvFirstWord + '%', false);
-
-        // ── Direct fleet_vehicles model match failed — try ef_vehicle_aliases ──
-        // (trim names like "Cross Polo", or a chassis code returned as the model
-        // by some rego lookups) joined back to its real fleet_vehicles row.
-        if (!fvRows?.length) {
-          const queryAlias = async (modelPat: string, withYear: boolean, submodelPat?: string) => {
-            let q = (supabase as any).from('ef_vehicle_aliases')
-              .select('vehicle_id, fleet_vehicles!inner(engine_family_id, body_type, drivetrain)')
-              .ilike('alias_make', custVehicle.make!)
-              .ilike('alias_model', modelPat);
-            if (withYear && custVehicle.year)
-              q = q.lte('year_from', custVehicle.year).or(`year_to.is.null,year_to.gte.${custVehicle.year}`);
-            if (submodelPat) q = q.ilike('alias_variant', submodelPat);
-            const { data } = await q.limit(1);
-            return (data as any[] | null)?.map(r => ({ ...r.fleet_vehicles, vehicle_id: r.vehicle_id })) ?? null;
-          };
-          if (confirmedSubmodel) {
-            fvRows = await queryAlias(String(custVehicle.model || ''), true, confirmedSubmodel + '%');
-            if (!fvRows?.length)
-              fvRows = await queryAlias(String(custVehicle.model || ''), false, confirmedSubmodel + '%');
-          }
-          if (!fvRows?.length && variantHint) {
-            fvRows = await queryAlias(String(custVehicle.model || ''), true, variantHint + '%');
-            const hintWord = variantHint.split(' ')[0];
-            if (!fvRows?.length && hintWord !== variantHint)
-              fvRows = await queryAlias(String(custVehicle.model || ''), true, hintWord + '%');
-          }
-          if (!fvRows?.length)
-            fvRows = await queryAlias(String(custVehicle.model || ''), true);
-          if (!fvRows?.length && fvFirstWord !== custVehicle.model)
-            fvRows = await queryAlias(fvFirstWord + '%', true);
-          if (!fvRows?.length)
-            fvRows = await queryAlias(String(custVehicle.model || ''), false);
-          if (!fvRows?.length && fvFirstWord !== custVehicle.model)
-            fvRows = await queryAlias(fvFirstWord + '%', false);
-        }
+        // Tier 3: any make/model/year match (last resort — arbitrary variant)
+        if (!fvRows?.length) fvRows = await tryTier();
 
         if (fvRows?.length) {
           const efFamilyId: string = fvRows[0].engine_family_id;
