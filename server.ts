@@ -246,8 +246,8 @@ const otpStore = new Map<string, { code: string; expiresAt: number }>();
 // Magic-link tokens for customer verification: token -> { rego, expiresAt }
 // Stateless signed magic tokens (work across serverless instances — no shared memory)
 const MAGIC_SECRET = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.ADMIN_PASSWORD || 'torqued-magic-secret';
-function makeMagicToken(rego: string): string {
-  const payload = Buffer.from(JSON.stringify({ rego, exp: Date.now() + 15 * 60 * 1000 })).toString('base64url');
+function makeMagicToken(rego: string, ttlMs: number = 15 * 60 * 1000): string {
+  const payload = Buffer.from(JSON.stringify({ rego, exp: Date.now() + ttlMs })).toString('base64url');
   const sig = crypto.createHmac('sha256', MAGIC_SECRET).update(payload).digest('base64url');
   return `${payload}.${sig}`;
 }
@@ -516,10 +516,137 @@ app.post('/api/bookings/persist', async (req, res) => {
       if (error) return res.status(500).json({ error: error.message });
     }
 
+    // A real booking exists now — retire any abandoned-booking draft for this
+    // rego+email so the recovery email never goes out after conversion.
+    if (bookingData.vehicleId && bookingData.email) {
+      supabase.from('draft_bookings').update({ status: 'converted' })
+        .eq('rego', String(bookingData.vehicleId).toUpperCase().trim())
+        .ilike('customer_email', String(bookingData.email).trim())
+        .neq('status', 'converted')
+        .then(({ error }: any) => { if (error && !/does not exist/.test(error.message)) console.warn('[bookings/persist] draft convert:', error.message); });
+    }
+
     res.json({ success: true });
   } catch (err) {
     console.error('[bookings/persist]', err);
     res.status(500).json({ error: 'Could not save booking' });
+  }
+});
+
+// ── Abandoned-booking recovery ───────────────────────────────────────────────
+// The customer portal saves a draft once rego + email + selected jobs + chosen
+// mechanic are all known but payment hasn't happened. Drafts live in their own
+// table (draft_bookings) and are invisible to mechanics — the mechanic only
+// learns of the job when the booking converts to a real paid one.
+
+function generateAbandonedBookingEmailHtml(firstName: string, jobsList: string, link: string): string {
+  return emailWrap(`<tr><td style="padding:36px 32px;">
+<span style="display:inline-block;background:rgba(255,24,0,.08);color:${EMAIL_RED};font-size:9px;font-weight:900;letter-spacing:2px;text-transform:uppercase;padding:5px 12px;border-radius:6px;font-family:${EMAIL_BODY_FONT};">FINISH YOUR BOOKING</span>
+<div style="margin:18px 0 0;"></div>
+${emailPara(`Kia Ora <strong>${firstName}</strong>,`)}
+${emailPara(`Thanks for choosing Torqued! We noticed you started your booking but haven&rsquo;t completed it yet.`)}
+${emailPara(`Your spot isn&rsquo;t confirmed until your booking is finished, and we&rsquo;d love to get your <strong style="color:${EMAIL_DARK};">${jobsList}</strong> sorted. Completing your booking only takes a minute.`)}
+${emailPara(`If you have any questions or need a hand with the process, simply reply to this email and we&rsquo;ll be happy to help.`)}
+<div style="text-align:center;margin:24px 0;"><a href="${link}" style="display:inline-block;background:${EMAIL_RED};color:#fff;font-family:${EMAIL_TITLE_FONT};font-size:13px;font-weight:900;text-transform:uppercase;letter-spacing:1px;text-decoration:none;padding:14px 34px;border-radius:12px;">Complete My Booking</a></div>
+${emailPara(`We look forward to seeing you soon!`)}
+${emailPara(`Kind regards,<br/><strong>The Torqued Team</strong>`)}
+</td></tr>`);
+}
+
+// POST /api/booking/draft — upsert the in-progress booking for this rego+email.
+// Any new activity resets the reminder clock (reminder_sent_at cleared) so the
+// nudge only fires after the customer has genuinely gone quiet.
+app.post('/api/booking/draft', async (req, res) => {
+  try {
+    const { rego, email, name, mechanicId, mechanicName, serviceIds, serviceLabels, estimatedTotal } = req.body;
+    const cleanRego = String(rego || '').toUpperCase().trim();
+    const cleanEmail = String(email || '').trim().toLowerCase();
+    if (!cleanRego || !cleanEmail.includes('@') || !Array.isArray(serviceIds) || serviceIds.length === 0)
+      return res.status(400).json({ error: 'rego, email and serviceIds required' });
+    const supabase = getSupabaseAdmin();
+    if (!supabase) return res.status(500).json({ error: 'Database not configured' });
+
+    const { error } = await supabase.from('draft_bookings').upsert({
+      rego: cleanRego,
+      customer_email: cleanEmail,
+      customer_name: name ? String(name).trim() : null,
+      mechanic_id: mechanicId || null,
+      mechanic_name: mechanicName || null,
+      service_ids: serviceIds,
+      service_labels: Array.isArray(serviceLabels) ? serviceLabels : [],
+      estimated_total: Number(estimatedTotal) || null,
+      status: 'draft',
+      reminder_sent_at: null,
+      updated_at: new Date().toISOString(),
+    }, { onConflict: 'rego,customer_email' });
+    if (error) {
+      // Table not migrated yet — degrade silently, never block the booking flow
+      if (/does not exist/.test(error.message)) return res.json({ success: false, pending_migration: true });
+      return res.status(500).json({ error: error.message });
+    }
+    res.json({ success: true });
+  } catch (err) {
+    console.error('[booking/draft]', err);
+    res.status(500).json({ error: 'Could not save draft' });
+  }
+});
+
+// GET /api/cron/abandoned-bookings — Vercel cron (every 10 min). Sends ONE
+// recovery email per abandonment: drafts idle 10min-72h, no reminder sent. Guarded by
+// CRON_SECRET when set (Vercel sends it as a Bearer token automatically).
+app.get('/api/cron/abandoned-bookings', async (req, res) => {
+  try {
+    const secret = process.env.CRON_SECRET;
+    if (secret && req.headers.authorization !== `Bearer ${secret}`)
+      return res.status(401).json({ error: 'Unauthorized' });
+    const supabase = getSupabaseAdmin();
+    const transporter = getMailTransporter();
+    if (!supabase || !transporter) return res.status(500).json({ error: 'Not configured' });
+
+    const now = Date.now();
+    const idleSince = new Date(now - 10 * 60 * 1000).toISOString();        // quiet ≥ 10 min
+    const notOlderThan = new Date(now - 72 * 60 * 60 * 1000).toISOString(); // drop stale >72h
+    const { data: drafts, error } = await supabase.from('draft_bookings')
+      .select('*')
+      .eq('status', 'draft')
+      .is('reminder_sent_at', null)
+      .lt('updated_at', idleSince)
+      .gt('updated_at', notOlderThan)
+      .limit(20);
+    if (error) {
+      if (/does not exist/.test(error.message)) return res.json({ sent: 0, pending_migration: true });
+      return res.status(500).json({ error: error.message });
+    }
+
+    let sent = 0;
+    for (const d of drafts ?? []) {
+      const firstName = (d.customer_name || '').split(' ')[0] || 'there';
+      const mechName = d.mechanic_name || 'Torqued';
+      const labels: string[] = Array.isArray(d.service_labels) && d.service_labels.length
+        ? d.service_labels : (Array.isArray(d.service_ids) ? d.service_ids : []);
+      const jobsList = labels.join(', ');
+      // 7-day resume token → lands the customer straight back in their garage
+      const link = `https://torqued.site/customer?vt=${makeMagicToken(d.rego, 7 * 24 * 60 * 60 * 1000)}`;
+      try {
+        await transporter.sendMail({
+          from: process.env.SMTP_FROM || '"Torqued" <torquedapp.nz@gmail.com>',
+          to: d.customer_email,
+          replyTo: 'hello@torqued.site',
+          subject: `${firstName}, Secure your service with ${mechName} today!`,
+          html: generateAbandonedBookingEmailHtml(firstName, jobsList, link),
+        });
+        await supabase.from('draft_bookings')
+          .update({ status: 'emailed', reminder_sent_at: new Date().toISOString() })
+          .eq('id', d.id);
+        sent++;
+      } catch (e) {
+        console.warn('[cron/abandoned] send failed for', d.customer_email, (e as Error)?.message);
+      }
+    }
+    res.json({ sent, scanned: drafts?.length ?? 0 });
+  } catch (err) {
+    console.error('[cron/abandoned-bookings]', err);
+    res.status(500).json({ error: 'Cron failed' });
   }
 });
 

@@ -2,6 +2,9 @@
   "version": 2,
   "buildCommand": "vite build",
   "outputDirectory": "dist",
+  "crons": [
+    { "path": "/api/cron/abandoned-bookings", "schedule": "*/10 * * * *" }
+  ],
   "rewrites": [
     { "source": "/api/:path*", "destination": "/api/index" },
     { "source": "/app-paid", "destination": "/api/index" },

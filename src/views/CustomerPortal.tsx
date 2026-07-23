@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import { Search, MapPin, ChevronRight, Info, Lock, CheckCircle2, Star, Calendar, CreditCard, Car, History, Wrench, AlertTriangle, Plus, Edit2, ArrowLeft, Clock, Sun, Moon, Monitor, Download, Ticket, Mail, Send, Smartphone, X, Upload, Sparkles, Camera, Settings, Trash2, Repeat } from 'lucide-react';
 import { jsPDF } from 'jspdf';
@@ -1888,6 +1888,37 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
     }
     return t;
   }, [selectedServices, vehiclePrices, addWaterPump, waterPump]);
+
+  // Abandoned-booking draft: once we know who the customer is (email), what
+  // they want (jobs) and with whom (mechanic), save a draft server-side so a
+  // recovery email can nudge them if they never finish. Debounced; re-saving
+  // on any change resets the server's reminder clock. Drafts are invisible to
+  // mechanics — only a completed (paid) booking notifies the workshop.
+  const draftSavedKeyRef = useRef<string>('');
+  useEffect(() => {
+    const email = (customerEmail || '').trim();
+    if (!rego || !email.includes('@') || selectedServices.length === 0 || !selectedMechanic?.id) return;
+    const key = [rego, email, selectedMechanic.id, [...selectedServices].sort().join(','), totalPrice].join('|');
+    if (key === draftSavedKeyRef.current) return;
+    const t = setTimeout(() => {
+      draftSavedKeyRef.current = key;
+      fetch('/api/booking/draft', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          rego: rego.toUpperCase().trim(),
+          email,
+          name: userName || '',
+          mechanicId: selectedMechanic.id,
+          mechanicName: selectedMechanic.name,
+          serviceIds: selectedServices,
+          serviceLabels: selectedServices.map(id => SERVICES.find(s => s.id === id)?.name || id),
+          estimatedTotal: totalPrice,
+        }),
+      }).catch(() => {});
+    }, 2500);
+    return () => clearTimeout(t);
+  }, [rego, customerEmail, userName, selectedMechanic, selectedServices, totalPrice]);
 
   const handleConfirmOTP = async () => {
     if (otpCode.trim().length !== 6) {
