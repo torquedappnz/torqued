@@ -86,7 +86,12 @@ function getSupabaseAdmin() {
 // line, Diagnostic Inspection and PPI are fixed flat fees, and Transmission/
 // Differential already bake their own fee into their price calc. Every other
 // priced service (cambelt, brakes, spark plugs, WOF, etc.) gets the fee added.
-const SHOP_FEE_EXCLUDED_SERVICES = new Set(['oil', 'full', 'diag_inspection', 'ppi', 'transmission', 'differential']);
+const SHOP_FEE_EXCLUDED_SERVICES = new Set(['oil', 'full', 'diag_inspection', 'ppi', 'transmission', 'differential', 'battery']);
+// Battery swap is a 15-minute job (terminals off, swap, terminals on, clear
+// codes) — never the 45min the generic tier tables would round up to — and
+// carries no shop fee, just the same $10 freight/sundries fee as an oil change.
+const BATTERY_LABOUR_HRS = 0.25;
+const BATTERY_FREIGHT_FEE = 10;
 
 // Maps a customer-facing SERVICES id (src/constants.ts) to the part_categories
 // slug that represents the part it consumes. Shared by the reorder-queue
@@ -4877,8 +4882,9 @@ app.get('/api/fleet-prices', async (req, res) => {
             const hoursRow = jobTimesMap.get(`${jobSlug}|${tier}`) ?? jobTimesMap.get(`${jobSlug}|mid`);
             if (!partsRow || !hoursRow) continue;
 
+            const isBattery = svcId === 'battery';
             const hh = Number(hoursRow.hours_high) || 0;
-            const chargedHrs = Math.ceil(hh * 4) / 4;
+            const chargedHrs = isBattery ? BATTERY_LABOUR_HRS : Math.ceil(hh * 4) / 4;
             const jobBodyMult = exemptJobSlugs.has(jobSlug) ? 1 : bodyMultiplier;
             const labour = chargedHrs > 0 ? Math.round(chargedHrs * efLabourRate * jobBodyMult) : 0;
             const hrsLabel = chargedHrs > 0 ? String(chargedHrs % 1 === 0 ? chargedHrs.toFixed(0) : chargedHrs.toFixed(2).replace(/0+$/, '')) : null;
@@ -4886,12 +4892,14 @@ app.get('/api/fleet-prices', async (req, res) => {
             // tier_parts_reference is ex-GST
             const partsLow = Math.round(Number(partsRow.part_cost_low_ex_gst) * 1.15);
             const partsHigh = Math.round(Number(partsRow.part_cost_high_ex_gst) * 1.15);
+            const fee = isBattery ? BATTERY_FREIGHT_FEE : 0;
 
             efPrices[svcId] = {
-              low: partsLow + labour, high: partsHigh + labour,
-              midpoint: Math.round((partsLow + partsHigh) / 2) + labour,
+              low: partsLow + labour + fee, high: partsHigh + labour + fee,
+              midpoint: Math.round((partsLow + partsHigh) / 2) + labour + fee,
               partsLow, partsHigh, labourLow: labour, labourHigh: labour, labourHours: hrsLabel,
               fromTierReference: true,
+              ...(isBattery ? { feeType: 'freight', feeAmount: BATTERY_FREIGHT_FEE } : {}),
             };
           }
           // Rear rotor+pad combo has no dedicated reference row — front-axle combo cost
@@ -5299,6 +5307,21 @@ app.get('/api/fleet-prices', async (req, res) => {
         labourLow: lLow, labourHigh: lHigh,
         labourHours: lHours,
       };
+    }
+
+    // Battery swap: fixed 15min labour + $10 freight, no shop fee (see
+    // SHOP_FEE_EXCLUDED_SERVICES) — never the ~45min the generic labour_times
+    // rows round up to.
+    if (prices['battery']) {
+      const batteryLabour = Math.round(BATTERY_LABOUR_HRS * NZD_LABOUR_RATE);
+      prices['battery'].labourLow = batteryLabour;
+      prices['battery'].labourHigh = batteryLabour;
+      prices['battery'].labourHours = '0.25';
+      prices['battery'].low = prices['battery'].partsLow + batteryLabour + BATTERY_FREIGHT_FEE;
+      prices['battery'].high = prices['battery'].partsHigh + batteryLabour + BATTERY_FREIGHT_FEE;
+      prices['battery'].midpoint = Math.round((prices['battery'].low + prices['battery'].high) / 2);
+      prices['battery'].feeType = 'freight';
+      prices['battery'].feeAmount = BATTERY_FREIGHT_FEE;
     }
 
     // Brake pad jobs: enforce 2.25hrs to include rotor machining time

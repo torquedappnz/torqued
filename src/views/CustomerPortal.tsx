@@ -1143,6 +1143,9 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
   // mechanic via the same endpoint (passing ?mechanic=<id>) rather than reusing one
   // generic total for every card.
   const [mechanicPrices, setMechanicPrices] = useState<Record<string, number>>({});
+  // Confirmed variant changed (picker OR auto-detect) → every cached card quote
+  // was priced against the wrong vehicle. Drop the cache so cards reprice.
+  useEffect(() => { setMechanicPrices({}); }, [vehicleModelSpec?.id]);
   useEffect(() => {
     if (!rego || mechanicsByDistance.length === 0 || selectedServices.length === 0) return;
     let cancelled = false;
@@ -1162,7 +1165,7 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
       } catch { /* keep the generic totalPrice fallback for this card */ }
     });
     return () => { cancelled = true; };
-  }, [rego, mechanicsByDistance, selectedServices, addWaterPump, waterPump]);
+  }, [rego, mechanicsByDistance, selectedServices, addWaterPump, waterPump, vehicleModelSpec?.id, mechanicPrices]);
 
   // "Learn more" expansion on a mechanic-list card — lazy-loads bio/phone (public
   // profile endpoint) and operating hours (availability endpoint) only once per
