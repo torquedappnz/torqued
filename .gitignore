@@ -20,3 +20,6 @@ npm-debug.log*
 .vscode/
 .idea/
 .vercel
+.claude/launch.json
+Torqued_*_REVIEW.xlsx
+Torqued_Fleet_Data_Audit.pdf
