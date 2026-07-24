@@ -1892,16 +1892,19 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
     return t;
   }, [selectedServices, vehiclePrices, addWaterPump, waterPump]);
 
-  // Abandoned-booking draft: once we know who the customer is (email), what
-  // they want (jobs) and with whom (mechanic), save a draft server-side so a
-  // recovery email can nudge them if they never finish. Debounced; re-saving
-  // on any change resets the server's reminder clock. Drafts are invisible to
-  // mechanics — only a completed (paid) booking notifies the workshop.
+  // Abandoned-booking draft: once we know who the customer is (name + email),
+  // what they want (jobs) and with whom (mechanic), save a draft server-side
+  // so a recovery email can nudge them if they never finish. Debounced;
+  // re-saving on any change resets the server's reminder clock. Drafts are
+  // invisible to mechanics — only a completed (paid) booking notifies the
+  // workshop. Requiring a name (not just email) means the recovery email can
+  // always greet the customer by name — never a generic fallback.
   const draftSavedKeyRef = useRef<string>('');
   useEffect(() => {
     const email = (customerEmail || '').trim();
-    if (!rego || !email.includes('@') || selectedServices.length === 0 || !selectedMechanic?.id) return;
-    const key = [rego, email, selectedMechanic.id, [...selectedServices].sort().join(','), totalPrice].join('|');
+    const name = (userName || '').trim();
+    if (!rego || !email.includes('@') || !name || selectedServices.length === 0 || !selectedMechanic?.id) return;
+    const key = [rego, email, name, selectedMechanic.id, [...selectedServices].sort().join(','), totalPrice].join('|');
     if (key === draftSavedKeyRef.current) return;
     const t = setTimeout(() => {
       draftSavedKeyRef.current = key;
@@ -1911,7 +1914,7 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
         body: JSON.stringify({
           rego: rego.toUpperCase().trim(),
           email,
-          name: userName || '',
+          name,
           mechanicId: selectedMechanic.id,
           mechanicName: selectedMechanic.name,
           serviceIds: selectedServices,

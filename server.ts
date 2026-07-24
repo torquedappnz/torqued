@@ -544,13 +544,13 @@ app.post('/api/bookings/persist', async (req, res) => {
 // table (draft_bookings) and are invisible to mechanics — the mechanic only
 // learns of the job when the booking converts to a real paid one.
 
-function generateAbandonedBookingEmailHtml(firstName: string, jobsList: string, link: string): string {
+function generateAbandonedBookingEmailHtml(firstName: string, jobsList: string, vehicleLabel: string, link: string): string {
   return emailWrap(`<tr><td style="padding:36px 32px;">
 <span style="display:inline-block;background:rgba(255,24,0,.08);color:${EMAIL_RED};font-size:9px;font-weight:900;letter-spacing:2px;text-transform:uppercase;padding:5px 12px;border-radius:6px;font-family:${EMAIL_BODY_FONT};">FINISH YOUR BOOKING</span>
 <div style="margin:18px 0 0;"></div>
 ${emailPara(`Kia Ora <strong>${firstName}</strong>,`)}
 ${emailPara(`Thanks for choosing Torqued! We noticed you started your booking but haven&rsquo;t completed it yet.`)}
-${emailPara(`Your spot isn&rsquo;t confirmed until your booking is finished, and we&rsquo;d love to get your <strong style="color:${EMAIL_DARK};">${jobsList}</strong> sorted. Completing your booking only takes a minute.`)}
+${emailPara(`Your spot isn&rsquo;t confirmed until your booking is finished, and we&rsquo;d love to get your <strong style="color:${EMAIL_DARK};">${jobsList}</strong> sorted${vehicleLabel ? ` on your <strong style="color:${EMAIL_DARK};">${vehicleLabel}</strong>` : ''}. Completing your booking only takes a minute.`)}
 ${emailPara(`If you have any questions or need a hand with the process, simply reply to this email and we&rsquo;ll be happy to help.`)}
 <div style="text-align:center;margin:24px 0;"><a href="${link}" style="display:inline-block;background:${EMAIL_RED};color:#fff;font-family:${EMAIL_TITLE_FONT};font-size:13px;font-weight:900;text-transform:uppercase;letter-spacing:1px;text-decoration:none;padding:14px 34px;border-radius:12px;">Complete My Booking</a></div>
 ${emailPara(`We look forward to seeing you soon!`)}
@@ -566,15 +566,18 @@ app.post('/api/booking/draft', async (req, res) => {
     const { rego, email, name, mechanicId, mechanicName, serviceIds, serviceLabels, estimatedTotal } = req.body;
     const cleanRego = String(rego || '').toUpperCase().trim();
     const cleanEmail = String(email || '').trim().toLowerCase();
-    if (!cleanRego || !cleanEmail.includes('@') || !Array.isArray(serviceIds) || serviceIds.length === 0)
-      return res.status(400).json({ error: 'rego, email and serviceIds required' });
+    const cleanName = String(name || '').trim();
+    // Name is required (not just email) so the recovery email can always greet
+    // the customer by name — never a generic "there" fallback.
+    if (!cleanRego || !cleanEmail.includes('@') || !cleanName || !Array.isArray(serviceIds) || serviceIds.length === 0)
+      return res.status(400).json({ error: 'rego, name, email and serviceIds required' });
     const supabase = getSupabaseAdmin();
     if (!supabase) return res.status(500).json({ error: 'Database not configured' });
 
     const { error } = await supabase.from('draft_bookings').upsert({
       rego: cleanRego,
       customer_email: cleanEmail,
-      customer_name: name ? String(name).trim() : null,
+      customer_name: cleanName,
       mechanic_id: mechanicId || null,
       mechanic_name: mechanicName || null,
       service_ids: serviceIds,
@@ -623,8 +626,22 @@ async function sweepAbandonedDrafts(): Promise<{ sent: number; scanned: number; 
     return { sent: 0, scanned: 0 };
   }
 
+  // Batch-fetch make/model for every draft's rego so the email can name the
+  // actual vehicle ("Volkswagen Golf (JPG343)"), not just the rego alone.
+  const regos = [...new Set((drafts ?? []).map(d => d.rego).filter(Boolean))];
+  const { data: vehicleRows } = regos.length
+    ? await supabase.from('vehicles').select('rego, make, model').in('rego', regos)
+    : { data: [] as any[] };
+  const vehicleByRego = new Map<string, { make: string; model: string }>(
+    (vehicleRows ?? []).map((v: any) => [v.rego, { make: v.make, model: v.model }])
+  );
+
   let sent = 0;
   for (const d of drafts ?? []) {
+    // No name on file — never send a "Kia Ora there" email. Leave the draft
+    // untouched so a later sweep retries once the name is captured.
+    if (!d.customer_name || !String(d.customer_name).trim()) continue;
+
     // Claim the row before sending — if another instance got here first,
     // zero rows come back and we skip.
     const { data: claimed } = await supabase.from('draft_bookings')
@@ -633,11 +650,13 @@ async function sweepAbandonedDrafts(): Promise<{ sent: number; scanned: number; 
       .select('id');
     if (!claimed?.length) continue;
 
-    const firstName = (d.customer_name || '').split(' ')[0] || 'there';
+    const firstName = String(d.customer_name).trim().split(' ')[0];
     const mechName = d.mechanic_name || 'Torqued';
     const labels: string[] = Array.isArray(d.service_labels) && d.service_labels.length
       ? d.service_labels : (Array.isArray(d.service_ids) ? d.service_ids : []);
     const jobsList = labels.join(', ');
+    const v = vehicleByRego.get(d.rego);
+    const vehicleLabel = v ? `${titleCase(v.make)} ${titleCase(v.model)} (${d.rego})` : d.rego;
     // 7-day resume token → lands the customer straight back in their garage
     const link = `https://torqued.site/customer?vt=${makeMagicToken(d.rego, 7 * 24 * 60 * 60 * 1000)}`;
     try {
@@ -646,7 +665,7 @@ async function sweepAbandonedDrafts(): Promise<{ sent: number; scanned: number; 
         to: d.customer_email,
         replyTo: 'hello@torqued.site',
         subject: `${firstName}, Secure your service with ${mechName} today!`,
-        html: generateAbandonedBookingEmailHtml(firstName, jobsList, link),
+        html: generateAbandonedBookingEmailHtml(firstName, jobsList, vehicleLabel, link),
       });
       sent++;
     } catch (e) {
