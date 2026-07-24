@@ -496,35 +496,69 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
   };
 
   // Build & download a branded TAX INVOICE for a paid job (from its stored quote_items)
+  // Per-service parts/labour/fee breakdown for a fleet-prices entry — mirrors
+  // the customer-facing Job Breakdown card so a mechanic's own invoice export
+  // shows the same itemisation the customer saw, not one flat total per job.
+  const buildServiceBreakdown = (id: string, fp: any): { label: string; amount: number }[] => {
+    if (!fp) return [];
+    const lines: { label: string; amount: number }[] = [];
+    const isConsumableService = id === 'oil' || id === 'full' || id === 'transmission';
+    if (isConsumableService && fp.filterCostHigh !== undefined) {
+      lines.push({ label: `${id === 'transmission' ? 'Transmission fluid' : 'Engine oil'}${fp.fluidCapacityL ? ` (${fp.fluidCapacityL}L)` : ''}`, amount: fp.fluidCostHigh });
+      if (fp.gearOilCostHigh > 0) {
+        lines.push({ label: `${fp.gearOilType || 'Final drive gear oil'}${fp.gearOilCapacityL ? ` (${fp.gearOilCapacityL}L)` : ''}`, amount: fp.gearOilCostHigh });
+      }
+      lines.push({ label: fp.filterName || 'Filter', amount: fp.filterCostHigh });
+      if (fp.labourLow > 0) lines.push({ label: `Labour${fp.labourHours ? ` (${fp.labourHours} hrs)` : ''}`, amount: fp.labourLow });
+      if (fp.feeAmount > 0) lines.push({ label: fp.feeType === 'shop' ? 'Shop fee' : 'Freight', amount: fp.feeAmount });
+      return lines;
+    }
+    const isFluid = id === 'transmission' || id === 'brake_fluid' || id === 'coolant_flush';
+    if (isFluid && fp.fluidType) {
+      lines.push({ label: `Fluid (${fp.fluidType}${fp.fluidCapacityL ? ` · ${fp.fluidCapacityL}L` : ''})`, amount: fp.fluidCostHigh ?? fp.partsHigh });
+    } else if (fp.partsLow > 0) {
+      lines.push({ label: 'Parts', amount: fp.partsHigh });
+    }
+    if (fp.labourLow > 0) lines.push({ label: `Labour${fp.labourHours ? ` (${fp.labourHours} hrs)` : ''}`, amount: fp.labourLow });
+    if (fp.shopFee > 0) lines.push({ label: 'Shop fee', amount: fp.shopFee });
+    else if (fp.feeAmount > 0) lines.push({ label: fp.feeType === 'shop' ? 'Shop fee' : 'Freight', amount: fp.feeAmount });
+    if ((id === 'brake_fluid' || id === 'coolant_flush') && fp.sundries > 0) lines.push({ label: 'Sundries', amount: fp.sundries });
+    return lines;
+  };
+
   const exportInvoice = async (job: any) => {
     const qi = job.quote_items || {};
     let parts = Array.isArray(qi.parts) ? qi.parts.filter((p: any) => p.name) : [];
     const labourTotal = (qi.labourHours || 0) * (qi.labourRate || 0);
     const otherList = Array.isArray(qi.other) ? qi.other.filter((o: any) => o.name) : [];
     const total = parseFloat(job.quoted_price ?? job.total_price) || 0;
+    let services: { name: string; total: number; lines: { label: string; amount: number }[] }[] =
+      Array.isArray(qi.services) ? qi.services.filter((s: any) => s.name) : [];
 
     // Older/manually-created bookings don't always carry a quote_items breakdown.
     // Rather than print blank prices next to each service, re-derive per-service
-    // prices from live fleet pricing (or split the known total evenly) so every
-    // invoice is always itemised.
-    if (parts.length === 0 && labourTotal === 0 && (job.service_ids || []).length > 0) {
+    // prices (with the same parts/labour/fee itemisation) from live fleet
+    // pricing — falling back to an even split of the known total only when a
+    // service has no fleet price at all.
+    if (services.length === 0 && parts.length === 0 && labourTotal === 0 && (job.service_ids || []).length > 0) {
       const svcIds: string[] = job.service_ids;
       const svcNames = svcIds.map((id: string) => SERVICES.find(s => s.id === id)?.name || id);
       let priced: Record<string, any> = {};
       if (job.vehicle_rego) {
         try {
           const r = await fetch(`/api/fleet-prices?rego=${encodeURIComponent(job.vehicle_rego)}`);
-          if (r.ok) priced = await r.json();
+          if (r.ok) { const d = await r.json(); priced = d.prices || {}; }
         } catch { /* fall through to even split below */ }
       }
       const known = svcIds.map(id => priced?.[id]?.high).filter((n: any) => typeof n === 'number' && n > 0);
       const knownSum = known.reduce((s: number, n: number) => s + n, 0);
       const unknownCount = svcIds.length - known.length;
       const remainder = Math.max(0, total - knownSum);
-      parts = svcIds.map((id: string, i: number) => {
-        const fp = priced?.[id]?.high;
-        const unitPrice = (typeof fp === 'number' && fp > 0) ? fp : (unknownCount > 0 ? remainder / unknownCount : 0);
-        return { name: svcNames[i], qty: 1, unitPrice };
+      services = svcIds.map((id: string, i: number) => {
+        const fp = priced?.[id];
+        const known2 = typeof fp?.high === 'number' && fp.high > 0;
+        const unitPrice = known2 ? fp.high : (unknownCount > 0 ? remainder / unknownCount : 0);
+        return { name: svcNames[i], total: unitPrice, lines: known2 ? buildServiceBreakdown(id, fp) : [] };
       });
     }
     const isPaid = job.payment_status === 'confirmed';
@@ -568,8 +602,21 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
     doc.text('ITEMISED INVOICE', 15, y); doc.setDrawColor(226, 232, 240); doc.line(15, y + 2, 195, y + 2);
     y += 9; doc.setFontSize(9); doc.setTextColor(21, 4, 2);
     const row = (label: string, amt: string, bold = false) => { doc.setFont('Helvetica', bold ? 'bold' : 'normal'); doc.text(label, 15, y); if (amt) doc.text(amt, 195, y, { align: 'right' }); y += 6.5; };
+    const subRow = (label: string, amt: number) => {
+      doc.setFont('Helvetica', 'normal'); doc.setFontSize(8); doc.setTextColor(110, 110, 110);
+      doc.text(label, 20, y); doc.text(`$${Number(amt).toFixed(2)}`, 195, y, { align: 'right' });
+      y += 4.8; doc.setFontSize(9); doc.setTextColor(21, 4, 2);
+    };
 
-    if (parts.length > 0 || labourTotal > 0) {
+    if (services.length > 0) {
+      services.forEach((s) => {
+        row(s.name, `$${Number(s.total || 0).toFixed(2)}`, true);
+        (s.lines || []).forEach((ln) => subRow(ln.label, ln.amount));
+        y += 1.5;
+      });
+      otherList.forEach((o: any) => row(o.name, `$${Number(o.amount || 0).toFixed(2)}`));
+      if (qi.discount > 0) row('Discount', `-$${Number(qi.discount).toFixed(2)}`);
+    } else if (parts.length > 0 || labourTotal > 0) {
       parts.forEach((p: any) => row(`${p.name}${p.qty > 1 ? '  x' + p.qty : ''}`, `$${((p.qty || 1) * (p.unitPrice || 0)).toFixed(2)}`));
       if (labourTotal > 0) row(`Labour (${qi.labourHours}h @ $${qi.labourRate}/hr)`, `$${labourTotal.toFixed(2)}`);
       otherList.forEach((o: any) => row(o.name, `$${Number(o.amount || 0).toFixed(2)}`));

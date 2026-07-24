@@ -769,6 +769,7 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
     if (job.date) { const d = new Date(job.date); bookingDateStr = isNaN(d.getTime()) ? String(job.date) : d.toLocaleDateString('en-NZ', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' }); }
 
     const parts = qi && Array.isArray(qi.parts) ? qi.parts.filter((p: any) => p.name) : [];
+    const services = qi && Array.isArray(qi.services) ? qi.services.filter((s: any) => s.name) : [];
     const labourTotal = qi ? (qi.labourHours || 0) * (qi.labourRate || 0) : 0;
     const other = qi && Array.isArray(qi.other) ? qi.other.filter((o: any) => o.name || o.label) : [];
     const shopFee = qi ? Number(qi.shopFee) || 0 : 0;
@@ -804,11 +805,28 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
 
     let y = 72;
     const row = (label: string, amt: string, bold = false) => { doc.setFont('Helvetica', bold ? 'bold' : 'normal'); const ll = doc.splitTextToSize(label, 150); doc.text(ll, 15, y); if (amt) doc.text(amt, 195, y, { align: 'right' }); y += 6.5 + (ll.length - 1) * 4.5; };
+    // Indented, muted sub-line under a service's bold total — parts/fluid/labour/fee.
+    const subRow = (label: string, amt: number) => {
+      doc.setFont('Helvetica', 'normal'); doc.setFontSize(8); doc.setTextColor(110, 110, 110);
+      const ll = doc.splitTextToSize(label, 138); doc.text(ll, 20, y); doc.text(`$${Number(amt).toFixed(2)}`, 195, y, { align: 'right' });
+      y += 4.8 + (ll.length - 1) * 4; doc.setFontSize(9); doc.setTextColor(21, 4, 2);
+    };
     const heading = (label: string) => { doc.setFont('Helvetica', 'bold'); doc.setFontSize(10); doc.setTextColor(255, 24, 0); doc.text(label, 15, y); doc.setDrawColor(226, 232, 240); doc.line(15, y + 2, 195, y + 2); y += 9; doc.setFontSize(9); doc.setTextColor(21, 4, 2); };
 
     // ── Itemised ──
     heading(isInvoice ? 'ITEMISED INVOICE' : 'ITEMISED QUOTE');
-    if (qi) {
+    if (services.length > 0) {
+      // Per-service breakdown (parts/fluid/labour/shop fee or freight) — same
+      // itemisation the customer saw on the Job Breakdown card, not one flat
+      // total per job.
+      services.forEach((s: any) => {
+        row(s.name, `$${Number(s.total || 0).toFixed(2)}`, true);
+        (s.lines || []).forEach((ln: any) => subRow(ln.label, ln.amount));
+        y += 1.5;
+      });
+      other.forEach((o: any) => row(o.name || o.label, `$${Number(o.amount || 0).toFixed(2)}`));
+      if (discount > 0) row('Discount', `-$${discount.toFixed(2)}`);
+    } else if (qi) {
       parts.forEach((p: any) => row(`${p.name}  x${p.qty || 1}`, `$${((p.qty || 1) * (p.unitPrice || 0)).toFixed(2)}`));
       if (labourTotal > 0) row(`Labour (${qi.labourHours}h @ $${qi.labourRate}/hr)`, `$${labourTotal.toFixed(2)}`);
       other.forEach((o: any) => row(o.name || o.label, `$${Number(o.amount || 0).toFixed(2)}`));
@@ -1896,6 +1914,38 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
     const v = vehiclePrices[id];
     if (typeof v === 'number' && v > 0) return v;
     return SERVICES.find(s => s.id === id)?.basePrice || 0;
+  };
+
+  // Per-service parts/labour/fee breakdown for a fleet-prices entry, mirroring
+  // the live Job Breakdown card exactly. Captured into the booking's
+  // quote_items at booking time (fleetPricesRaw isn't available later when a
+  // stored job is reopened), so the quote/invoice PDF can render the same
+  // itemised lines instead of one flat total per service.
+  const buildServiceBreakdown = (id: string, fp: any): { label: string; amount: number }[] => {
+    if (!fp) return [];
+    const lines: { label: string; amount: number }[] = [];
+    const isConsumableService = id === 'oil' || id === 'full' || id === 'transmission';
+    if (isConsumableService && fp.filterCostHigh !== undefined) {
+      lines.push({ label: `${id === 'transmission' ? 'Transmission fluid' : 'Engine oil'}${fp.fluidCapacityL ? ` (${fp.fluidCapacityL}L)` : ''}`, amount: fp.fluidCostHigh });
+      if (fp.gearOilCostHigh > 0) {
+        lines.push({ label: `${fp.gearOilType || 'Final drive gear oil'}${fp.gearOilCapacityL ? ` (${fp.gearOilCapacityL}L)` : ''}`, amount: fp.gearOilCostHigh });
+      }
+      lines.push({ label: fp.filterName || 'Filter', amount: fp.filterCostHigh });
+      if (fp.labourLow > 0) lines.push({ label: `Labour${fp.labourHours ? ` (${fp.labourHours} hrs)` : ''}`, amount: fp.labourLow });
+      if (fp.feeAmount > 0) lines.push({ label: fp.feeType === 'shop' ? 'Shop fee' : 'Freight', amount: fp.feeAmount });
+      return lines;
+    }
+    const isFluid = id === 'transmission' || id === 'brake_fluid' || id === 'coolant_flush';
+    if (isFluid && fp.fluidType) {
+      lines.push({ label: `Fluid (${fp.fluidType}${fp.fluidCapacityL ? ` · ${fp.fluidCapacityL}L` : ''})`, amount: fp.fluidCostHigh ?? fp.partsHigh });
+    } else if (fp.partsLow > 0) {
+      lines.push({ label: 'Parts', amount: fp.partsHigh });
+    }
+    if (fp.labourLow > 0) lines.push({ label: `Labour${fp.labourHours ? ` (${fp.labourHours} hrs)` : ''}`, amount: fp.labourLow });
+    if (fp.shopFee > 0) lines.push({ label: 'Shop fee', amount: fp.shopFee });
+    else if (fp.feeAmount > 0) lines.push({ label: fp.feeType === 'shop' ? 'Shop fee' : 'Freight', amount: fp.feeAmount });
+    if ((id === 'brake_fluid' || id === 'coolant_flush') && fp.sundries > 0) lines.push({ label: 'Sundries', amount: fp.sundries });
+    return lines;
   };
 
   // Have the real per-vehicle prices arrived from /api/fleet-prices yet?
@@ -3094,11 +3144,30 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
     const catalogParts = catalogIds
       .filter(id => id !== 'thermostat_housing')
       .map(id => ({ name: serviceDisplayName(id, SERVICES.find(s => s.id === id)?.name || id), qty: 1, unitPrice: priceFor(id) }));
+    // Per-service parts/labour/fee breakdown (see buildServiceBreakdown) so the
+    // quote/invoice PDF can itemise each job instead of one flat line — same
+    // data the customer already saw on the Job Breakdown card.
+    const catalogServices = catalogIds
+      .filter(id => id !== 'thermostat_housing')
+      .map(id => ({
+        name: serviceDisplayName(id, SERVICES.find(s => s.id === id)?.name || id),
+        total: priceFor(id),
+        lines: buildServiceBreakdown(id, fleetPricesRaw[id]),
+      }));
     if (addWaterPump && waterPump && (selectedServices.includes('timing') || selectedServices.includes('timing_chain_full'))) {
       catalogParts.push({ name: 'Water Pump & Thermostat Housing', qty: 1, unitPrice: waterPump.high });
+      catalogServices.push({
+        name: 'Water Pump & Thermostat Housing', total: waterPump.high,
+        lines: [
+          { label: 'Parts (pump, thermostat housing, auxiliary belt)', amount: waterPump.partsHigh },
+          { label: 'Coolant', amount: waterPump.coolantHigh },
+          { label: 'Labour', amount: waterPump.labourExtra },
+        ],
+      });
     }
     const catalogQuoteItems = {
       parts: catalogParts,
+      services: catalogServices,
       labourHours: 0,
       labourRate: 0,
       // Each part's unitPrice (priceFor(id)) already includes that service's own
@@ -5058,6 +5127,12 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                               )}
                               {fp.shopFee > 0 && (
                                 <div className="flex justify-between text-xs text-muted"><span>Shop fee</span><span>${fp.shopFee}</span></div>
+                              )}
+                              {!fp.shopFee && fp.feeAmount > 0 && (
+                                <div className="flex justify-between text-xs text-muted">
+                                  <span>{fp.feeType === 'shop' ? 'Shop fee' : 'Freight'}</span>
+                                  <span>${fp.feeAmount}</span>
+                                </div>
                               )}
                               {(id === 'brake_fluid' || id === 'coolant_flush') && fp.sundries > 0 && (
                                 <div className="flex justify-between text-xs text-muted"><span>Sundries</span><span>${fp.sundries}</span></div>
