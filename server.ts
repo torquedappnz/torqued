@@ -251,12 +251,12 @@ const otpStore = new Map<string, { code: string; expiresAt: number }>();
 // Magic-link tokens for customer verification: token -> { rego, expiresAt }
 // Stateless signed magic tokens (work across serverless instances — no shared memory)
 const MAGIC_SECRET = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.ADMIN_PASSWORD || 'torqued-magic-secret';
-function makeMagicToken(rego: string, ttlMs: number = 15 * 60 * 1000): string {
-  const payload = Buffer.from(JSON.stringify({ rego, exp: Date.now() + ttlMs })).toString('base64url');
+function makeMagicToken(rego: string, ttlMs: number = 15 * 60 * 1000, extra?: { resumeDraftId?: string }): string {
+  const payload = Buffer.from(JSON.stringify({ rego, exp: Date.now() + ttlMs, ...extra })).toString('base64url');
   const sig = crypto.createHmac('sha256', MAGIC_SECRET).update(payload).digest('base64url');
   return `${payload}.${sig}`;
 }
-function readMagicToken(token: string): { rego: string } | null {
+function readMagicToken(token: string): { rego: string; resumeDraftId?: string } | null {
   try {
     const [payload, sig] = token.split('.');
     if (!payload || !sig) return null;
@@ -264,7 +264,7 @@ function readMagicToken(token: string): { rego: string } | null {
     if (sig !== expect) return null;
     const data = JSON.parse(Buffer.from(payload, 'base64url').toString());
     if (Date.now() > data.exp) return null;
-    return { rego: data.rego };
+    return { rego: data.rego, resumeDraftId: data.resumeDraftId };
   } catch { return null; }
 }
 
@@ -658,7 +658,10 @@ async function sweepAbandonedDrafts(): Promise<{ sent: number; scanned: number; 
     const v = vehicleByRego.get(d.rego);
     const vehicleLabel = v ? `${titleCase(v.make)} ${titleCase(v.model)} (${d.rego})` : d.rego;
     // 7-day resume token → lands the customer straight back in their garage
-    const link = `https://torqued.site/customer?vt=${makeMagicToken(d.rego, 7 * 24 * 60 * 60 * 1000)}`;
+    // resumeDraftId lets verify-link hand the frontend back everything needed
+    // to resume exactly where they left off (jobs + chosen mechanic), instead
+    // of just landing on the garage dashboard.
+    const link = `https://torqued.site/customer?vt=${makeMagicToken(d.rego, 7 * 24 * 60 * 60 * 1000, { resumeDraftId: d.id })}`;
     try {
       await transporter.sendMail({
         from: process.env.SMTP_FROM || '"Torqued" <torquedapp.nz@gmail.com>',
@@ -1921,7 +1924,27 @@ app.get('/api/customer/verify-link', async (req, res) => {
         .select('rego, make, model, year, variant, mileage, thumbnail').eq('owner_id', ownerId);
       vehicles = rows ?? [];
     }
-    res.json({ success: true, rego: entry.rego, email, ownerId, vehicles });
+
+    // Abandoned-booking recovery link — hand back everything needed to resume
+    // exactly where the customer left off (jobs ticked + mechanic chosen).
+    let resumeDraft: any = null;
+    if (entry.resumeDraftId) {
+      const { data: draft } = await supabase.from('draft_bookings')
+        .select('service_ids, service_labels, mechanic_id, mechanic_name, estimated_total, customer_email, customer_name, status')
+        .eq('id', entry.resumeDraftId).single();
+      if (draft && draft.status !== 'converted' && draft.status !== 'dismissed') {
+        resumeDraft = {
+          serviceIds: draft.service_ids, serviceLabels: draft.service_labels,
+          mechanicId: draft.mechanic_id, mechanicName: draft.mechanic_name,
+          estimatedTotal: draft.estimated_total,
+        };
+        // Draft's own email/name is the reliable source — the vehicle may not
+        // be linked to an owner profile yet (e.g. a still-anonymous checkout).
+        if (!email) email = draft.customer_email;
+      }
+    }
+
+    res.json({ success: true, rego: entry.rego, email, ownerId, vehicles, resumeDraft });
   } catch (err) {
     console.error('[verify-link]', err);
     res.status(500).json({ error: 'Verification failed' });

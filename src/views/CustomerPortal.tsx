@@ -1311,6 +1311,19 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [garageUnlocked, garageVehicles.length, view]);
 
+  // Abandoned-booking recovery: verify-link can hand back the draft the
+  // customer left mid-booking (jobs ticked + mechanic chosen). Landed here
+  // (rather than inline in the verify effect below) so the actual resume —
+  // re-selecting the mechanic — runs once selectedServices has re-rendered
+  // with the resumed jobs, avoiding a stale-closure read of the old (empty)
+  // selectedServices inside chooseMechanic.
+  const [resumeMechanicProfile, setResumeMechanicProfile] = useState<Mechanic | null>(null);
+  useEffect(() => {
+    if (!resumeMechanicProfile || selectedServices.length === 0) return;
+    chooseMechanic(resumeMechanicProfile);
+    setResumeMechanicProfile(null);
+  }, [resumeMechanicProfile, selectedServices]);
+
   // Verify a magic link on load (?vt=token)
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
@@ -1329,8 +1342,24 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
         }
         setRego(d.rego);
         persistCustomerSession({ ownerId: d.ownerId ?? null, email: d.email ?? '', rego: d.rego, vehicles: d.vehicles ?? [] });
-        setView('dashboard');
         await loadVehicleByRego(d.rego);
+
+        // Abandoned-booking recovery link — resume the booking flow itself
+        // (jobs pre-ticked, mechanic pre-selected) instead of the plain garage
+        // dashboard, so "Complete My Booking" actually completes the booking.
+        if (d.resumeDraft?.serviceIds?.length) {
+          setSelectedServices(d.resumeDraft.serviceIds);
+          setView('quote');
+          setStep(2);
+          if (d.resumeDraft.mechanicId) {
+            fetch(`/api/mechanic/public/${encodeURIComponent(d.resumeDraft.mechanicId)}`)
+              .then(r => r.json())
+              .then(mp => { if (mp?.mechanic) setResumeMechanicProfile(mapMechanicRecord(mp.mechanic)); })
+              .catch(() => {});
+          }
+        } else {
+          setView('dashboard');
+        }
       })
       .catch(() => setPlateMatchError('Verification failed. Please try again.'))
       .finally(() => setMagicVerifying(false));
