@@ -1956,6 +1956,36 @@ function hashOtp(code: string): string {
   return crypto.createHash('sha256').update(`${code}:${MAGIC_SECRET}`).digest('hex');
 }
 
+// ── Temporary OTP bypass (break-glass for when verification emails can't be sent) ──
+// A static code that works for every plate is effectively a master key, so it is:
+//   • read from env (OTP_BYPASS_CODE) — never committed to git
+//   • time-boxed: only honoured until OTP_BYPASS_UNTIL (ISO date); unset/expired = off
+//   • audit-logged on every use
+// Remove both env vars (and redeploy) to switch it off early.
+function isOtpBypass(code: string, rego: string): boolean {
+  const secret = process.env.OTP_BYPASS_CODE;
+  const until = Date.parse(process.env.OTP_BYPASS_UNTIL || '');
+  if (!secret || !Number.isFinite(until) || Date.now() > until) return false;
+  const a = Buffer.from(String(code)), b = Buffer.from(secret);
+  if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) return false;
+  console.warn(`[OTP-BYPASS] bypass code used for ${rego}`);
+  return true;
+}
+
+// Per-rego failed-guess limiter (in-memory, best effort across warm instances):
+// 8 wrong codes per 15 min then locked out, so a static or random 6-digit code
+// can't be brute-forced by hammering the endpoint.
+const otpGuesses = new Map<string, { n: number; resetAt: number }>();
+function otpLockedOut(rego: string): boolean {
+  const g = otpGuesses.get(rego);
+  return !!g && Date.now() < g.resetAt && g.n >= 8;
+}
+function otpRecordFailure(rego: string) {
+  const g = otpGuesses.get(rego);
+  if (!g || Date.now() >= g.resetAt) otpGuesses.set(rego, { n: 1, resetAt: Date.now() + 15 * 60 * 1000 });
+  else g.n++;
+}
+
 // Generate + email a 6-digit verification code for a rego, DB-backed (customer_otps).
 // Used everywhere a customer needs to prove ownership of a plate — including brand-new
 // registrations — so the experience (and failure modes: expiry, domain, etc.) is
@@ -2036,21 +2066,26 @@ app.post('/api/customer/verify-code', async (req, res) => {
     const supabase = getSupabaseAdmin();
     if (!supabase) return res.status(500).json({ error: 'Database not configured' });
 
-    const { data: otp } = await supabase.from('customer_otps').select('*').eq('rego', rego).single();
-    if (!otp) return res.status(400).json({ error: 'No code was sent for this plate. Request a new one.' });
-    if (new Date(otp.expires_at).getTime() < Date.now()) {
+    if (otpLockedOut(rego)) return res.status(429).json({ error: 'Too many incorrect attempts. Wait 15 minutes and try again.' });
+    const bypass = isOtpBypass(code, rego);
+    if (!bypass) {
+      const { data: otp } = await supabase.from('customer_otps').select('*').eq('rego', rego).single();
+      if (!otp) return res.status(400).json({ error: 'No code was sent for this plate. Request a new one.' });
+      if (new Date(otp.expires_at).getTime() < Date.now()) {
+        await supabase.from('customer_otps').delete().eq('rego', rego);
+        return res.status(400).json({ error: 'Code expired. Request a new one.' });
+      }
+      if ((otp.attempts ?? 0) >= 5) {
+        await supabase.from('customer_otps').delete().eq('rego', rego);
+        return res.status(429).json({ error: 'Too many attempts. Request a new code.' });
+      }
+      if (otp.code_hash !== hashOtp(code)) {
+        otpRecordFailure(rego);
+        await supabase.from('customer_otps').update({ attempts: (otp.attempts ?? 0) + 1 }).eq('rego', rego);
+        return res.status(401).json({ error: 'Incorrect code. Try again.' });
+      }
       await supabase.from('customer_otps').delete().eq('rego', rego);
-      return res.status(400).json({ error: 'Code expired. Request a new one.' });
     }
-    if ((otp.attempts ?? 0) >= 5) {
-      await supabase.from('customer_otps').delete().eq('rego', rego);
-      return res.status(429).json({ error: 'Too many attempts. Request a new code.' });
-    }
-    if (otp.code_hash !== hashOtp(code)) {
-      await supabase.from('customer_otps').update({ attempts: (otp.attempts ?? 0) + 1 }).eq('rego', rego);
-      return res.status(401).json({ error: 'Incorrect code. Try again.' });
-    }
-    await supabase.from('customer_otps').delete().eq('rego', rego);
 
     const { data: vehicle } = await supabase.from('vehicles').select('owner_id').eq('rego', rego).single();
     let email: string | null = null, name: string | null = null, phone: string | null = null,
@@ -7076,22 +7111,33 @@ app.post('/api/otp/verify', async (req, res) => {
   const supabase = getSupabaseAdmin();
   if (!supabase) return res.status(500).json({ success: false, error: 'Database not configured' });
 
-  const codeHash = hashOtp(String(code).trim());
-  const { data: row } = await supabase
-    .from('customer_otps')
-    .select('rego, email, expires_at, attempts')
-    .eq('rego', formattedRego)
-    .eq('code_hash', codeHash)
-    .maybeSingle();
+  if (otpLockedOut(formattedRego)) {
+    return res.status(429).json({ success: false, error: 'Too many incorrect attempts. Please wait 15 minutes and try again.' });
+  }
 
-  if (!row) return res.json({ success: false, error: 'Incorrect code. Please try again.' });
+  const bypass = isOtpBypass(String(code).trim(), formattedRego);
+  let row: { rego: string; email: string | null; expires_at: string; attempts: number | null } | null = null;
+  if (bypass) {
+    row = { rego: formattedRego, email: null, expires_at: new Date(Date.now() + 60000).toISOString(), attempts: 0 };
+  } else {
+    const codeHash = hashOtp(String(code).trim());
+    const { data } = await supabase
+      .from('customer_otps')
+      .select('rego, email, expires_at, attempts')
+      .eq('rego', formattedRego)
+      .eq('code_hash', codeHash)
+      .maybeSingle();
+    row = data;
+  }
+
+  if (!row) { otpRecordFailure(formattedRego); return res.json({ success: false, error: 'Incorrect code. Please try again.' }); }
   if (new Date(row.expires_at) < new Date()) {
     await supabase.from('customer_otps').delete().eq('rego', formattedRego);
     return res.json({ success: false, error: 'Code has expired. Please request a new one.' });
   }
 
   // Clear after use — one-time code
-  await supabase.from('customer_otps').delete().eq('rego', formattedRego);
+  if (!bypass) await supabase.from('customer_otps').delete().eq('rego', formattedRego);
 
   // Return the verified owner's email, id, and ALL their vehicles (the garage)
   let email: string | null = row.email ?? null;
