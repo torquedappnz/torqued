@@ -873,6 +873,9 @@ function summarisePpi(ppi: { checklist?: any[]; inspector_comments?: string | nu
 async function savePpiToVehicleHistory(supabase: any, ppi: any, workshopName: string) {
   if (!ppi?.rego || !ppi?.id) return;
   const { workDone, notes } = summarisePpi(ppi);
+  // An inspection with nothing checked and no written findings says nothing —
+  // don't add an empty "0 checks" entry to the car's history (or the AI's context).
+  if (/ — 0 checks:/.test(workDone) && !ppi.inspector_comments && !ppi.recommendations) return;
   const marker = `[PPI#${ppi.id}]`;
   const { data: vehicle } = await supabase.from('vehicles').select('owner_id').eq('rego', ppi.rego).maybeSingle();
   const row = {
