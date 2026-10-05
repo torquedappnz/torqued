@@ -822,6 +822,80 @@ app.get('/api/customer/bookings', async (req, res) => {
   }
 });
 
+// ── Pre-purchase inspections ↔ vehicle history ───────────────────────────────
+// A completed PPI is written to vehicle_history against the rego, so it follows
+// the car and feeds every consumer of service history (AI health insights,
+// mechanic chat/quote context, the customer's log + PDF export). It reuses
+// source_type 'torqued_job' (the DB constraint only allows three values) so
+// customers can't edit or delete a workshop's inspection; `source: 'ppi'`
+// marks it as an inspection. The findings are written INTO work_done because
+// most AI consumers only read work_done, not notes.
+function isPpiHistoryRow(h: any): boolean {
+  return h?.source === 'ppi' || /^Pre-purchase inspection/i.test(String(h?.work_done || ''));
+}
+function isPpiOnlyJob(j: any): boolean {
+  const s = j?.service_ids;
+  return Array.isArray(s) && s.length > 0 && s.every((x: string) => x === 'ppi');
+}
+// A completed PPI booking would otherwise show twice: once as the generic
+// booking-derived "ppi" entry and once as the detailed inspection record.
+function dropPpiBookingDuplicates<T>(jobs: T[], history: any[]): T[] {
+  return (history ?? []).some(isPpiHistoryRow) ? jobs.filter(j => !isPpiOnlyJob(j)) : jobs;
+}
+
+function summarisePpi(ppi: { checklist?: any[]; inspector_comments?: string | null; recommendations?: string | null }) {
+  const items: any[] = Array.isArray(ppi.checklist) ? ppi.checklist : [];
+  const kind = (c: any) => {
+    const st = String(c?.status || '').toLowerCase();
+    return st.startsWith('pass') ? 'pass' : st.startsWith('fail') ? 'fail' : st.startsWith('attention') ? 'attention' : 'na';
+  };
+  const label = (c: any) => `${c.item}${c.note ? ` (${String(c.note).trim()})` : ''}`;
+  const fails = items.filter(c => kind(c) === 'fail');
+  const attn = items.filter(c => kind(c) === 'attention');
+  const passes = items.filter(c => kind(c) === 'pass');
+  const checked = fails.length + attn.length + passes.length;
+  let workDone = `Pre-purchase inspection — ${checked} checks: ${passes.length} pass, ${attn.length} attention, ${fails.length} fail`;
+  const issues = [...fails.map(c => `FAIL: ${label(c)}`), ...attn.map(c => `Attention: ${label(c)}`)];
+  if (issues.length) workDone += `. ${issues.join('; ')}`;
+  if (workDone.length > 700) workDone = workDone.slice(0, 697) + '…';
+  const noteParts = [
+    fails.length ? `Failed: ${fails.map(label).join('; ')}` : '',
+    attn.length ? `Needs attention: ${attn.map(label).join('; ')}` : '',
+    passes.length ? `Passed: ${passes.map(c => c.item).join('; ')}` : '',
+    ppi.inspector_comments ? `Inspector comments: ${ppi.inspector_comments}` : '',
+    ppi.recommendations ? `Recommendations: ${ppi.recommendations}` : '',
+  ].filter(Boolean);
+  return { workDone, notes: noteParts.join('\n') };
+}
+
+// Idempotent: re-completing/editing the same inspection updates its history row
+// (matched by the [PPI#<id>] marker in notes) rather than adding a duplicate.
+async function savePpiToVehicleHistory(supabase: any, ppi: any, workshopName: string) {
+  if (!ppi?.rego || !ppi?.id) return;
+  const { workDone, notes } = summarisePpi(ppi);
+  const marker = `[PPI#${ppi.id}]`;
+  const { data: vehicle } = await supabase.from('vehicles').select('owner_id').eq('rego', ppi.rego).maybeSingle();
+  const row = {
+    rego: ppi.rego,
+    owner_id: vehicle?.owner_id ?? null,
+    service_date: String(ppi.completed_at || new Date().toISOString()).slice(0, 10),
+    work_done: workDone,
+    provider: `${workshopName || 'Torqued workshop'} (via Torqued)`,
+    mileage: ppi.mileage ?? null,
+    notes: `${notes}\n${marker}`.slice(0, 4000),
+    source: 'ppi',
+    source_type: 'torqued_job',
+  };
+  const { data: existing } = await supabase.from('vehicle_history').select('id')
+    .eq('rego', ppi.rego).eq('source', 'ppi').like('notes', `%${marker}%`).limit(1);
+  if (existing?.length) {
+    const { ai_summary: _drop, ...update } = row as any;
+    await supabase.from('vehicle_history').update({ ...update, ai_summary: null }).eq('id', existing[0].id);
+  } else {
+    await supabase.from('vehicle_history').insert(row);
+  }
+}
+
 // GET /api/history/:rego — combined, portable service history for a vehicle (follows the rego across mechanics)
 app.get('/api/history/:rego', async (req, res) => {
   try {
@@ -841,7 +915,10 @@ app.get('/api/history/:rego', async (req, res) => {
       const { data: profs } = await supabase.from('profiles').select('id, name').in('id', mechIds);
       mechNames = Object.fromEntries((profs ?? []).map((p: any) => [p.id, p.name]));
     }
-    const enriched = jobsList.map((j: any) => ({ ...j, mechanic_name: mechNames[j.mechanic_id] || 'Torqued workshop' }));
+    const enriched = dropPpiBookingDuplicates(
+      jobsList.map((j: any) => ({ ...j, mechanic_name: mechNames[j.mechanic_id] || 'Torqued workshop' })),
+      imported ?? [],
+    );
     res.json({ imported: imported ?? [], jobs: enriched });
   } catch (err) {
     console.error('[history]', err);
@@ -5845,7 +5922,7 @@ app.post('/api/ai/health-insights', async (req, res) => {
           .order('completed_at', { ascending: false }).limit(10),
       ]);
       const dbHistory: any[] = histRes.data ?? [];
-      const jobHistory = (jobsRes.data ?? []).map((j: any) => {
+      const jobHistory = dropPpiBookingDuplicates(jobsRes.data ?? [], dbHistory).map((j: any) => {
         // Describe the work: standard services, else the quote's parts/notes, else the description.
         const fromServices = ((j.service_ids || []) as string[]).map((id: string) => SERVICE_NAMES[id] || id).join(', ');
         const qi = j.quote_items;
@@ -5931,6 +6008,7 @@ Your job: produce ONLY genuine, vehicle-specific service recommendations. Rules:
    - Coolant: 60,000 km or 3–5 years
 5. Return 3–6 insights. Only include services that are actually due, overdue, or approaching due based on real evidence.
 6. Km calculations: km_since_last = current_km − km_at_last_service. Only mark "overdue" if km_since_last ≥ interval OR time interval is clearly exceeded AND annual mileage confirms the vehicle is actually near the km interval.
+7. Entries starting "Pre-purchase inspection" are independent workshop INSPECTIONS, not services performed. Never treat a "pass" in one as evidence a service was done (e.g. "engine oil condition: pass" is NOT an oil change). DO use their FAIL/Attention findings as known issues at that date and odometer: surface them (e.g. brakes, tyres, rust, leaks, suspension, battery) as due/overdue unless a LATER history entry shows the work was carried out. Mention that the finding comes from the inspection.
 
 Severity:
   "good"    = confirmed recently done, clearly within interval
@@ -6041,6 +6119,16 @@ app.post('/api/mechanic/ppi', async (req, res) => {
     if (id) payload.id = id;
     const { data, error } = await supabase.from('ppi_inspections').upsert(payload, { onConflict: 'id' }).select().single();
     if (error) return res.status(500).json({ error: error.message });
+
+    // Save the completed inspection to the vehicle's history (by rego) so it
+    // follows the car and feeds the AI service-history insights. Best effort —
+    // a history-write problem must never fail the inspection itself.
+    if (complete && data?.rego) {
+      try {
+        const { data: mp } = await supabase.from('profiles').select('name').eq('id', mechanicId).maybeSingle();
+        await savePpiToVehicleHistory(supabase, data, mp?.name || workshopNameIn || '');
+      } catch (histErr) { console.warn('[ppi] history save failed:', (histErr as Error)?.message); }
+    }
 
     // Email customer the completed report
     if (complete && customerEmail) {
@@ -8882,7 +8970,7 @@ async function gatherCustomerDataExport(customerEmail: string) {
 
   // Unify imported/self-reported history with completed Torqued jobs so the
   // Service History section is the full picture, flagged by source.
-  const torquedHistory = bookings
+  const torquedHistory = dropPpiBookingDuplicates(bookings, importedHistory)
     .filter((b: any) => b.status === 'completed')
     .map((b: any) => ({
       rego: b.vehicle_rego, service_date: b.completed_at || b.date, mileage: b.mileage_out,

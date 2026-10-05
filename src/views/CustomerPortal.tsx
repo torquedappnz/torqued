@@ -661,7 +661,7 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
     const doc = new jsPDF({ unit: 'mm', format: 'a4' });
     const marginX = 15;
     const pageWidth = 210, pageHeight = 297;
-    const sourceLabel = (st?: string) => st === 'torqued_job' ? 'Torqued booking' : st === 'ai_autoscan' ? 'Scanned' : 'Manual entry';
+    const sourceLabel = (st?: string, work?: string) => /^pre-purchase inspection/i.test(work || '') ? 'Torqued PPI' : st === 'torqued_job' ? 'Torqued booking' : st === 'ai_autoscan' ? 'Scanned' : 'Manual entry';
     const vehicleDesc = vehicle ? [vehicle.year, vehicle.make, vehicle.model, vehicle.variant || null].filter(Boolean).join(' ') : 'Vehicle';
     const rego = (vehicle?.rego || '').toUpperCase();
 
@@ -712,7 +712,7 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
         rego: `${rego}${carDesc ? ` / ${carDesc}` : ''}`,
         date: item.date || '—',
         provider: item.provider || '—',
-        source: sourceLabel(item.source_type),
+        source: sourceLabel(item.source_type, item.service),
         mileage: item.mileage ? `${Number(item.mileage).toLocaleString()} km` : '—',
         work: item.service || '—',
       };
