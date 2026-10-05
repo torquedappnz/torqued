@@ -1956,16 +1956,20 @@ function hashOtp(code: string): string {
   return crypto.createHash('sha256').update(`${code}:${MAGIC_SECRET}`).digest('hex');
 }
 
-// ── Temporary OTP bypass (break-glass for when verification emails can't be sent) ──
+// ── OTP bypass (static override code, works for every plate) ──
 // A static code that works for every plate is effectively a master key, so it is:
 //   • read from env (OTP_BYPASS_CODE) — never committed to git
-//   • time-boxed: only honoured until OTP_BYPASS_UNTIL (ISO date); unset/expired = off
-//   • audit-logged on every use
-// Remove both env vars (and redeploy) to switch it off early.
+//   • permanent unless OTP_BYPASS_UNTIL (ISO date) is set, in which case it lapses then
+//   • audit-logged on every use, and subject to the per-plate failed-guess lockout
+// Delete OTP_BYPASS_CODE in Vercel (and redeploy) to switch it off.
 function isOtpBypass(code: string, rego: string): boolean {
   const secret = process.env.OTP_BYPASS_CODE;
-  const until = Date.parse(process.env.OTP_BYPASS_UNTIL || '');
-  if (!secret || !Number.isFinite(until) || Date.now() > until) return false;
+  if (!secret) return false;
+  const untilRaw = process.env.OTP_BYPASS_UNTIL;
+  if (untilRaw) {
+    const until = Date.parse(untilRaw);
+    if (!Number.isFinite(until) || Date.now() > until) return false;
+  }
   const a = Buffer.from(String(code)), b = Buffer.from(secret);
   if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) return false;
   console.warn(`[OTP-BYPASS] bypass code used for ${rego}`);
