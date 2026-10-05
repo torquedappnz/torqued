@@ -4571,10 +4571,13 @@ const DQ200_GEAR_OIL_CAPACITY_L = 1;
 const DQ200_GEAR_OIL_LOW = 16, DQ200_GEAR_OIL_HIGH = 30; // $/L, 75W-90 GL-4/5
 const DQ200_LABOUR_HRS = 1.75;
 
-const DIFFERENTIAL_SERVICE_BY_VEHICLE: Record<string, {
+type DiffSpec = {
   tier: 'rear only' | 'front+rear'; capacityL: number; fluidLow: number; fluidHigh: number;
   labourHrs: number; shopFee: number;
-}> = {
+  // Optional extras for systems that aren't a plain gear-oil change (Haldex etc.)
+  system?: 'haldex' | 'quattro-rear'; fluidType?: string; filterLow?: number; filterHigh?: number;
+};
+const DIFFERENTIAL_SERVICE_BY_VEHICLE: Record<string, DiffSpec> = {
   'AUDI_A4_B8_30TDI_08_15': { tier: 'rear only', capacityL: 0.85, fluidLow: 16, fluidHigh: 30, labourHrs: 1.5, shopFee: 25 },
   'AUDI_Q5_8R_30TDI_08_17': { tier: 'rear only', capacityL: 0.85, fluidLow: 16, fluidHigh: 30, labourHrs: 1.5, shopFee: 25 },
   'AUDI_Q5_FY_20TFSI_17_NOW': { tier: 'rear only', capacityL: 0.85, fluidLow: 16, fluidHigh: 30, labourHrs: 1.5, shopFee: 25 },
@@ -4637,6 +4640,46 @@ const DIFFERENTIAL_SERVICE_BY_VEHICLE: Record<string, {
   'VW_TIGUAN_AD1_14TSI_16_NOW': { tier: 'rear only', capacityL: 0.85, fluidLow: 16, fluidHigh: 30, labourHrs: 1.5, shopFee: 25 },
   'VW_TIGUAN_R_AD1_21_NOW': { tier: 'rear only', capacityL: 0.85, fluidLow: 16, fluidHigh: 30, labourHrs: 1.5, shopFee: 25 },
   'VW_TROC_R_A1_19_NOW': { tier: 'rear only', capacityL: 0.85, fluidLow: 16, fluidHigh: 30, labourHrs: 1.5, shopFee: 25 },
+};
+
+// ── VW Group AWD systems (Audi quattro, VW 4Motion, Skoda 4x4) ───────────────
+// Two very different jobs hide behind "differential service" on these cars:
+//  • Haldex (transverse engines: A3/S3/TT/Q3, Golf R, Tiguan, T-Roc R, Yeti 4x4,
+//    Octavia 4x4) — a multi-plate coupling at the rear axle with its OWN oil
+//    (~0.8L, VAG Haldex spec — NOT gear oil) and a filter/strainer. Recommended
+//    every ~3 years / 40-60,000km. Parts are several times a plain diff oil change.
+//  • Longitudinal quattro (A4/A5/A6/Q5/Q7/RS4) — Torsen or crown-gear centre
+//    diff is sealed for life inside the gearbox/transfer case; the serviceable
+//    item is the REAR differential gear oil (~0.85L 75W-90 GL-5).
+// Pricing GST-incl, estimate confidence 2 (market anchors, not supplier quotes).
+const HALDEX_SPEC: DiffSpec = {
+  tier: 'rear only', capacityL: 0.8, fluidLow: 60, fluidHigh: 95, filterLow: 40, filterHigh: 70,
+  labourHrs: 1.25, shopFee: 25, system: 'haldex', fluidType: 'Haldex coupling oil + filter (VAG spec)',
+};
+const QUATTRO_REAR_SPEC: DiffSpec = {
+  tier: 'rear only', capacityL: 0.85, fluidLow: 16, fluidHigh: 30, labourHrs: 1.5, shopFee: 25,
+  system: 'quattro-rear', fluidType: '75W-90 GL-5 (rear differential)',
+};
+// Correct existing AWD VW-group rows that were priced as a plain rear-diff oil
+// change although they're Haldex cars, and add the AWD rows that had no spec.
+for (const id of [
+  'VW_GOLF_MK7_R_13_20', 'VW_TIGUAN_5N_14TSI_08_16', 'VW_TIGUAN_5N_TDI_08_16', 'VW_TIGUAN_AD1_14TSI_16_NOW',
+  'VW_TIGUAN_R_AD1_21_NOW', 'VW_TROC_R_A1_19_NOW', 'AUDI_S3_8V_13_20',
+  'VW_TIGUAN_AD1_20TSI_AWD_16_NOW', 'VW_TIGUAN_AD_20TDI_16_NOW', 'VW_GOLF_R32_MK5_05_08', 'VW_PASSAT_R36_08_10',
+  // new in migration 069
+  'AUDI_A3_8V_18TFSI_QUATTRO_13_20', 'AUDI_S3_8P_20TFSI_06_12',
+  'AUDI_TT_8J_20TFSI_QUATTRO_08_14', 'AUDI_TT_8S_20TFSI_QUATTRO_15_NOW', 'AUDI_Q3_8U_20TFSI_QUATTRO_11_18',
+  'AUDI_Q3_F3_20TFSI_QUATTRO_18_NOW', 'SKODA_YETI_5L_18TSI_4X4_10_17',
+]) DIFFERENTIAL_SERVICE_BY_VEHICLE[id] = HALDEX_SPEC;
+for (const id of [
+  'AUDI_RS4_B7_42FSI_06_08', 'AUDI_Q7_4L_42TDI_07_15',
+  // new in migration 069
+  'AUDI_A4_B8_20TFSI_QUATTRO_08_15', 'AUDI_A5_8T_20TFSI_QUATTRO_08_16', 'AUDI_Q5_8R_20TFSI_QUATTRO_08_17',
+  'AUDI_A4_B9_20TFSI_QUATTRO_15_NOW', 'AUDI_A5_F5_20TFSI_QUATTRO_16_NOW',
+]) DIFFERENTIAL_SERVICE_BY_VEHICLE[id] = QUATTRO_REAR_SPEC;
+// Touareg 7P: Torsen centre diff + separate front and rear diffs, both serviceable.
+DIFFERENTIAL_SERVICE_BY_VEHICLE['VW_TOUAREG_7P_36FSI_11_18'] = {
+  tier: 'front+rear', capacityL: 2.2, fluidLow: 16, fluidHigh: 30, labourHrs: 2.0, shopFee: 25,
 };
 
 // GET /api/fleet-prices?rego=ABC123 — return parts_data low/high/midpoint for every catalog service
@@ -4790,12 +4833,55 @@ app.get('/api/fleet-prices', async (req, res) => {
           return null;
         };
 
+        // Rank every fleet row for this make/model/year against the registry's
+        // free-text variant. Returns the single best row (score > 0) or null.
+        const HINT_STOP = new Set(['sportback', 'avant', 'allroad', 'sedan', 'saloon', 'coupe', 'cabriolet', 'roadster', 'hatch',
+          'wagon', 'estate', 'auto', 'manual', 'dsg', 'tronic', 'stronic', 'tiptronic', 'multitronic', 'se', 'sport', 'line',
+          '5dr', '4dr', '3dr', '2dr', 'the', 'and', 'with']);
+        const HINT_AWD = new Set(['quattro', '4x4', '4motion', 'awd', '4wd', 'allgrip', 'xdrive', '4matic']);
+        const scoreByVariantHint = async (hint: string): Promise<any[] | null> => {
+          const tokens = hint.toLowerCase().replace(/[^a-z0-9.\-\s]/g, ' ').split(/\s+/).filter(t => t.length > 1 && !HINT_STOP.has(t));
+          if (!tokens.length) return null;
+          const wantsAwd = tokens.some(t => HINT_AWD.has(t));
+          for (const withYear of [true, false]) {
+            let q = (supabase as any).from('fleet_vehicles')
+              .select('vehicle_id, engine_family_id, body_type, drivetrain, submodel, notes, ef_vehicle_aliases(alias_variant, engine_code)')
+              .ilike('make', custVehicle.make!)
+              .or(`model.ilike.${modelStr},model.ilike.${fvFirstWord}%`);
+            if (withYear && custVehicle.year)
+              q = q.lte('year_from', custVehicle.year).or(`year_to.is.null,year_to.gte.${custVehicle.year}`);
+            const { data } = await q.limit(40);
+            const rows = (data as any[]) ?? [];
+            let best: any = null, bestScore = 0;
+            for (const r of rows) {
+              const text = [r.submodel, r.notes, ...(r.ef_vehicle_aliases ?? []).flatMap((a: any) => [a.alias_variant, a.engine_code])]
+                .filter(Boolean).join(' ').toLowerCase();
+              const isAwd = r.drivetrain === 'awd' || r.drivetrain === '4wd';
+              let score = 0;
+              for (const t of tokens) {
+                if (HINT_AWD.has(t)) continue;
+                if (!text.includes(t)) continue;
+                score += /^\d\.\d$/.test(t) ? 4 : /^(tfsi|tsi|tdi|fsi|mpi|hdi|crdi|gdi|t-gdi)$/.test(t) ? 2 : 1.5;
+              }
+              if (wantsAwd) score += isAwd ? 4 : -4;
+              if (score > bestScore) { best = r; bestScore = score; }
+            }
+            if (best) return [{ vehicle_id: best.vehicle_id, engine_family_id: best.engine_family_id, body_type: best.body_type, drivetrain: best.drivetrain }];
+          }
+          return null;
+        };
+
         let fvRows: any[] | null = null;
         // Tier 1: customer-confirmed variant from the picker
         if (confirmedSubmodel) fvRows = await tryTier(confirmedSubmodel + '%');
         // Tier 2: the registry's SubModel string ("GTI TSI 147kW" → "GTI…")
         if (!fvRows?.length && variantHint) {
           fvRows = await tryTier(variantHint + '%');
+          // Imports (UK/JDM/EU) carry verbose, market-specific variant strings —
+          // "SPORTBACK 1.8 TFSI QUATTRO S TRONIC", "1.8 TFSI SE" — that are rarely a
+          // prefix of ours. Score every candidate on displacement, engine tech,
+          // drivetrain (quattro/4x4/4Motion…) and engine code instead of guessing.
+          if (!fvRows?.length) fvRows = await scoreByVariantHint(variantHint);
           const hintWord = variantHint.split(' ')[0];
           if (!fvRows?.length && hintWord !== variantHint)
             fvRows = await tryTier(hintWord + '%');
@@ -5120,16 +5206,16 @@ app.get('/api/fleet-prices', async (req, res) => {
           const diffSpec = (differentialApplicable && matchedVehicleId) ? DIFFERENTIAL_SERVICE_BY_VEHICLE[matchedVehicleId] : undefined;
           if (diffSpec) {
             const diffLabour = Math.round(diffSpec.labourHrs * efLabourRate);
-            const diffPartsLow = Math.round(diffSpec.capacityL * diffSpec.fluidLow);
-            const diffPartsHigh = Math.round(diffSpec.capacityL * diffSpec.fluidHigh);
+            const diffPartsLow = Math.round(diffSpec.capacityL * diffSpec.fluidLow + (diffSpec.filterLow ?? 0));
+            const diffPartsHigh = Math.round(diffSpec.capacityL * diffSpec.fluidHigh + (diffSpec.filterHigh ?? 0));
             efPrices['differential'] = {
               low: diffPartsLow + diffLabour + diffSpec.shopFee,
               high: diffPartsHigh + diffLabour + diffSpec.shopFee,
               midpoint: Math.round((diffPartsLow + diffPartsHigh) / 2) + diffLabour + diffSpec.shopFee,
               partsLow: diffPartsLow, partsHigh: diffPartsHigh,
               labourLow: diffLabour, labourHigh: diffLabour, labourHours: String(diffSpec.labourHrs),
-              shopFee: diffSpec.shopFee, fluidType: '75W-90 GL-4/5', fluidCapacityL: diffSpec.capacityL,
-              tier: diffSpec.tier,
+              shopFee: diffSpec.shopFee, fluidType: diffSpec.fluidType ?? '75W-90 GL-4/5', fluidCapacityL: diffSpec.capacityL,
+              tier: diffSpec.tier, system: diffSpec.system,
             };
           }
 
