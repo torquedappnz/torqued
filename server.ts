@@ -849,18 +849,30 @@ function summarisePpi(ppi: { checklist?: any[]; inspector_comments?: string | nu
     const st = String(c?.status || '').toLowerCase();
     return st.startsWith('pass') ? 'pass' : st.startsWith('fail') ? 'fail' : st.startsWith('attention') ? 'attention' : 'na';
   };
-  const label = (c: any) => `${c.item}${c.note ? ` (${String(c.note).trim()})` : ''}`;
+  const isRec = (c: any) => c?.noteType === 'recommendation' && !!String(c?.note || '').trim();
+  // "Brake pad thickness (front 2mm)" / "Brake pad thickness (recommend: replace soon)"
+  const label = (c: any) => `${c.item}${c.note ? ` (${isRec(c) ? 'recommend: ' : ''}${String(c.note).trim()})` : ''}`;
   const fails = items.filter(c => kind(c) === 'fail');
   const attn = items.filter(c => kind(c) === 'attention');
   const passes = items.filter(c => kind(c) === 'pass');
   const checked = fails.length + attn.length + passes.length;
+  // Recommendations on items that did NOT fail/need attention (e.g. a Pass with
+  // "service due within 3 months") — still advice the buyer/AI should see.
+  const passRecs = items.filter(c => kind(c) !== 'fail' && kind(c) !== 'attention' && isRec(c));
   let workDone = `Pre-purchase inspection — ${checked} checks: ${passes.length} pass, ${attn.length} attention, ${fails.length} fail`;
-  const issues = [...fails.map(c => `FAIL: ${label(c)}`), ...attn.map(c => `Attention: ${label(c)}`)];
+  const issues = [
+    ...fails.map(c => `FAIL: ${label(c)}`),
+    ...attn.map(c => `Attention: ${label(c)}`),
+    ...passRecs.map(c => `Recommended: ${c.item} (${String(c.note).trim()})`),
+  ];
   if (issues.length) workDone += `. ${issues.join('; ')}`;
-  if (workDone.length > 700) workDone = workDone.slice(0, 697) + '…';
+  if (workDone.length > 900) workDone = workDone.slice(0, 897) + '…';
+  const passNotes = passes.filter(c => c.note && !isRec(c)).map(c => `${c.item} (${String(c.note).trim()})`);
   const noteParts = [
     fails.length ? `Failed: ${fails.map(label).join('; ')}` : '',
     attn.length ? `Needs attention: ${attn.map(label).join('; ')}` : '',
+    passRecs.length ? `Recommended (passing items): ${passRecs.map(c => `${c.item} (${String(c.note).trim()})`).join('; ')}` : '',
+    passNotes.length ? `Passed with notes: ${passNotes.join('; ')}` : '',
     passes.length ? `Passed: ${passes.map(c => c.item).join('; ')}` : '',
     ppi.inspector_comments ? `Inspector comments: ${ppi.inspector_comments}` : '',
     ppi.recommendations ? `Recommendations: ${ppi.recommendations}` : '',
@@ -8628,10 +8640,10 @@ app.get('/api/mechanic/history-access-status', async (req, res) => {
     if (!granted && !(prior && prior.length)) return res.json({ granted: false });
 
     const [{ data: imported }, { data: jobs }] = await Promise.all([
-      supabase.from('vehicle_history').select('service_date, work_done, provider, mileage, price, notes').eq('rego', rego).order('service_date', { ascending: false }),
+      supabase.from('vehicle_history').select('service_date, work_done, provider, mileage, price, notes, source').eq('rego', rego).order('service_date', { ascending: false }),
       supabase.from('bookings').select('date, completed_at, service_ids, quote_items, description, total_price, mileage_out, status').eq('vehicle_rego', rego).eq('status', 'completed').order('completed_at', { ascending: false }),
     ]);
-    res.json({ granted: true, imported: imported ?? [], jobs: jobs ?? [] });
+    res.json({ granted: true, imported: imported ?? [], jobs: dropPpiBookingDuplicates(jobs ?? [], imported ?? []) });
   } catch (err) {
     console.error('[history-access-status]', err);
     res.status(500).json({ error: 'Server error' });

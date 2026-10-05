@@ -6499,13 +6499,19 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                             if (y + 6 > 280) { doc.addPage(); y = 20; }
                             doc.setFontSize(8.5); doc.setFont('Helvetica', 'normal'); doc.setTextColor(21, 4, 2);
                             doc.text(doc.splitTextToSize(c.item, 150), 15, y);
-                            const stColor: [number,number,number] = c.status === 'Pass' ? [16,185,129] : c.status === 'Fail' ? [255,24,0] : c.status === 'Attention Needed' ? [217,119,6] : [120,120,120];
+                            const stColor: [number,number,number] = c.status === 'Pass' ? [16,185,129] : c.status === 'Fail' ? [255,24,0] : String(c.status || '').startsWith('Attention') ? [217,119,6] : [120,120,120];
                             doc.setFont('Helvetica', 'bold'); doc.setTextColor(...stColor); doc.text(c.status, 195, y, { align: 'right' });
                             doc.setTextColor(21, 4, 2); y += 5;
-                            if (c.note) { doc.setFont('Helvetica', 'italic'); doc.setFontSize(7.5); doc.setTextColor(100,100,100); doc.splitTextToSize(`— ${c.note}`, 170).forEach((l: string) => { doc.text(l, 18, y); y += 4; }); }
+                            if (c.note) {
+                              const isRec = c.noteType === 'recommendation';
+                              doc.setFont('Helvetica', isRec ? 'bolditalic' : 'italic'); doc.setFontSize(7.5);
+                              doc.setTextColor(...(isRec ? [180,83,9] : [100,100,100]) as [number,number,number]);
+                              doc.splitTextToSize(`— ${isRec ? 'Recommendation' : 'Note'}: ${c.note}`, 170).forEach((l: string) => { if (y + 4 > 280) { doc.addPage(); y = 20; } doc.text(l, 18, y); y += 4; });
+                            }
                           });
                           const block = (t: string, txt: string) => { if (!txt?.trim()) return; if (y + 14 > 280) { doc.addPage(); y = 20; } doc.setFont('Helvetica','bold'); doc.setFontSize(10); doc.setTextColor(255,24,0); doc.text(t, 15, y); y += 6; doc.setFont('Helvetica','normal'); doc.setFontSize(8.5); doc.setTextColor(21,4,2); doc.splitTextToSize(txt.trim(), 180).forEach((l: string) => { if (y + 5 > 280) { doc.addPage(); y = 20; } doc.text(l, 15, y); y += 4.5; }); y += 3; };
-                          block("INSPECTOR'S COMMENTS", ppi.inspector_comments); block('RECOMMENDATIONS', ppi.recommendations);
+                          const itemRecs = checklist.filter((c: any) => c.note?.trim() && c.noteType === 'recommendation').map((c: any) => `• ${c.item}: ${c.note.trim()}`);
+                          block("INSPECTOR'S COMMENTS", ppi.inspector_comments); block('RECOMMENDATIONS', [String(ppi.recommendations || '').trim(), ...itemRecs].filter(Boolean).join('\n'));
                           doc.setFontSize(7.5); doc.setTextColor(150,150,150);
                           doc.text('Pre-Purchase Inspection via Torqued. A visual & functional assessment only — not a guarantee of future reliability.', 15, 285, { maxWidth: 180 });
                           doc.save(`Torqued-PPI-${String(ppi.rego || rego).toUpperCase()}.pdf`);

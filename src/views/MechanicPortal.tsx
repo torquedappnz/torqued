@@ -1171,10 +1171,16 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
     fetch(`/api/history/${encodeURIComponent(reg)}`)
       .then(r => r.json())
       .then(({ imported, jobs }) => {
-        const fromImports = (imported || []).map((h: any, i: number) => ({
-          id: `imp${i}`, date: h.service_date || '', mileage: h.mileage || undefined,
-          service: h.work_done || 'Service', provider: h.provider || 'Customer record', isExternal: true,
-        }));
+        const fromImports = (imported || []).map((h: any, i: number) => {
+          // Pre-purchase inspections done through Torqued (by ANY platform workshop)
+          // are Torqued records, not customer-supplied "external" ones.
+          const isPpi = h.source === 'ppi' || /^Pre-purchase inspection/i.test(h.work_done || '');
+          return {
+            id: `imp${i}`, date: h.service_date || '', mileage: h.mileage || undefined,
+            service: h.work_done || 'Service', provider: h.provider || 'Customer record',
+            isExternal: !isPpi, isPpi, ppiNotes: isPpi ? String(h.notes || '').replace(/\n?\[PPI#[^\]]*\]/, '').trim() : undefined,
+          };
+        });
         const fromJobs = (jobs || []).filter((j: any) => j.status === 'completed').map((j: any) => ({
           id: `job${j.id}`, date: j.completed_at || j.date || j.created_at,
           service: (j.service_ids || []).map((id: string) => SERVICES.find(s => s.id === id)?.name || id).join(', ') || 'Torqued service',
@@ -3137,9 +3143,26 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                           <p className="text-[10px] font-bold text-muted uppercase tracking-wider">{item.date}</p>
                           {item.mileage && <span className="text-[10px] font-mono bg-card px-1.5 rounded text-muted">{item.mileage.toLocaleString()} KM</span>}
                         </div>
-                        <h4 className="text-sm font-bold">{item.service}</h4>
+                        {item.isPpi ? (() => {
+                          // work_done = "Pre-purchase inspection — N checks: a pass, b attention, c fail. FAIL: …; Attention: …"
+                          const m = String(item.service).match(/^Pre-purchase inspection — ([^.]*)(?:\. ([\s\S]*))?$/);
+                          return (
+                            <>
+                              <h4 className="text-sm font-bold">Pre-purchase inspection</h4>
+                              {m?.[1] && <p className="text-[11px] text-muted font-semibold">{m[1]}</p>}
+                              {m?.[2] && <p className="text-xs text-foreground/80 leading-snug">{m[2]}</p>}
+                              {item.ppiNotes && (
+                                <details className="text-xs text-muted">
+                                  <summary className="cursor-pointer font-bold text-[10px] uppercase tracking-wider hover:text-foreground">Full inspection notes</summary>
+                                  <p className="whitespace-pre-line mt-1 leading-snug">{item.ppiNotes}</p>
+                                </details>
+                              )}
+                            </>
+                          );
+                        })() : <h4 className="text-sm font-bold">{item.service}</h4>}
                         <p className="text-xs text-muted flex items-center gap-1 mt-0.5">
                           {item.provider}
+                          {item.isPpi && <span className="text-[8px] bg-torqued-red/10 text-torqued-red px-1 rounded uppercase border border-torqued-red/30 font-black">Torqued PPI</span>}
                           {item.isExternal && <span className="text-[8px] bg-card px-1 rounded uppercase border border-border">External Record</span>}
                         </p>
                       </div>
@@ -5000,7 +5023,7 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                       ))}
                       {unlockedHistory.imported.map((h: any, i: number) => (
                         <div key={`ih${i}`} className="flex justify-between text-xs text-foreground bg-card rounded px-2 py-1.5 border border-border">
-                          <span>{h.service_date || '—'} · {h.work_done || 'Service'}{h.provider ? ` · ${h.provider}` : ''}</span>
+                          <span>{h.source === 'ppi' && <span className="text-[8px] bg-torqued-red/10 text-torqued-red px-1 mr-1 rounded uppercase border border-torqued-red/30 font-black">PPI</span>}{h.service_date || '—'} · {h.work_done || 'Service'}{h.provider ? ` · ${h.provider}` : ''}</span>
                           <span className="text-muted shrink-0">{h.mileage ? `${Number(h.mileage).toLocaleString()} km` : ''}</span>
                         </div>
                       ))}

@@ -47,6 +47,9 @@ const CHECKLIST: { category: string; items: string[] }[] = [
 ];
 
 type Status = 'pass' | 'attention' | 'fail' | 'na';
+// Each item note can be a plain observation or a recommendation to the buyer.
+type NoteType = 'note' | 'recommendation';
+const NOTE_TYPE_LABEL: Record<NoteType, string> = { note: 'Note', recommendation: 'Recommendation' };
 const STATUS_META: Record<Status, { label: string; color: string }> = {
   pass: { label: 'Pass', color: 'bg-emerald-500 text-white' },
   attention: { label: 'Attention', color: 'bg-amber-500 text-white' },
@@ -76,6 +79,7 @@ export const PrePurchaseInspection: React.FC<{
   const [custEmail, setCustEmail] = useState(initialCustomerEmail || '');
   const [statuses, setStatuses] = useState<Record<string, Status>>({});
   const [notes, setNotes] = useState<Record<string, string>>({});
+  const [noteTypes, setNoteTypes] = useState<Record<string, NoteType>>({});
   const [comments, setComments] = useState('');
   const [recommendations, setRecommendations] = useState('');
   const [saving, setSaving] = useState(false);
@@ -116,7 +120,15 @@ export const PrePurchaseInspection: React.FC<{
 
   const buildChecklist = () => CHECKLIST.flatMap(g => g.items.map(item => ({
     category: g.category, item, status: STATUS_META[statuses[`${g.category}::${item}`] || 'na'].label, note: notes[`${g.category}::${item}`] || '',
+    noteType: (noteTypes[`${g.category}::${item}`] || 'note') as NoteType,
   })));
+
+  // Report text for the RECOMMENDATIONS block: whatever the inspector typed, plus
+  // every item note they categorised as a Recommendation (any status, incl. Pass).
+  const recommendationsText = () => {
+    const itemRecs = buildChecklist().filter(c => c.note.trim() && c.noteType === 'recommendation').map(c => `• ${c.item}: ${c.note.trim()}`);
+    return [recommendations.trim(), ...itemRecs].filter(Boolean).join('\n');
+  };
 
   const save = async (complete: boolean) => {
     if (!mechanicId) return;
@@ -158,19 +170,25 @@ export const PrePurchaseInspection: React.FC<{
             y += 8;
           }
           doc.setFontSize(8.5); doc.setTextColor(21, 4, 2);
-          const stKey = c.status === 'Pass' ? 'pass' : c.status === 'Attention Needed' ? 'attention' : c.status === 'Fail' ? 'fail' : 'na';
+          const stKey = c.status === 'Pass' ? 'pass' : c.status.startsWith('Attention') ? 'attention' : c.status === 'Fail' ? 'fail' : 'na';
           ensure(c.note ? 10 : 6);
           doc.setFont('Helvetica', 'normal'); doc.text(doc.splitTextToSize(c.item, 150), 15, y);
           doc.setFont('Helvetica', 'bold');
           doc.setTextColor(...(stKey === 'pass' ? [16, 185, 129] : stKey === 'attention' ? [217, 119, 6] : stKey === 'fail' ? [255, 24, 0] : [120, 120, 120]) as [number, number, number]);
           doc.text(c.status, 195, y, { align: 'right' });
           doc.setTextColor(21, 4, 2); y += 5;
-          if (c.note) { doc.setFont('Helvetica', 'italic'); doc.setFontSize(7.5); doc.setTextColor(100, 100, 100); doc.splitTextToSize(`— ${c.note}`, 170).forEach((l: string) => { doc.text(l, 18, y); y += 4; }); doc.setFontSize(8.5); }
+          if (c.note) {
+            const isRec = c.noteType === 'recommendation';
+            doc.setFont('Helvetica', isRec ? 'bolditalic' : 'italic'); doc.setFontSize(7.5);
+            doc.setTextColor(...(isRec ? [180, 83, 9] : [100, 100, 100]) as [number, number, number]);
+            doc.splitTextToSize(`— ${NOTE_TYPE_LABEL[c.noteType as NoteType]}: ${c.note}`, 170).forEach((l: string) => { ensure(4); doc.text(l, 18, y); y += 4; });
+            doc.setFontSize(8.5);
+          }
           y += 1;
           return c.category;
         }, '');
         const block = (title: string, text: string) => { if (!text.trim()) return; ensure(16); doc.setFont('Helvetica', 'bold'); doc.setFontSize(10); doc.setTextColor(255, 24, 0); doc.text(title, 15, y); y += 6; doc.setFont('Helvetica', 'normal'); doc.setFontSize(8.5); doc.setTextColor(21, 4, 2); doc.splitTextToSize(text.trim(), 180).forEach((l: string) => { ensure(5); doc.text(l, 15, y); y += 4.5; }); y += 3; };
-        block("INSPECTOR'S COMMENTS", comments); block('RECOMMENDATIONS', recommendations);
+        block("INSPECTOR'S COMMENTS", comments); block('RECOMMENDATIONS', recommendationsText());
         pdfBase64 = doc.output('datauristring').split(',')[1];
       } catch (e) { console.warn('PDF gen failed', e); }
     }
@@ -232,12 +250,18 @@ export const PrePurchaseInspection: React.FC<{
         doc.setTextColor(...(st === 'pass' ? [16, 185, 129] : st === 'attention' ? [217, 119, 6] : st === 'fail' ? [255, 24, 0] : [120, 120, 120]) as [number, number, number]);
         doc.text(STATUS_META[st].label, 195, y, { align: 'right' });
         doc.setTextColor(21, 4, 2); y += 5;
-        if (note) { doc.setFont('Helvetica', 'italic'); doc.setFontSize(7.5); doc.setTextColor(100, 100, 100); doc.splitTextToSize(`— ${note}`, 170).forEach((l: string) => { doc.text(l, 18, y); y += 4; }); doc.setFontSize(8.5); doc.setTextColor(21, 4, 2); }
+        if (note) {
+          const isRec = (noteTypes[`${group.category}::${item}`] || 'note') === 'recommendation';
+          doc.setFont('Helvetica', isRec ? 'bolditalic' : 'italic'); doc.setFontSize(7.5);
+          doc.setTextColor(...(isRec ? [180, 83, 9] : [100, 100, 100]) as [number, number, number]);
+          doc.splitTextToSize(`— ${NOTE_TYPE_LABEL[isRec ? 'recommendation' : 'note']}: ${note}`, 170).forEach((l: string) => { ensure(4); doc.text(l, 18, y); y += 4; });
+          doc.setFontSize(8.5); doc.setTextColor(21, 4, 2);
+        }
       });
       y += 3;
     });
     const block = (title: string, text: string) => { if (!text.trim()) return; ensure(16); doc.setFont('Helvetica', 'bold'); doc.setFontSize(10); doc.setTextColor(255, 24, 0); doc.text(title, 15, y); y += 6; doc.setFont('Helvetica', 'normal'); doc.setFontSize(8.5); doc.setTextColor(21, 4, 2); doc.splitTextToSize(text.trim(), 180).forEach((l: string) => { ensure(5); doc.text(l, 15, y); y += 4.5; }); y += 3; };
-    block("INSPECTOR'S COMMENTS", comments); block('RECOMMENDATIONS', recommendations);
+    block("INSPECTOR'S COMMENTS", comments); block('RECOMMENDATIONS', recommendationsText());
     ensure(12);
     doc.setFont('Helvetica', 'italic'); doc.setFontSize(7.5); doc.setTextColor(150, 150, 150);
     doc.text('Pre-Purchase Inspection via Torqued. Does NOT include high-voltage (hybrid/EV) battery testing. A visual & functional assessment only — not a guarantee of future reliability. Prices include 15% GST.', 15, Math.min(y + 4, 290), { maxWidth: 180 });
@@ -292,9 +316,21 @@ export const PrePurchaseInspection: React.FC<{
                           ))}
                         </div>
                       </div>
-                      {(st === 'attention' || st === 'fail') && (
-                        <input value={notes[key] || ''} onChange={e => setNotes(p => ({ ...p, [key]: e.target.value }))}
-                          placeholder="Add a note (what you found)…" className="w-full bg-background border border-border rounded-lg px-2.5 py-1.5 text-xs text-foreground outline-none focus:border-torqued-red" />
+                      {(statuses[key] !== undefined || !!notes[key]) && (
+                        <div className="flex items-center gap-2">
+                          <input value={notes[key] || ''} onChange={e => setNotes(p => ({ ...p, [key]: e.target.value }))}
+                            placeholder={(noteTypes[key] || 'note') === 'recommendation' ? 'Add a recommendation for the buyer…' : st === 'pass' ? 'Add a note (optional)…' : 'Add a note (what you found)…'}
+                            className="flex-1 min-w-0 bg-background border border-border rounded-lg px-2.5 py-1.5 text-xs text-foreground outline-none focus:border-torqued-red" />
+                          <div className="flex shrink-0 rounded-lg overflow-hidden border border-border" role="group" aria-label="Note type">
+                            {(['note', 'recommendation'] as NoteType[]).map(t => (
+                              <button key={t} type="button" onClick={() => setNoteTypes(p => ({ ...p, [key]: t }))}
+                                className={cn('text-[10px] font-black uppercase px-2 py-1.5 transition-all',
+                                  (noteTypes[key] || 'note') === t ? (t === 'recommendation' ? 'bg-amber-500 text-white' : 'bg-foreground text-background') : 'bg-background text-muted hover:text-foreground')}>
+                                {t === 'note' ? 'Note' : 'Recommend'}
+                              </button>
+                            ))}
+                          </div>
+                        </div>
                       )}
                     </div>
                   );
