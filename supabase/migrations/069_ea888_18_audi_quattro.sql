@@ -379,3 +379,7 @@ WHERE NOT EXISTS (SELECT 1 FROM public.vehicle_models WHERE lower(make) = lower(
 -- ── repoint rows priced against the wrong transmission ──
 UPDATE public.fleet_vehicles SET engine_family_id = 'AUDI_EA888_18_MULTITRONIC' WHERE vehicle_id = 'AUDI_A4_B8_18TFSI_08_15'; -- A4 B8 1.8 TFSI is FWD with Multitronic CVT (or 6MT) — not DSG
 UPDATE public.fleet_vehicles SET engine_family_id = 'AUDI_EA888_20_TSI_LONG' WHERE vehicle_id = 'AUDI_A4_B8_20TFSI_08_15'; -- A4 B8 2.0 TFSI FWD: Multitronic/6MT, not the transverse DQ381 DSG the base EA888 family prices
+
+-- the longitudinal family has mixed gearboxes: drop the cloned lump-sum transmission price so it routes to a precise quote
+DELETE FROM public.ef_parts_data WHERE engine_family_id = 'AUDI_EA888_20_TSI_LONG'
+  AND category_id = (SELECT id FROM public.part_categories WHERE slug = 'transmission_service');
