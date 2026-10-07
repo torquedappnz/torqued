@@ -1130,7 +1130,7 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
     try {
       const r = await fetch(`/api/mechanic/history-access-status?mechanicId=${encodeURIComponent(user.id)}&rego=${encodeURIComponent(coldForm.rego)}`);
       const d = await r.json();
-      if (!r.ok || !d.granted) { setHistAccessState('otp_sent'); setHistAccessMsg('Not granted yet — ask the customer to tap the link in their email, then check again.'); return; }
+      if (!r.ok || !d.granted) { setHistAccessState('otp_sent'); setHistAccessMsg('Not granted yet — ask the customer to approve it in their Torqued portal (My Garage) or tap the link in their email, then check again.'); return; }
       setUnlockedHistory({ imported: d.imported || [], torquedJobs: d.jobs || [] });
       setHistAccessState('granted');
       setHistAccessMsg(null);
@@ -4972,11 +4972,11 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                   <div className="space-y-2">
                     <p className="text-xs text-foreground">
                       {histAccessState === 'already_sent'
-                        ? 'An access link has already been emailed to the vehicle owner.'
-                        : 'A 12-hour access link has been emailed to the vehicle owner.'}
+                        ? 'An access request has already been sent to the vehicle owner (email + their My Garage).'
+                        : 'A 12-hour access request has been sent to the vehicle owner (email + their My Garage).'}
                       {histOtpExpiry && <span className="text-muted"> Valid until {new Date(histOtpExpiry).toLocaleString('en-NZ', { weekday: 'short', hour: 'numeric', minute: '2-digit' })}.</span>}
                     </p>
-                    <p className="text-[11px] text-muted">Once they've tapped it, check for access:</p>
+                    <p className="text-[11px] text-muted">Once they've approved it (in My Garage or via the email link), check for access:</p>
                     <div className="flex gap-2">
                       <button
                         onClick={verifyHistOtp}

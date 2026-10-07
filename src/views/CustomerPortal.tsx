@@ -1520,6 +1520,38 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
       .then(r => r.json()).then(d => setGrantState(d.success ? 'done' : 'error')).catch(() => setGrantState('error'));
   }, []);
 
+  // Workshop requests to view this customer's service history — actionable right
+  // in My Garage (approve / decline / revoke), not only via the emailed link.
+  type HistoryRequest = { id: string; rego: string; vehicleLabel: string; workshop: string; granted: boolean; expiresAt: string; requestedAt: string };
+  const [historyRequests, setHistoryRequests] = useState<HistoryRequest[]>([]);
+  const [historyRequestBusy, setHistoryRequestBusy] = useState<string | null>(null);
+  const loadHistoryRequests = React.useCallback(async () => {
+    if (!customerOwnerId) { setHistoryRequests([]); return; }
+    try {
+      const r = await fetch(`/api/customer/history-requests?ownerId=${encodeURIComponent(customerOwnerId)}`);
+      const d = await r.json();
+      setHistoryRequests(Array.isArray(d.requests) ? d.requests : []);
+    } catch { /* keep the last known list */ }
+  }, [customerOwnerId]);
+  useEffect(() => {
+    if (!customerOwnerId || !garageUnlocked || view !== 'dashboard') return;
+    loadHistoryRequests();
+    const t = setInterval(loadHistoryRequests, 30000); // a workshop may request while they're on the page
+    return () => clearInterval(t);
+  }, [customerOwnerId, garageUnlocked, view, loadHistoryRequests]);
+  const respondToHistoryRequest = async (id: string, action: 'approve' | 'decline' | 'revoke') => {
+    if (!customerOwnerId) return;
+    setHistoryRequestBusy(id);
+    try {
+      await fetch('/api/customer/history-requests/respond', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ownerId: customerOwnerId, id, action }),
+      });
+    } catch { /* reload below shows the true state */ }
+    await loadHistoryRequests();
+    setHistoryRequestBusy(null);
+  };
+
   // Handle reschedule accept links: ?reschedule_accept=<bookingId>&proposed=<datetime>
   // Captured before the query string is stripped so the standalone page can render.
   const [rescheduleMode] = useState(() => !!new URLSearchParams(window.location.search).get('reschedule_accept'));
@@ -5686,6 +5718,40 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
             {(userName || 'S').charAt(0).toUpperCase()}
           </div>
         </div>
+
+        {/* Workshop requests for service-history access */}
+        {historyRequests.length > 0 && (
+          <div className="space-y-3" aria-live="polite">
+            {historyRequests.filter(r => !r.granted).map(r => (
+              <Card key={r.id} className="p-5 bg-card border-torqued-red/40 space-y-3">
+                <div className="flex items-start gap-3">
+                  <div className="w-10 h-10 shrink-0 rounded-xl bg-torqued-red/10 border border-torqued-red/20 flex items-center justify-center text-torqued-red"><History size={18} /></div>
+                  <div className="min-w-0">
+                    <p className="text-sm font-black">{r.workshop} wants to view your service history</p>
+                    <p className="text-xs text-muted mt-0.5">
+                      For your <span className="text-foreground font-bold">{r.vehicleLabel}</span> ({r.rego}) — e.g. to prepare a quote or pre-purchase inspection.
+                      If you approve, they can see it until {new Date(r.expiresAt).toLocaleString('en-NZ', { weekday: 'short', hour: 'numeric', minute: '2-digit' })}.
+                    </p>
+                  </div>
+                </div>
+                <div className="flex gap-2">
+                  <Button className="flex-1 bg-torqued-red text-white" disabled={historyRequestBusy === r.id} onClick={() => respondToHistoryRequest(r.id, 'approve')}>
+                    {historyRequestBusy === r.id ? 'Updating…' : 'Approve'}
+                  </Button>
+                  <Button variant="outline" className="flex-1 border-border text-foreground" disabled={historyRequestBusy === r.id} onClick={() => respondToHistoryRequest(r.id, 'decline')}>Decline</Button>
+                </div>
+              </Card>
+            ))}
+            {historyRequests.filter(r => r.granted).map(r => (
+              <div key={r.id} className="flex items-center justify-between gap-3 text-xs bg-card border border-border rounded-xl px-4 py-3">
+                <span className="text-muted min-w-0">
+                  <span className="text-emerald-500 font-black">✓</span> <span className="text-foreground font-bold">{r.workshop}</span> can view the history for {r.rego} until {new Date(r.expiresAt).toLocaleString('en-NZ', { weekday: 'short', hour: 'numeric', minute: '2-digit' })}
+                </span>
+                <button className="shrink-0 font-black uppercase tracking-wider text-torqued-red hover:underline disabled:opacity-40" disabled={historyRequestBusy === r.id} onClick={() => respondToHistoryRequest(r.id, 'revoke')}>Revoke</button>
+              </div>
+            ))}
+          </div>
+        )}
 
 
         {/* Manage Garage Modal */}

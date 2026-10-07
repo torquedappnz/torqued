@@ -8625,6 +8625,74 @@ app.post('/api/history/grant', async (req, res) => {
   }
 });
 
+// ── Customer-side handling of workshop history-access requests ──────────────
+// The emailed link isn't the only way in: a verified customer can approve,
+// decline or revoke from My Garage (essential when the email is slow, lands in
+// spam, or the customer is already in the portal). Rows are addressed by a hash
+// of the token so the bearer token itself never leaves the server, and every
+// action is checked against the plates the caller actually owns.
+const historyLinkRef = (token: string) => crypto.createHash('sha256').update(token).digest('hex').slice(0, 16);
+
+async function ownedHistoryLinks(supabase: any, ownerId: string) {
+  const { data: vehicles } = await supabase.from('vehicles').select('rego, year, make, model').eq('owner_id', ownerId);
+  const byRego = new Map<string, any>((vehicles ?? []).map((v: any) => [v.rego, v]));
+  if (!byRego.size) return { links: [] as any[], byRego };
+  const { data: links } = await supabase.from('history_access_links')
+    .select('token, mechanic_id, rego, granted, expires_at, created_at')
+    .in('rego', [...byRego.keys()]).gt('expires_at', new Date().toISOString())
+    .order('created_at', { ascending: false });
+  return { links: links ?? [], byRego };
+}
+
+// GET /api/customer/history-requests?ownerId= — pending + currently-granted workshop requests
+app.get('/api/customer/history-requests', async (req, res) => {
+  try {
+    const ownerId = String(req.query.ownerId || '');
+    const supabase = getSupabaseAdmin();
+    if (!ownerId || !supabase) return res.json({ requests: [] });
+    const { links, byRego } = await ownedHistoryLinks(supabase, ownerId);
+    const mechIds = [...new Set(links.map((l: any) => l.mechanic_id).filter(Boolean))];
+    const names: Record<string, string> = {};
+    if (mechIds.length) {
+      const { data: profs } = await supabase.from('profiles').select('id, name').in('id', mechIds);
+      (profs ?? []).forEach((p: any) => { names[p.id] = p.name; });
+    }
+    res.json({
+      requests: links.map((l: any) => {
+        const v = byRego.get(l.rego);
+        return {
+          id: historyLinkRef(l.token), rego: l.rego,
+          vehicleLabel: `${v?.year || ''} ${v?.make || ''} ${v?.model || ''}`.trim() || l.rego,
+          workshop: names[l.mechanic_id] || 'A Torqued workshop',
+          granted: !!l.granted, expiresAt: l.expires_at, requestedAt: l.created_at,
+        };
+      }),
+    });
+  } catch (err) {
+    console.error('[customer/history-requests]', err);
+    res.json({ requests: [] });
+  }
+});
+
+// POST /api/customer/history-requests/respond { ownerId, id, action: approve | decline | revoke }
+app.post('/api/customer/history-requests/respond', async (req, res) => {
+  try {
+    const { ownerId, id, action } = req.body || {};
+    if (!ownerId || !id || !['approve', 'decline', 'revoke'].includes(action)) return res.status(400).json({ error: 'ownerId, id and a valid action are required' });
+    const supabase = getSupabaseAdmin();
+    if (!supabase) return res.status(500).json({ error: 'DB not configured' });
+    const { links } = await ownedHistoryLinks(supabase, String(ownerId));
+    const link = links.find((l: any) => historyLinkRef(l.token) === id);
+    if (!link) return res.status(404).json({ error: 'That request is no longer available.' });
+    if (action === 'approve') await supabase.from('history_access_links').update({ granted: true }).eq('token', link.token);
+    else await supabase.from('history_access_links').delete().eq('token', link.token); // decline / revoke: remove it
+    res.json({ success: true, action });
+  } catch (err) {
+    console.error('[customer/history-requests/respond]', err);
+    res.status(500).json({ error: 'Could not update the request' });
+  }
+});
+
 // GET /api/mechanic/history-access-status — is access granted? If so, return the history.
 app.get('/api/mechanic/history-access-status', async (req, res) => {
   try {
