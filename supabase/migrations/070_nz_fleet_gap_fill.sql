@@ -1526,7 +1526,7 @@ CROSS JOIN LATERAL (VALUES
   (CASE WHEN fv.model ILIKE 'kluger' AND fv.year_from >= 2007 THEN 'Highlander' END),
   (CASE WHEN fv.model ILIKE 'jazz' OR fv.model ILIKE 'fit hybrid' THEN 'Fit' END),
   (CASE WHEN fv.make = 'Mercedes-Benz' AND fv.model ~ '^[A-Z]{1,3}[0-9]{3}' THEN regexp_replace(fv.model, '^([A-Z]{1,3})([0-9]{3})', '\1 \2') END),
-  (CASE WHEN fv.model ~* '^corolla (fielder|axio)$' THEN regexp_replace(fv.model, '^(?i)corolla ', '') END)
+  (CASE WHEN fv.model ~* '^corolla (fielder|axio)$' THEN regexp_replace(fv.model, '^corolla ', '', 'i') END)
 ) AS x(alias)
 WHERE x.alias IS NOT NULL
   AND NOT EXISTS (SELECT 1 FROM public.ef_vehicle_aliases a WHERE a.vehicle_id = fv.vehicle_id AND lower(a.alias_model) = lower(x.alias));
