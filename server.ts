@@ -2690,12 +2690,33 @@ ${emailPara(`<span style="color:#999;">Kind regards,<br/>The Torqued team</span>
 </td></tr>`);
 }
 
-// POST /api/mechanic/cold-quote — mechanic creates a booking for a NON-Torqued customer (CRM).
-// Returns a bookingId; the normal quote builder + send-quote-pdf then finishes & emails it.
+// ── Quote metadata ──────────────────────────────────────────────────────────
+// Booking channel and quote delivery status live in quote_items.meta so they
+// need no schema change and travel with the quote:
+//   channel:     'online' (marketplace) | 'phone' | 'walk_in'
+//   quoteStatus: 'saved' (not emailed yet) | 'sent' | 'not_sent' (email failed)
+//   sentAt, sentTo, savedAt, sendError
+// Readers of quote_items only use known keys (parts, labourHours…), so the extra
+// key is harmless to every existing PDF/summary.
+async function mergeQuoteMeta(supabase: any, bookingId: string, patch: Record<string, any>, items?: Record<string, any> | null) {
+  const { data: row } = await supabase.from('bookings').select('quote_items').eq('id', bookingId).maybeSingle();
+  const existing = (row?.quote_items && typeof row.quote_items === 'object') ? row.quote_items : {};
+  const base = items ? { ...items } : { ...existing };
+  delete base.meta;
+  const next = { ...base, meta: { ...(existing.meta || {}), ...patch } };
+  await supabase.from('bookings').update({ quote_items: next }).eq('id', bookingId);
+  return next;
+}
+
+// POST /api/mechanic/cold-quote — mechanic creates a booking for a NON-Torqued customer
+// (phone booking or walk-in). Email is optional: walk-ins often have none, and the quote
+// is still saved and downloadable as a PDF. With a date it appears in the diary.
 app.post('/api/mechanic/cold-quote', async (req, res) => {
   try {
     const { mechanicId, customerName, email, phone, rego, make, model, description, date } = req.body;
-    if (!mechanicId || !email || !customerName) return res.status(400).json({ error: 'mechanicId, customer name and email are required' });
+    const channel = req.body.channel === 'phone' ? 'phone' : 'walk_in';
+    if (!mechanicId || !customerName) return res.status(400).json({ error: 'mechanicId and customer name are required' });
+    if (!email && !phone) return res.status(400).json({ error: 'Add an email or a phone number so you can reach the customer.' });
     const supabase = getSupabaseAdmin();
     if (!supabase) return res.status(500).json({ error: 'Database not configured' });
     const plate = rego ? String(rego).toUpperCase().trim() : null;
@@ -2709,13 +2730,14 @@ app.post('/api/mechanic/cold-quote', async (req, res) => {
     const bookingId = 'CQ' + Date.now().toString(36).toUpperCase();
     const { error } = await supabase.from('bookings').insert({
       id: bookingId, mechanic_id: mechanicId, vehicle_rego: plate,
-      customer_name: customerName, email, customer_phone: phone || null,
+      customer_name: customerName, email: email || null, customer_phone: phone || null,
       service_ids: [], status: 'booked', payment_status: 'pending',
       date: date || null,
       description: description || null, is_cold_quote: true, total_price: 0,
+      quote_items: { meta: { channel, createdAt: new Date().toISOString() } },
     });
     if (error) return res.status(500).json({ error: error.message });
-    res.json({ success: true, bookingId });
+    res.json({ success: true, bookingId, channel });
   } catch (err) {
     console.error('[cold-quote]', err);
     res.status(500).json({ error: 'Could not create cold quote' });
@@ -2790,42 +2812,92 @@ app.post('/api/mechanic/update-quote', async (req, res) => {
   }
 });
 
-// POST /api/mechanic/send-quote-pdf — email a generated quote PDF to the customer
-app.post('/api/mechanic/send-quote-pdf', async (req, res) => {
+// Persist a quote (prices + structured breakdown) on its booking. Always the
+// first step, so a quote is never lost if emailing it fails afterwards.
+async function persistQuote(supabase: any, bookingId: string, total: any, note: any, items: any, meta: Record<string, any>) {
+  await supabase.from('bookings').update({
+    quoted_price: total != null ? Number(total) : null,
+    quote_note: note || null,
+  }).eq('id', bookingId);
+  return mergeQuoteMeta(supabase, bookingId, meta, items && typeof items === 'object' ? items : null);
+}
+
+// POST /api/mechanic/save-quote — save a quote WITHOUT emailing it (walk-ins with
+// no email, or when the mechanic wants to print/hand it over). Listed under Quotes.
+app.post('/api/mechanic/save-quote', async (req, res) => {
   try {
-    const { bookingId, total, note, pdfBase64, items } = req.body;
-    let { email } = req.body;
-    if (!pdfBase64) return res.status(400).json({ error: 'pdfBase64 required' });
+    const { bookingId, total, note, items } = req.body;
+    if (!bookingId) return res.status(400).json({ error: 'bookingId required' });
     const supabase = getSupabaseAdmin();
+    if (!supabase) return res.status(500).json({ error: 'Database not configured' });
+    const { data: row } = await supabase.from('bookings').select('quote_items').eq('id', bookingId).maybeSingle();
+    const prevStatus = row?.quote_items?.meta?.quoteStatus;
+    // Re-saving an already-emailed quote keeps it 'sent' (the customer has a copy).
+    const quoteItems = await persistQuote(supabase, bookingId, total, note, items, {
+      quoteStatus: prevStatus === 'sent' ? 'sent' : 'saved', savedAt: new Date().toISOString(),
+    });
+    res.json({ success: true, saved: true, quoteItems });
+  } catch (err) {
+    console.error('[save-quote]', err);
+    res.status(500).json({ error: 'Could not save quote' });
+  }
+});
+
+// POST /api/mechanic/send-quote-pdf — save the quote, then email the PDF.
+// Responds 200 whenever the quote was saved, with emailed:true|false and a
+// reason — an email failure (no address, SMTP down) never loses the quote; it's
+// marked 'not_sent' so it shows under Quotes for download or re-send.
+app.post('/api/mechanic/send-quote-pdf', async (req, res) => {
+  const { bookingId, total, note, pdfBase64, items } = req.body;
+  let { email } = req.body;
+  if (!pdfBase64) return res.status(400).json({ error: 'pdfBase64 required' });
+  const supabase = getSupabaseAdmin();
+  const now = () => new Date().toISOString();
+  let quoteItems: any = null;
+  try {
     if (supabase && bookingId) {
-      await supabase.from('bookings').update({
-        quoted_price: total != null ? Number(total) : null,
-        quote_note: note || null,
-        quote_items: items ?? null,   // structured breakdown so the editor can be re-opened
-      }).eq('id', bookingId);
+      quoteItems = await persistQuote(supabase, bookingId, total, note, items, { savedAt: now() });
     }
+  } catch (err) {
+    console.error('[send-quote-pdf] save failed:', err);
+    return res.status(500).json({ error: 'Could not save quote' });
+  }
+
+  const markNotSent = async (reason: string) => {
+    if (supabase && bookingId) quoteItems = await mergeQuoteMeta(supabase, bookingId, { quoteStatus: 'not_sent', sendError: reason, lastAttemptAt: now() });
+    return res.json({ success: true, saved: true, emailed: false, reason, quoteItems });
+  };
+
+  try {
     const ctx = await getBookingContext(bookingId);
     if (!email) email = ctx.email;
-    if (!email) return res.status(400).json({ error: 'No customer email on this booking.' });
+    if (!email) return markNotSent('No email address on file for this customer.');
     const transporter = getMailTransporter();
-    if (!transporter) return res.status(503).json({ error: 'Email not configured' });
+    if (!transporter) return markNotSent('Email is not set up on the server.');
 
     // Approved copy, addressed by name + car, NO amount in the email (amounts in the attached PDF + online)
     const html = quoteReadyEmailHtml(ctx.custName, ctx.vehicleLabel, ctx.mechanicName, bookingId || '');
-
-    await transporter.sendMail({
-      from: process.env.SMTP_FROM || '"Torqued" <torquedapp.nz@gmail.com>',
-      to: email,
-      subject: `Your Torqued quote for your ${ctx.vehicleLabel || 'vehicle'} is ready`,
-      html,
-      attachments: [{ filename: `Torqued-Quote-${bookingId || 'TQ'}.pdf`, content: Buffer.from(pdfBase64, 'base64'), contentType: 'application/pdf' }],
-    });
+    try {
+      await transporter.sendMail({
+        from: process.env.SMTP_FROM || '"Torqued" <torquedapp.nz@gmail.com>',
+        to: email,
+        subject: `Your Torqued quote for your ${ctx.vehicleLabel || 'vehicle'} is ready`,
+        html,
+        attachments: [{ filename: `Torqued-Quote-${bookingId || 'TQ'}.pdf`, content: Buffer.from(pdfBase64, 'base64'), contentType: 'application/pdf' }],
+      });
+    } catch (mailErr: any) {
+      console.error('[send-quote-pdf] email failed:', mailErr?.message);
+      return markNotSent(/auth|login|credential|535/i.test(mailErr?.message || '')
+        ? 'The email service rejected the login — email is down. The quote is saved.'
+        : 'The email could not be delivered. The quote is saved.');
+    }
+    if (supabase && bookingId) quoteItems = await mergeQuoteMeta(supabase, bookingId, { quoteStatus: 'sent', sentAt: now(), sentTo: email, sendError: null });
     await notify({ bookingId, type: 'quote_ready', title: 'Your quote is ready',
-      body: `Your quote for your ${ctx.vehicleLabel || 'vehicle'}${ctx.mechanicName ? ` from ${ctx.mechanicName}` : ''} is ready to review and pay.` });
-    res.json({ success: true });
+      body: `Your quote for your ${ctx.vehicleLabel || 'vehicle'}${ctx.mechanicName ? ` from ${ctx.mechanicName}` : ''} is ready to review and pay.` }).catch(() => {});
+    res.json({ success: true, saved: true, emailed: true, sentTo: email, quoteItems });
   } catch (err) {
     console.error('[send-quote-pdf]', err);
-    res.status(500).json({ error: 'Could not send quote' });
+    return markNotSent('Something went wrong sending the email. The quote is saved.');
   }
 });
 

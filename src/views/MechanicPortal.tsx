@@ -648,8 +648,76 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
     doc.save(`Torqued-Invoice-${(job.id || '').toUpperCase()}.pdf`);
   };
 
-  // Build a branded, itemised quote PDF (logo + QR) and return base64
-  const buildQuotePdf = async (job: any): Promise<string> => {
+  // ── Channels & quote status (shared by diary + Quotes section) ────────────
+  type Channel = 'online' | 'phone' | 'walk_in' | 'manual';
+  const CHANNEL_META: Record<Channel, { label: string; dot: string; block: string }> = {
+    online:  { label: 'Online',  dot: 'bg-blue-500',   block: 'bg-blue-500' },
+    phone:   { label: 'Phone',   dot: 'bg-violet-500', block: 'bg-violet-500' },
+    walk_in: { label: 'Walk-in', dot: 'bg-amber-500',  block: 'bg-amber-500' },
+    manual:  { label: 'Manual',  dot: 'bg-slate-500',  block: 'bg-slate-500' },
+  };
+  const channelOf = (row: any): Channel => row?.is_cold_quote ? ((row.quote_items?.meta?.channel as Channel) || 'manual') : 'online';
+  const quoteHasPrices = (row: any) => {
+    const qi = row?.quote_items;
+    return (parseFloat(row?.quoted_price) || 0) > 0 || !!(qi && ((qi.parts || []).some((x: any) => x?.name) || (qi.labourHours || 0) > 0));
+  };
+  type QuoteStatus = 'paid' | 'sent' | 'not_sent' | 'saved' | 'draft';
+  const quoteStatusOf = (row: any): QuoteStatus => {
+    if (row?.payment_status === 'confirmed') return 'paid';
+    const st = row?.quote_items?.meta?.quoteStatus;
+    if (st === 'sent' || st === 'not_sent' || st === 'saved') return st;
+    if (!quoteHasPrices(row)) return 'draft';
+    return row?.status === 'quoted' ? 'sent' : 'saved';
+  };
+  const QUOTE_STATUS_META: Record<QuoteStatus, { label: string; cls: string }> = {
+    paid:     { label: 'Accepted & paid', cls: 'bg-emerald-500/15 text-emerald-600 border-emerald-500/30' },
+    sent:     { label: 'Emailed',         cls: 'bg-blue-500/15 text-blue-600 border-blue-500/30' },
+    not_sent: { label: 'Not emailed',     cls: 'bg-amber-500/15 text-amber-600 border-amber-500/40' },
+    saved:    { label: 'Saved · not sent', cls: 'bg-foreground/5 text-muted border-border' },
+    draft:    { label: 'Draft · no prices', cls: 'bg-foreground/5 text-muted border-border' },
+  };
+  // A raw booking row → the job shape the quote editor / PDF builder use.
+  const rowToJobShape = (j: any) => ({
+    id: j.id, reg: j.vehicle_rego || '', rego: j.vehicle_rego || '', customerName: j.customer_name,
+    email: j.email || j.customer_email || '', customerEmail: j.email || j.customer_email || '',
+    phone: j.customer_phone || '',
+    model: j.customer_name ? `${j.vehicle_rego} — ${j.customer_name}` : j.vehicle_rego || 'Vehicle',
+    vehicleLabel: j.vehicle_label || j.vehicle_rego || '',
+    mileage: j.vehicle_mileage || null, year: j.vehicle_year || null,
+    make: j.vehicle_make || '', vehicleModel: j.vehicle_model || '',
+    services: (j.service_ids || []).map((id: string) => SERVICES.find(s => s.id === id)?.name || id),
+    suggestedQuote: parseFloat(j.total_price) || 0,
+    quoteItems: j.quote_items || null,
+  });
+  type QuoteData = { parts: { name: string; qty: number; unitPrice: number }[]; labourHours: number; labourRate: number; other: { name: string; amount: number }[]; shopFee: number; discount: number; notes: string; total: number };
+  const quoteDataFromItems = (qi: any, fallbackTotal = 0): QuoteData => {
+    const parts = Array.isArray(qi?.parts) ? qi.parts.filter((x: any) => x?.name) : [];
+    const other = Array.isArray(qi?.other) ? qi.other.filter((x: any) => x?.name) : [];
+    const d = { parts, labourHours: qi?.labourHours || 0, labourRate: qi?.labourRate || 0, other, shopFee: qi?.shopFee || 0, discount: qi?.discount || 0, notes: qi?.notes || '', total: 0 };
+    const computed = parts.reduce((t: number, x: any) => t + (x.qty || 0) * (x.unitPrice || 0), 0) + d.labourHours * d.labourRate
+      + other.reduce((t: number, x: any) => t + (x.amount || 0), 0) + d.shopFee - d.discount;
+    d.total = computed > 0 ? Math.max(0, computed) : fallbackTotal;
+    return d;
+  };
+  const downloadBase64Pdf = (b64: string, filename: string) => {
+    const bytes = Uint8Array.from(atob(b64), c => c.charCodeAt(0));
+    const url = URL.createObjectURL(new Blob([bytes], { type: 'application/pdf' }));
+    const a = document.createElement('a'); a.href = url; a.download = filename; a.click();
+    setTimeout(() => URL.revokeObjectURL(url), 5000);
+  };
+  // Reflect a saved/sent quote everywhere it's shown, without a reload.
+  const applyQuoteResult = (bookingId: string, quoteItems: any, total: number) => {
+    const patch = (r: any) => r.id === bookingId ? { ...r, quote_items: quoteItems, quoted_price: total } : r;
+    setAllJobRows(prev => prev.map(patch));
+    setPastJobs(prev => prev.map(patch));
+    setIncomingJobs(prev => prev.map(j => j.id === bookingId ? { ...j, quoteItems } : j));
+  };
+
+  // Build a branded, itemised quote PDF (logo + QR) and return base64.
+  // Defaults to what's in the quote editor; pass `data` to render a stored quote.
+  const buildQuotePdf = async (job: any, data?: QuoteData): Promise<string> => {
+    const d: QuoteData = data ?? { parts: qParts, labourHours: qLabourHours, labourRate: qLabourRate, other: qOther, shopFee: qShopFee, discount: qDiscount, notes: qNotes, total: qTotal };
+    const dLabourTotal = (d.labourHours || 0) * (d.labourRate || 0);
     const doc = new jsPDF({ unit: 'mm', format: 'a4' });
     const logo = await fetchDataUrl('/torqued-logo.png');
     // QR deep-links straight to this quote's review-and-pay screen (quote pre-loaded)
@@ -691,19 +759,19 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
     doc.text('ITEMISED QUOTE', 15, y); doc.setDrawColor(226, 232, 240); doc.line(15, y + 2, 195, y + 2);
     y += 9; doc.setFontSize(9); doc.setTextColor(21, 4, 2);
     const row = (label: string, amt: string, bold = false) => { doc.setFont('Helvetica', bold ? 'bold' : 'normal'); doc.text(label, 15, y); doc.text(amt, 195, y, { align: 'right' }); y += 6.5; };
-    qParts.filter(p => p.name).forEach(p => row(`${p.name}  x${p.qty}`, `$${(p.qty * p.unitPrice).toFixed(2)}`));
-    if (qLabourTotal > 0) row(`Labour (${qLabourHours}h @ $${qLabourRate}/hr)`, `$${qLabourTotal.toFixed(2)}`);
-    qOther.filter(o => o.name).forEach(o => row(o.name, `$${o.amount.toFixed(2)}`));
-    if (qShopFee > 0) row('Workshop fee (freight, sundries & consumables)', `$${qShopFee.toFixed(2)}`);
-    if (qDiscount > 0) row('Discount', `-$${qDiscount.toFixed(2)}`);
+    d.parts.filter(p => p.name).forEach(p => row(`${p.name}  x${p.qty}`, `$${((p.qty || 0) * (p.unitPrice || 0)).toFixed(2)}`));
+    if (dLabourTotal > 0) row(`Labour (${d.labourHours}h @ $${d.labourRate}/hr)`, `$${dLabourTotal.toFixed(2)}`);
+    d.other.filter(o => o.name).forEach(o => row(o.name, `$${(o.amount || 0).toFixed(2)}`));
+    if (d.shopFee > 0) row('Workshop fee (freight, sundries & consumables)', `$${d.shopFee.toFixed(2)}`);
+    if (d.discount > 0) row('Discount', `-$${d.discount.toFixed(2)}`);
     y += 2; doc.setDrawColor(226, 232, 240); doc.line(15, y, 195, y); y += 7;
-    doc.setFontSize(12); doc.setTextColor(255, 24, 0); row('TOTAL (GST incl.)', `$${qTotal.toFixed(2)}`, true);
+    doc.setFontSize(12); doc.setTextColor(255, 24, 0); row('TOTAL (GST incl.)', `$${d.total.toFixed(2)}`, true);
 
     // Notes
-    if (qNotes.trim()) {
+    if (d.notes.trim()) {
       y += 4; doc.setFont('Helvetica', 'bold'); doc.setFontSize(9); doc.setTextColor(21, 4, 2); doc.text('Notes', 15, y);
       y += 5; doc.setFont('Helvetica', 'normal'); doc.setFontSize(8.5); doc.setTextColor(80, 80, 80);
-      doc.splitTextToSize(qNotes.trim(), 180).forEach((line: string) => { doc.text(line, 15, y); y += 4.5; });
+      doc.splitTextToSize(d.notes.trim(), 180).forEach((line: string) => { doc.text(line, 15, y); y += 4.5; });
     }
 
     // QR + CTA — placed after notes; spill to a new page if less than 50mm remaining
@@ -853,6 +921,7 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
       .then(r => r.json())
       .then(({ jobs: rows }) => {
         const all = rows || [];
+        setAllJobRows(all);
         // Real revenue this week = paid jobs in the last 7 days (no commission — paid out in full)
         const weekAgo = Date.now() - 7 * 864e5;
         const paidThisWeek = all.filter((r: any) => r.payment_status === 'confirmed' && new Date(r.completed_at || r.created_at).getTime() >= weekAgo);
@@ -940,6 +1009,9 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
   const [incomingJobs, setIncomingJobs] = useState<any[]>([]);
   const [weekRevenue, setWeekRevenue] = useState(0);
   const [pastJobs, setPastJobs] = useState<any[]>([]);
+  // Every booking row for this workshop, all channels (online, phone, walk-in) —
+  // the single source for the diary and the Quotes section.
+  const [allJobRows, setAllJobRows] = useState<any[]>([]);
   const [jobHistory, setJobHistory] = useState<any[]>([]);
   const [billing, setBilling] = useState<any>(null);
   const [customers, setCustomers] = useState<any[]>([]);
@@ -1083,7 +1155,7 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
 
   const [showColdQuote, setShowColdQuote] = useState(false);
   const [coldBusy, setColdBusy] = useState(false);
-  const [coldForm, setColdForm] = useState({ customerName: '', email: '', phone: '', rego: '', make: '', model: '', description: '', date: '' });
+  const [coldForm, setColdForm] = useState<{ customerName: string; email: string; phone: string; rego: string; make: string; model: string; description: string; date: string; channel: 'phone' | 'walk_in' }>({ customerName: '', email: '', phone: '', rego: '', make: '', model: '', description: '', date: '', channel: 'walk_in' });
 
   // OTP / service history access states
   type HistoryAccessState = 'idle' | 'checking' | 'no_account' | 'prior_booking' | 'needs_otp' | 'otp_sent' | 'already_sent' | 'no_email' | 'entering_code' | 'verifying' | 'granted' | 'error';
@@ -1838,8 +1910,8 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
           </div>
           {showOnlyDiagnostics && (
             <div className="flex gap-2 shrink-0">
-              <Button size="sm" variant="outline" className="text-foreground border-border" onClick={() => { setActiveTab('jobs'); setJobsSubtab('cold'); }}>View cold quotes</Button>
-              <Button size="sm" className="bg-torqued-red text-white" onClick={() => { setColdForm({ customerName: '', email: '', phone: '', rego: '', make: '', model: '', description: '', date: '' }); setShowColdQuote(true); }}>+ New cold quote</Button>
+              <Button size="sm" variant="outline" className="text-foreground border-border" onClick={() => { setActiveTab('jobs'); setJobsSubtab('cold'); }}>View all quotes</Button>
+              <Button size="sm" className="bg-torqued-red text-white" onClick={() => { setColdForm({ customerName: '', email: '', phone: '', rego: '', make: '', model: '', description: '', date: '', channel: 'walk_in' }); setShowColdQuote(true); }}>+ New quote</Button>
             </div>
           )}
         </div>
@@ -2436,17 +2508,26 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
   );
 
   const renderCalendar = () => {
-    // Confirmed jobs with a real scheduled date/time — the source of truth for the calendar
-    // (accepted/in-progress/paid jobs; completed jobs still show if scheduled for a past date).
-    const isConfirmedCalendarJob = (j: any) => !!j.date && (j.status === 'accepted' || j.status === 'in_progress' || j.status === 'completed' || j.payment_status === 'confirmed');
-    const confirmedJobs = pastJobs.filter(isConfirmedCalendarJob);
+    // ONE diary for every channel: online (Torqued marketplace) bookings, phone
+    // bookings and walk-ins. Online requests show once booked/paid; phone and
+    // walk-in jobs show as soon as they have a date (they usually pay in store).
+    const isDiaryJob = (j: any) => !!j.date && j.status !== 'cancelled' && (
+      j.is_cold_quote ||
+      ['booked', 'accepted', 'in_progress', 'completed'].includes(j.status) || j.payment_status === 'confirmed');
+    const confirmedJobs = allJobRows.filter(isDiaryJob);
     const jobsOnDate = (iso: string) => confirmedJobs.filter((j: any) => localISO(new Date(j.date)) === iso);
     const jobLabel = (j: any) => j.vehicle_label || j.vehicle_rego || j.customer_name || 'Job';
     const jobServiceLabel = (j: any) => (j.service_ids || []).map((id: string) => SERVICES.find((s: any) => s.id === id)?.name || id).join(', ') || jobSummaryTitle(j);
     const openJobFromCalendar = (j: any) => {
       setActiveTab('jobs');
+      if (!j.is_cold_quote && j.status === 'booked' && j.payment_status !== 'confirmed') { setJobsSubtab('accept'); return; }
       setJobsSubtab(j.status === 'completed' ? 'history' : (localISO(new Date(j.date)) === localISO(new Date()) ? 'today' : 'upcoming'));
     };
+    const newDiaryBooking = (iso?: string) => {
+      setColdForm({ customerName: '', email: '', phone: '', rego: '', make: '', model: '', description: '', date: iso ? `${iso}T09:00` : '', channel: 'phone' });
+      setShowColdQuote(true);
+    };
+    const blockClass = (j: any) => cn(CHANNEL_META[channelOf(j)].block, j.status === 'completed' && 'opacity-60');
     return (
     <div className="space-y-6">
       {/* Staff Roster */}
@@ -2571,7 +2652,16 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
       })()}
 
       <div className="flex justify-between items-center">
-        <h2 className="text-3xl">Workshop Calendar</h2>
+        <div className="space-y-1">
+          <h2 className="text-3xl">Workshop Diary</h2>
+          <div className="flex items-center gap-3 flex-wrap text-[10px] font-black uppercase tracking-widest text-muted" aria-label="Booking channels">
+            {(['online', 'phone', 'walk_in'] as const).map(c => (
+              <span key={c} className="inline-flex items-center gap-1"><span className={cn('w-2.5 h-2.5 rounded-sm', CHANNEL_META[c].dot)} />{CHANNEL_META[c].label}</span>
+            ))}
+            <span className="normal-case tracking-normal font-bold">· faded = completed</span>
+          </div>
+        </div>
+        <Button size="sm" className="bg-torqued-red text-white ml-auto mr-2" onClick={() => newDiaryBooking(calendarView === 'day' ? calendarDayDate : localISO(new Date()))}>+ New booking</Button>
         <div className="flex bg-card p-1 rounded-xl border border-border">
           {(['day', 'week', 'month'] as const).map(v => (
             <button
@@ -2687,12 +2777,13 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                         animate={{ opacity: 1, scale: 1 }}
                         className={cn(
                           "absolute left-1 right-1 rounded-lg p-2 text-white shadow-sm cursor-pointer hover:brightness-110 transition-all z-20",
-                          job.status === 'completed' ? "bg-emerald-500" : job.status === 'in_progress' ? "bg-torqued-red" : "bg-blue-500"
+                          blockClass(job)
                         )}
+                        title={`${CHANNEL_META[channelOf(job)].label} · ${job.status}`}
                         style={{ top: `${top}px`, height: `${height}px` }}
                         onClick={() => openJobFromCalendar(job)}
                       >
-                         <p className="text-[8px] font-bold uppercase opacity-80">{d.toLocaleTimeString('en-NZ', { hour: '2-digit', minute: '2-digit' })}</p>
+                         <p className="text-[8px] font-bold uppercase opacity-80">{d.toLocaleTimeString('en-NZ', { hour: '2-digit', minute: '2-digit' })} · {CHANNEL_META[channelOf(job)].label}{job.status === 'completed' ? ' ✓' : ''}</p>
                          <h4 className="text-[10px] font-bold leading-tight truncate">{jobLabel(job)}</h4>
                          <p className="text-[8px] truncate">{jobServiceLabel(job)}</p>
                       </motion.div>
@@ -2759,8 +2850,8 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                           <div
                             key={job.id}
                             onClick={(e) => { e.stopPropagation(); openJobFromCalendar(job); }}
-                            className={cn("mt-1 p-1 text-white text-[8px] font-bold rounded uppercase leading-tight truncate",
-                            job.status === 'completed' ? 'bg-emerald-500' : job.status === 'in_progress' ? 'bg-torqued-red' : 'bg-blue-500')}>
+                            title={`${CHANNEL_META[channelOf(job)].label} · ${job.status}`}
+                            className={cn("mt-1 p-1 text-white text-[8px] font-bold rounded uppercase leading-tight truncate", blockClass(job))}>
                             {jobLabel(job).split('(')[0].trim()}
                           </div>
                         ))}
@@ -2776,7 +2867,7 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
       ) : (() => {
         const dayJobs = jobsOnDate(calendarDayDate).sort((a: any, b: any) => new Date(a.date).getTime() - new Date(b.date).getTime());
         const shiftDate = (delta: number) => { const d = new Date(calendarDayDate + 'T00:00:00'); d.setDate(d.getDate() + delta); setCalendarDayDate(localISO(d)); };
-        const dayRevenue = dayJobs.reduce((s: number, j: any) => s + (parseFloat(j.total_price) || 0), 0);
+        const dayRevenue = dayJobs.reduce((s: number, j: any) => s + (parseFloat(j.quoted_price ?? j.total_price) || 0), 0);
         return (
         <Card className="p-6 space-y-6">
           <div className="flex gap-4 items-center justify-between border-b border-border pb-4 flex-wrap">
@@ -2803,18 +2894,21 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
             </div>
           </div>
           <div className="space-y-3">
-            {dayJobs.length === 0 && <p className="text-sm text-muted italic text-center py-8">No confirmed jobs scheduled for this day.</p>}
+            {dayJobs.length === 0 && (
+              <div className="text-center py-8 space-y-3">
+                <p className="text-sm text-muted italic">Nothing booked for this day.</p>
+                <Button size="sm" variant="outline" className="border-border text-foreground" onClick={() => newDiaryBooking(calendarDayDate)}>+ Add a phone or walk-in booking</Button>
+              </div>
+            )}
             {dayJobs.map((job: any) => (
               <div key={job.id} className="flex gap-6 items-start p-4 hover:bg-foreground/[0.03] rounded-2xl transition-all group cursor-pointer" onClick={() => openJobFromCalendar(job)}>
                 <div className="w-16 text-sm font-bold text-muted pt-1">{new Date(job.date).toLocaleTimeString('en-NZ', { hour: '2-digit', minute: '2-digit' })}</div>
-                <div className={cn(
-                  "w-1 h-12 rounded-full shrink-0",
-                  job.status === 'completed' ? "bg-emerald-500" : job.status === 'in_progress' ? "bg-torqued-red" : "bg-blue-500"
-                )} />
+                <div className={cn("w-1 h-12 rounded-full shrink-0", blockClass(job))} />
                 <div className="flex-1 min-w-0">
                   <div className="flex justify-between items-start gap-2">
                     <div className="min-w-0">
                       <h4 className="text-lg font-bold text-foreground truncate">{jobLabel(job)}</h4>
+                      <p className="text-[10px] font-black uppercase tracking-widest text-muted">{CHANNEL_META[channelOf(job)].label}{job.customer_name && job.customer_name !== job.vehicle_rego ? ` · ${job.customer_name}` : ''}{job.customer_phone ? ` · ${job.customer_phone}` : ''}</p>
                       <p className="text-sm text-muted truncate">{jobServiceLabel(job)}</p>
                     </div>
                     <span className={cn(
@@ -3560,6 +3654,103 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
     </div>
   );
 
+  // Quotes = every manual (phone/walk-in) quote + every online job that has been
+  // quoted. Saved here whether or not the email went out, each downloadable as a PDF.
+  const isQuoteRow = (r: any) => r?.status !== 'cancelled' && (r?.is_cold_quote || r?.status === 'quoted' || quoteHasPrices(r));
+  const [quotesFilter, setQuotesFilter] = useState<'open' | 'not_sent' | 'sent' | 'paid' | 'all'>('open');
+  const [quoteRowBusy, setQuoteRowBusy] = useState<string | null>(null);
+  const renderQuotes = () => {
+    const rows = allJobRows.filter(isQuoteRow)
+      .sort((a: any, b: any) => new Date(b.created_at || 0).getTime() - new Date(a.created_at || 0).getTime());
+    const filtered = rows.filter((r: any) => {
+      const st = quoteStatusOf(r);
+      if (quotesFilter === 'open') return st !== 'paid' && r.status !== 'completed';
+      if (quotesFilter === 'not_sent') return st === 'not_sent' || st === 'saved';
+      if (quotesFilter === 'sent') return st === 'sent';
+      if (quotesFilter === 'paid') return st === 'paid' || r.status === 'completed';
+      return true;
+    });
+    const count = (f: typeof quotesFilter) => rows.filter((r: any) => {
+      const st = quoteStatusOf(r);
+      return f === 'open' ? st !== 'paid' && r.status !== 'completed' : f === 'not_sent' ? (st === 'not_sent' || st === 'saved') : f === 'sent' ? st === 'sent' : f === 'paid' ? (st === 'paid' || r.status === 'completed') : true;
+    }).length;
+    const downloadRow = async (r: any) => {
+      setQuoteRowBusy(r.id);
+      try { downloadBase64Pdf(await buildQuotePdf(rowToJobShape(r), quoteDataFromItems(r.quote_items, parseFloat(r.quoted_price ?? r.total_price) || 0)), `Torqued-Quote-${String(r.id).toUpperCase()}.pdf`); }
+      catch { alert('Could not build the PDF.'); }
+      finally { setQuoteRowBusy(null); }
+    };
+    const emailRow = async (r: any) => {
+      setQuoteRowBusy(r.id);
+      try {
+        const data = quoteDataFromItems(r.quote_items, parseFloat(r.quoted_price ?? r.total_price) || 0);
+        const pdfBase64 = await buildQuotePdf(rowToJobShape(r), data);
+        const { meta: _m, ...items } = r.quote_items || {};
+        const resp = await fetch('/api/mechanic/send-quote-pdf', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ bookingId: r.id, total: data.total, note: r.quote_note || null, pdfBase64, items }) });
+        const d = await resp.json().catch(() => ({}));
+        if (!resp.ok) { alert(d.error || 'Could not send.'); return; }
+        applyQuoteResult(r.id, d.quoteItems, data.total);
+        alert(d.emailed ? `Quote emailed to ${d.sentTo}.` : `Not emailed: ${d.reason}\n\nThe quote is still saved — download the PDF to hand it over.`);
+      } catch { alert('Could not send the quote.'); }
+      finally { setQuoteRowBusy(null); }
+    };
+    const chips: [typeof quotesFilter, string][] = [['open', 'Open'], ['not_sent', 'Not emailed'], ['sent', 'Emailed'], ['paid', 'Accepted / done'], ['all', 'All']];
+    return (
+      <div className="space-y-4">
+        <div className="flex items-start justify-between gap-3 flex-wrap">
+          <p className="text-sm text-muted max-w-xl">Every quote you write — phone, walk-in or online — is kept here, whether or not the email went out. Download any quote as a PDF to print or hand over.</p>
+          <Button size="sm" className="bg-torqued-red text-white shrink-0" onClick={() => { setColdForm({ customerName: '', email: '', phone: '', rego: '', make: '', model: '', description: '', date: '', channel: 'walk_in' }); setShowColdQuote(true); }}>+ New quote</Button>
+        </div>
+        <div className="flex gap-1.5 flex-wrap" role="tablist" aria-label="Quote filter">
+          {chips.map(([id, label]) => (
+            <button key={id} role="tab" aria-selected={quotesFilter === id} onClick={() => setQuotesFilter(id)}
+              className={cn('px-3 h-8 rounded-lg text-[11px] font-black uppercase tracking-wider transition-all', quotesFilter === id ? 'bg-foreground text-background' : 'bg-card border border-border text-muted hover:text-foreground')}>
+              {label} ({count(id)})
+            </button>
+          ))}
+        </div>
+        {filtered.length === 0 && <Card className="p-10 text-center text-muted italic bg-card border-border">No quotes here.</Card>}
+        {filtered.map((r: any) => {
+          const st = quoteStatusOf(r);
+          const ch = channelOf(r);
+          const meta = r.quote_items?.meta || {};
+          const email = r.email || r.customer_email || '';
+          const total = quoteDataFromItems(r.quote_items, parseFloat(r.quoted_price ?? r.total_price) || 0).total;
+          const custName = r.customer_name && r.customer_name !== r.vehicle_rego ? r.customer_name : null;
+          const busy = quoteRowBusy === r.id;
+          return (
+            <Card key={r.id} className={cn('p-4 bg-card space-y-3', st === 'not_sent' ? 'border-amber-500/50' : 'border-border')}>
+              <div className="flex items-start justify-between gap-3">
+                <div className="min-w-0 space-y-1">
+                  <div className="flex items-center gap-1.5 flex-wrap">
+                    {r.vehicle_rego && <span className="torqued-badge text-[10px]">{r.vehicle_rego}</span>}
+                    <span className="inline-flex items-center gap-1 text-[9px] uppercase font-black tracking-widest text-muted"><span className={cn('w-2 h-2 rounded-full', CHANNEL_META[ch].dot)} />{CHANNEL_META[ch].label}</span>
+                    <span className={cn('text-[9px] uppercase font-black tracking-widest px-1.5 py-0.5 rounded border', QUOTE_STATUS_META[st].cls)}>{QUOTE_STATUS_META[st].label}</span>
+                  </div>
+                  <p className="font-black text-foreground truncate">{custName || r.vehicle_rego || 'Customer'}</p>
+                  <p className="text-xs text-muted truncate">{[r.vehicle_label, email, r.customer_phone].filter(Boolean).join(' · ')}</p>
+                  <p className="text-[11px] text-muted">
+                    Ref {String(r.id).toUpperCase()} · created {new Date(r.created_at).toLocaleDateString('en-NZ')}
+                    {r.date ? ` · booked ${new Date(r.date).toLocaleString('en-NZ', { weekday: 'short', day: 'numeric', month: 'short', hour: 'numeric', minute: '2-digit' })}` : ''}
+                    {st === 'sent' && meta.sentAt ? ` · emailed ${new Date(meta.sentAt).toLocaleDateString('en-NZ')}${meta.sentTo ? ` to ${meta.sentTo}` : ''}` : ''}
+                  </p>
+                  {st === 'not_sent' && meta.sendError && <p className="text-[11px] font-bold text-amber-600">{meta.sendError}</p>}
+                </div>
+                <p className="font-black text-torqued-red shrink-0">{total > 0 ? formatCurrency(total) : '—'}</p>
+              </div>
+              <div className="flex flex-wrap gap-2">
+                <Button size="sm" variant="outline" disabled={busy || st === 'draft'} className="text-emerald-600 border-border hover:bg-background" onClick={() => downloadRow(r)}>{busy ? 'Working…' : 'Download PDF'}</Button>
+                <Button size="sm" variant="outline" disabled={busy || !email || st === 'draft' || st === 'paid'} title={!email ? 'No email address on file' : undefined} className="text-foreground border-border hover:bg-background" onClick={() => emailRow(r)}>{st === 'sent' ? 'Re-send email' : 'Email quote'}</Button>
+                <Button size="sm" variant="outline" disabled={busy} className="text-foreground border-border hover:bg-background" onClick={() => openQuoteEditor(rowToJobShape(r))}>{st === 'draft' ? 'Build quote' : 'Edit quote'}</Button>
+              </div>
+            </Card>
+          );
+        })}
+      </div>
+    );
+  };
+
   const renderMyJobs = () => {
     const isToday = (d?: string) => d && new Date(d).toDateString() === new Date().toDateString();
     // A job is "active" once it's accepted OR paid (incl. paid cold quotes) — but not completed.
@@ -3575,7 +3766,7 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
       { id: 'today' as const, label: 'Today', n: todayJobs.length },
       { id: 'upcoming' as const, label: 'Upcoming', n: upcoming.length },
       { id: 'history' as const, label: 'History', n: history.length },
-      { id: 'cold' as const, label: 'Cold quotes', n: coldQuotes.length },
+      { id: 'cold' as const, label: 'Quotes', n: allJobRows.filter(isQuoteRow).filter(r => ['not_sent', 'saved', 'draft'].includes(quoteStatusOf(r))).length },
     ];
     return (
       <div className="space-y-5 pb-12">
@@ -3591,7 +3782,7 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
         {jobsSubtab === 'today' && renderJobList(todayJobs, 'No jobs scheduled for today.')}
         {jobsSubtab === 'upcoming' && renderJobList(upcoming, 'No upcoming jobs.')}
         {jobsSubtab === 'history' && renderJobList(history, 'No completed jobs yet.')}
-        {jobsSubtab === 'cold' && renderJobList(coldQuotes, 'No cold quotes written yet.')}
+        {jobsSubtab === 'cold' && renderQuotes()}
       </div>
     );
   };
@@ -3602,7 +3793,7 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
         <div>
           <p className="text-sm text-muted">Customers who've booked, been cold-quoted, or added by your workshop.</p>
         </div>
-        <Button size="sm" className="bg-torqued-red text-white shrink-0" onClick={() => { setColdForm({ customerName: '', email: '', phone: '', rego: '', make: '', model: '', description: '', date: '' }); setShowColdQuote(true); }}>+ Add new customer</Button>
+        <Button size="sm" className="bg-torqued-red text-white shrink-0" onClick={() => { setColdForm({ customerName: '', email: '', phone: '', rego: '', make: '', model: '', description: '', date: '', channel: 'walk_in' }); setShowColdQuote(true); }}>+ Add new customer</Button>
       </div>
       <input value={custSearch} onChange={e => setCustSearch(e.target.value)} placeholder="Search name, email, phone or rego…"
         className="w-full bg-card border border-border rounded-xl px-4 h-11 text-sm text-foreground focus:outline-none focus:border-torqued-red" />
@@ -3619,7 +3810,7 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
           <div className="flex gap-2 shrink-0">
             <Button size="sm" variant="outline" className="text-foreground border-border" onClick={() => openEditCustomer(c)}>Edit</Button>
             <Button size="sm" variant="outline" className="text-foreground border-border" onClick={() => {
-              setColdForm({ customerName: c.name || '', email: c.email || '', phone: c.phone || '', rego: c.regos?.[0] || '', make: '', model: '', description: '', date: '' });
+              setColdForm({ customerName: c.name || '', email: c.email || '', phone: c.phone || '', rego: c.regos?.[0] || '', make: '', model: '', description: '', date: '', channel: 'walk_in' });
               setShowColdQuote(true);
             }}>New quote</Button>
           </div>
@@ -4916,7 +5107,13 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
           <div className="w-full max-w-md bg-card border border-border rounded-3xl p-6 space-y-4 max-h-[90vh] overflow-y-auto">
             <div>
               <h3 className="text-xl font-black tracking-tight text-foreground">New quote</h3>
-              <p className="text-xs text-muted">Search an existing customer, or add a new one. We email them the quote; if they pay online, you receive the full amount — Torqued takes no commission.</p>
+              <p className="text-xs text-muted">Phone booking or walk-in. Add an email to send the quote; without one it's still saved and downloadable as a PDF. If they pay online you receive the full amount — Torqued takes no commission.</p>
+            </div>
+            <div className="flex gap-1 p-1 bg-background border border-border rounded-xl" role="radiogroup" aria-label="How did this customer contact you?">
+              {([['phone', 'Phone booking'], ['walk_in', 'Walk-in']] as const).map(([v, l]) => (
+                <button key={v} type="button" role="radio" aria-checked={coldForm.channel === v} onClick={() => setColdForm(c => ({ ...c, channel: v }))}
+                  className={cn('flex-1 h-9 rounded-lg text-xs font-black uppercase tracking-wider transition-all', coldForm.channel === v ? 'bg-torqued-red text-white' : 'text-muted hover:text-foreground')}>{l}</button>
+              ))}
             </div>
 
             {/* Search existing customers (name / phone / rego) */}
@@ -4937,7 +5134,7 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
             </div>
 
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
-              {([['customerName','Customer name *'],['email','Email *'],['phone','Phone'],['rego','Rego'],['make','Make'],['model','Model']] as const).map(([f,l]) => (
+              {([['customerName','Customer name *'],['email','Email (to send the quote)'],['phone','Phone'],['rego','Rego'],['make','Make'],['model','Model']] as const).map(([f,l]) => (
                 <input key={f} value={(coldForm as any)[f]} placeholder={l}
                   onChange={e => {
                     setColdForm(c => ({ ...c, [f]: f === 'rego' ? e.target.value.toUpperCase() : e.target.value }));
@@ -5075,12 +5272,12 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
 
             <textarea value={coldForm.description} onChange={e => setColdForm(c => ({ ...c, description: e.target.value }))} rows={2} placeholder="Work required / notes" className="w-full bg-background border border-border rounded-lg px-3 py-2 text-sm text-foreground resize-none" />
             <div className="space-y-1">
-              <label className="text-[10px] font-black uppercase tracking-widest text-muted">Proposed date (optional — customer can confirm)</label>
-              <input type="date" value={coldForm.date} onChange={e => setColdForm(c => ({ ...c, date: e.target.value }))} className="w-full bg-background border border-border rounded-lg px-3 h-10 text-sm text-foreground" />
+              <label className="text-[10px] font-black uppercase tracking-widest text-muted">Drop-off date & time (optional — adds it to your diary)</label>
+              <input type="datetime-local" value={coldForm.date} onChange={e => setColdForm(c => ({ ...c, date: e.target.value }))} className="w-full bg-background border border-border rounded-lg px-3 h-10 text-sm text-foreground" />
             </div>
             <div className="flex gap-2">
               <Button variant="outline" fullWidth className="text-foreground border-border" onClick={() => { setShowColdQuote(false); setHistAccessState('idle'); setUnlockedHistory(null); setColdRegoLookedUp(false); }}>Cancel</Button>
-              <Button fullWidth className="bg-torqued-red text-white" disabled={coldBusy || !coldForm.customerName || !coldForm.email} onClick={async () => {
+              <Button fullWidth className="bg-torqued-red text-white" disabled={coldBusy || !coldForm.customerName.trim() || (!coldForm.email.trim() && !coldForm.phone.trim())} onClick={async () => {
                 setColdBusy(true);
                 try {
                   const r = await fetch('/api/mechanic/cold-quote', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ mechanicId: user!.id, ...coldForm }) });
@@ -5088,7 +5285,17 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                   if (!r.ok) { alert(d.error || 'Could not create cold quote.'); return; }
                   setShowColdQuote(false);
                   setHistAccessState('idle'); setUnlockedHistory(null); setColdRegoLookedUp(false);
-                  openQuoteEditor({ id: d.bookingId, reg: coldForm.rego, customerName: coldForm.customerName, model: `${coldForm.make} ${coldForm.model}`.trim() || coldForm.rego, services: [] });
+                  // Show it in the diary + Quotes straight away (mirrors the row the server created)
+                  const newRow = {
+                    id: d.bookingId, mechanic_id: user!.id, vehicle_rego: coldForm.rego || null, customer_name: coldForm.customerName,
+                    email: coldForm.email || null, customer_phone: coldForm.phone || null, service_ids: [], status: 'booked', payment_status: 'pending',
+                    date: coldForm.date || null, description: coldForm.description || null, is_cold_quote: true, total_price: 0,
+                    quote_items: { meta: { channel: coldForm.channel } }, created_at: new Date().toISOString(),
+                    vehicle_label: [coldForm.make, coldForm.model].filter(Boolean).join(' ') || coldForm.rego || '',
+                  };
+                  setAllJobRows(prev => [newRow, ...prev]);
+                  setPastJobs(prev => [newRow, ...prev]);
+                  openQuoteEditor({ ...rowToJobShape(newRow), model: `${coldForm.make} ${coldForm.model}`.trim() || coldForm.rego, services: [] });
                 } catch { alert('Could not create cold quote.'); }
                 finally { setColdBusy(false); }
               }}>{coldBusy ? 'Creating…' : 'Build quote →'}</Button>
@@ -5223,39 +5430,67 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                 <div className="flex justify-between font-black text-foreground text-lg pt-1.5 border-t border-border"><span>Total (GST incl.)</span><span className="text-torqued-red">${qTotal.toFixed(2)}</span></div>
               </div>
 
-              <Button fullWidth disabled={qSending} className="bg-torqued-red text-white" onClick={async () => {
-                setQSending(true);
-                try {
-                  const pdfBase64 = await buildQuotePdf(quoteJob);
-                  const note = [
-                    ...qParts.filter(p=>p.name).map(p=>`${p.name} x${p.qty} — $${(p.qty*p.unitPrice).toFixed(2)}`),
-                    `Labour: ${qLabourHours}h × $${qLabourRate} = $${qLabourTotal.toFixed(2)}`,
-                    ...qOther.filter(o=>o.name).map(o=>`${o.name} — $${o.amount.toFixed(2)}`),
-                    qShopFee>0?`Workshop fee — $${qShopFee.toFixed(2)}`:'',
-                    qDiscount>0?`Discount: -$${qDiscount.toFixed(2)}`:'',
-                    qNotes.trim()?`\nNotes: ${qNotes.trim()}`:''
-                  ].filter(Boolean).join('\n');
-                  const r = await fetch('/api/mechanic/send-quote-pdf', {
-                    method: 'POST', headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({
-                      bookingId: quoteJob.id, total: qTotal, note, customerName: quoteJob.customerName, pdfBase64,
-                      items: { parts: qParts, labourHours: qLabourHours, labourRate: qLabourRate, shopFee: qShopFee, other: qOther, discount: qDiscount, notes: qNotes, leadTimeDays: qLeadTimeDays || 0 },
-                    }),
-                  });
-                  if (r.ok) {
-                    // Mark diagnostic job as quoted → moves it to the SENT filter
-                    setIncomingJobs(prev => prev.map(j => j.id === quoteJob.id
-                      ? { ...j, quoteItems: { parts: qParts, labourHours: qLabourHours, labourRate: qLabourRate, shopFee: qShopFee, other: qOther, discount: qDiscount, notes: qNotes, leadTimeDays: qLeadTimeDays || 0 } }
-                      : j
-                    ));
-                    fetch('/api/mechanic/update-job-status', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ bookingId: quoteJob.id, status: 'quoted' }) }).catch(() => {});
-                    setManualQuoteFilter('sent');
-                    setActiveTab('manual-quotes');
-                    setQuoteJob(null);
-                  } else { const d = await r.json(); alert(d.error || 'Could not send quote.'); }
-                } catch (e) { alert('Could not generate/send quote.'); }
-                finally { setQSending(false); }
-              }}>{qSending ? 'Generating & sending…' : `Email Quote PDF — $${qTotal.toFixed(2)}`}</Button>
+              {(() => {
+                const quoteEmail = quoteJob.email || quoteJob.customerEmail || '';
+                const items = { parts: qParts, labourHours: qLabourHours, labourRate: qLabourRate, shopFee: qShopFee, other: qOther, discount: qDiscount, notes: qNotes, leadTimeDays: qLeadTimeDays || 0 };
+                const note = [
+                  ...qParts.filter(p=>p.name).map(p=>`${p.name} x${p.qty} — $${(p.qty*p.unitPrice).toFixed(2)}`),
+                  `Labour: ${qLabourHours}h × $${qLabourRate} = $${qLabourTotal.toFixed(2)}`,
+                  ...qOther.filter(o=>o.name).map(o=>`${o.name} — $${o.amount.toFixed(2)}`),
+                  qShopFee>0?`Workshop fee — $${qShopFee.toFixed(2)}`:'',
+                  qDiscount>0?`Discount: -$${qDiscount.toFixed(2)}`:'',
+                  qNotes.trim()?`\nNotes: ${qNotes.trim()}`:''
+                ].filter(Boolean).join('\n');
+                const goToQuotes = () => { setQuoteJob(null); setActiveTab('jobs'); setJobsSubtab('cold'); };
+                // Save only — no email. Walk-ins without email, or handing over a printed copy.
+                const saveOnly = async (thenDownload: boolean) => {
+                  setQSending(true);
+                  try {
+                    const r = await fetch('/api/mechanic/save-quote', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ bookingId: quoteJob.id, total: qTotal, note, items }) });
+                    const d = await r.json().catch(() => ({}));
+                    if (!r.ok) { alert(d.error || 'Could not save the quote.'); return; }
+                    applyQuoteResult(quoteJob.id, d.quoteItems, qTotal);
+                    if (thenDownload) downloadBase64Pdf(await buildQuotePdf(quoteJob), `Torqued-Quote-${String(quoteJob.id).toUpperCase()}.pdf`);
+                    goToQuotes();
+                  } catch { alert('Could not save the quote. Check your connection and try again.'); }
+                  finally { setQSending(false); }
+                };
+                const emailQuote = async () => {
+                  setQSending(true);
+                  try {
+                    const pdfBase64 = await buildQuotePdf(quoteJob);
+                    const r = await fetch('/api/mechanic/send-quote-pdf', {
+                      method: 'POST', headers: { 'Content-Type': 'application/json' },
+                      body: JSON.stringify({ bookingId: quoteJob.id, total: qTotal, note, customerName: quoteJob.customerName, pdfBase64, items }),
+                    });
+                    const d = await r.json().catch(() => ({}));
+                    if (!r.ok) { alert(d.error || 'Could not save the quote.'); return; }
+                    applyQuoteResult(quoteJob.id, d.quoteItems, qTotal);
+                    if (d.emailed) {
+                      fetch('/api/mechanic/update-job-status', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ bookingId: quoteJob.id, status: 'quoted' }) }).catch(() => {});
+                      setManualQuoteFilter('sent');
+                      setActiveTab('manual-quotes');
+                      setQuoteJob(null);
+                    } else {
+                      alert(`Quote saved, but it was NOT emailed.\n\n${d.reason || ''}\n\nIt's under Jobs → Quotes, where you can download the PDF or try emailing again.`);
+                      goToQuotes();
+                    }
+                  } catch { alert('Could not generate the quote. Check your connection and try again.'); }
+                  finally { setQSending(false); }
+                };
+                return (
+                  <div className="space-y-2">
+                    <Button fullWidth disabled={qSending || !quoteEmail} className="bg-torqued-red text-white" onClick={emailQuote}>
+                      {qSending ? 'Working…' : quoteEmail ? `Email Quote PDF — $${qTotal.toFixed(2)}` : 'No email on file — save or download instead'}
+                    </Button>
+                    <div className="grid grid-cols-2 gap-2">
+                      <Button variant="outline" disabled={qSending} className="border-border text-foreground" onClick={() => saveOnly(false)}>Save quote</Button>
+                      <Button variant="outline" disabled={qSending} className="border-border text-foreground" onClick={() => saveOnly(true)}>Save & download PDF</Button>
+                    </div>
+                    <p className="text-[10px] text-muted text-center">Every quote is saved under Jobs → Quotes, even if the email fails.</p>
+                  </div>
+                );
+              })()}
             </motion.div>
           </div>
         )}
