@@ -778,6 +778,7 @@ app.get('/api/quote/:bookingId', async (req, res) => {
       quotedPrice: b.quoted_price != null ? Number(b.quoted_price) : null,
       total: b.quoted_price != null ? Number(b.quoted_price) : (Number(b.total_price) || 0),
       note: b.quote_note || '', status: b.status, paymentStatus: b.payment_status, date: b.date,
+      ...quoteCustomerTerms(b),
     });
   } catch (err) {
     console.error('[quote]', err);
@@ -813,8 +814,11 @@ app.get('/api/customer/bookings', async (req, res) => {
     }
     const enriched = bookings.map((b: any) => {
       const m = mechMap[b.mechanic_id] || {};
+      // The workshop's unsaved draft (autosave) is never shown to the customer.
+      const qi = b.quote_items && typeof b.quote_items === 'object' ? (({ draft: _d, ...rest }: any) => rest)(b.quote_items) : b.quote_items;
       return {
         ...b,
+        quote_items: qi,
         transaction_id: b.transaction_id || null,
         mechanic_name: m.name || null,
         mechanic_address: m.address || null,
@@ -2727,17 +2731,26 @@ app.post('/api/mechanic/cold-quote', async (req, res) => {
       if (make || model) await supabase.from('vehicles').update({ ...(make ? { make } : {}), ...(model ? { model } : {}) }).eq('rego', plate);
     }
 
-    const bookingId = 'CQ' + Date.now().toString(36).toUpperCase();
+    // Random suffix: the id doubles as the customer's quote link, so it must not be guessable.
+    const bookingId = 'CQ' + Date.now().toString(36).toUpperCase() + crypto.randomBytes(3).toString('hex').toUpperCase();
+    const nowIso = new Date().toISOString();
+    const meta: Record<string, any> = {
+      channel, createdAt: nowIso,
+      // Phone/walk-in default: pay on or before collection, settled manually or via a Torqued invoice.
+      paymentTerms: { require: 'on_collection', depositAmount: 0 },
+    };
+    if (date) { meta.scheduledAt = nowIso; meta.bookedBy = 'mechanic'; }
     const { error } = await supabase.from('bookings').insert({
       id: bookingId, mechanic_id: mechanicId, vehicle_rego: plate,
       customer_name: customerName, email: email || null, customer_phone: phone || null,
-      service_ids: [], status: 'booked', payment_status: 'pending',
+      service_ids: [], status: date ? 'accepted' : 'booked', payment_status: 'pending',
       date: date || null,
       description: description || null, is_cold_quote: true, total_price: 0,
-      quote_items: { meta: { channel, createdAt: new Date().toISOString() } },
+      quote_items: { meta },
     });
     if (error) return res.status(500).json({ error: error.message });
-    res.json({ success: true, bookingId, channel });
+    const { data: row } = await supabase.from('bookings').select('*').eq('id', bookingId).maybeSingle();
+    res.json({ success: true, bookingId, channel, row });
   } catch (err) {
     console.error('[cold-quote]', err);
     res.status(500).json({ error: 'Could not create cold quote' });
@@ -2819,8 +2832,383 @@ async function persistQuote(supabase: any, bookingId: string, total: any, note: 
     quoted_price: total != null ? Number(total) : null,
     quote_note: note || null,
   }).eq('id', bookingId);
-  return mergeQuoteMeta(supabase, bookingId, meta, items && typeof items === 'object' ? items : null);
+  const next = await mergeQuoteMeta(supabase, bookingId, meta, items && typeof items === 'object' ? items : null);
+  await syncPaymentColumns(supabase, bookingId);
+  return next;
 }
+
+// ── Quote drafts, payment ledger & scheduling ──────────────────────────────
+// Phone/walk-in quotes (is_cold_quote) carry their own payment ledger in
+// quote_items.meta.payments: deposits and payments taken in the shop (cash,
+// EFTPOS, bank transfer, internal) or online through Torqued. deposit_paid /
+// payment_method / payment_status are kept in step so reports stay correct.
+// Online marketplace bookings are prepaid through Stripe and keep their
+// existing payment flow — the ledger never changes their payment_status.
+const MANUAL_PAYMENT_METHODS = ['cash', 'eftpos', 'bank_transfer', 'internal', 'other'];
+const PAYMENT_REQUIREMENTS = ['none', 'deposit', 'full_before', 'on_collection'];
+
+async function loadOwnedBooking(supabase: any, bookingId: any, mechanicId: any) {
+  if (!bookingId || !mechanicId) return null;
+  const { data } = await supabase.from('bookings').select('*').eq('id', String(bookingId)).maybeSingle();
+  if (!data || String(data.mechanic_id) !== String(mechanicId)) return null;
+  return data;
+}
+
+function quoteTotalOf(row: any): number {
+  const quoted = Number(row?.quoted_price);
+  if (quoted > 0) return round2(quoted);
+  const draft = Number(row?.quote_items?.draft?.total);
+  if (draft > 0) return round2(draft);
+  return round2(Number(row?.total_price) || 0);
+}
+
+function paymentSummary(row: any) {
+  const meta = row?.quote_items?.meta || {};
+  const payments = (Array.isArray(meta.payments) ? meta.payments : []).filter((p: any) => !p.voided);
+  const paid = round2(payments.reduce((t: number, p: any) => t + (Number(p.amount) || 0), 0));
+  const total = quoteTotalOf(row);
+  const terms = meta.paymentTerms || { require: 'none', depositAmount: 0 };
+  // A legacy cold quote paid in full online (before the ledger existed) counts as settled.
+  const settledOutsideLedger = row?.payment_status === 'confirmed' && meta.paidVia !== 'ledger';
+  const balance = settledOutsideLedger ? 0 : Math.max(0, round2(total - paid));
+  const depositRequired = terms.require === 'deposit' ? round2(Math.min(Number(terms.depositAmount) || 0, total || Infinity)) : 0;
+  return { payments, paid, total, balance, terms, depositRequired, depositOutstanding: Math.max(0, round2(depositRequired - paid)) };
+}
+
+async function syncPaymentColumns(supabase: any, bookingId: string) {
+  const { data: row } = await supabase.from('bookings').select('*').eq('id', bookingId).maybeSingle();
+  if (!row || !row.is_cold_quote) return row;
+  const meta = row.quote_items?.meta || {};
+  if (!Array.isArray(meta.payments) || meta.payments.length === 0) return row;
+  const s = paymentSummary({ ...row, payment_status: meta.paidVia === 'ledger' ? 'pending' : row.payment_status });
+  const update: Record<string, any> = { deposit_paid: s.paid };
+  const last = s.payments[s.payments.length - 1];
+  update.payment_method = last ? (last.method === 'torqued_online' ? 'torqued' : last.method) : null;
+  const fullyPaid = s.total > 0 && s.paid >= s.total - 0.005;
+  let paidVia = meta.paidVia;
+  if (fullyPaid) {
+    update.payment_status = 'confirmed';
+    update.total_price = s.total;   // revenue reports read total_price
+    if (row.payment_status !== 'confirmed' || meta.paidVia === 'ledger') paidVia = 'ledger';
+  } else if (row.payment_status === 'confirmed' && meta.paidVia === 'ledger') {
+    update.payment_status = 'pending';   // a payment was voided or the quote grew
+    paidVia = null;
+  }
+  await supabase.from('bookings').update(update).eq('id', bookingId);
+  if (paidVia !== meta.paidVia) await mergeQuoteMeta(supabase, bookingId, { paidVia });
+  const { data: fresh } = await supabase.from('bookings').select('*').eq('id', bookingId).maybeSingle();
+  return fresh;
+}
+
+function newPaymentId() { return 'P' + Date.now().toString(36).toUpperCase() + crypto.randomBytes(2).toString('hex').toUpperCase(); }
+
+// POST /api/mechanic/quote-draft — autosave. Stores the editor state in
+// quote_items.draft without touching the live quote or price, so a customer
+// never sees half-written numbers. Saving or emailing promotes it and clears it.
+app.post('/api/mechanic/quote-draft', async (req, res) => {
+  try {
+    const { bookingId, mechanicId, items, total, note } = req.body;
+    const supabase = getSupabaseAdmin();
+    if (!supabase) return res.status(500).json({ error: 'Database not configured' });
+    const row = await loadOwnedBooking(supabase, bookingId, mechanicId);
+    if (!row) return res.status(404).json({ error: 'Quote not found' });
+    const existing = (row.quote_items && typeof row.quote_items === 'object') ? row.quote_items : {};
+    const savedAt = new Date().toISOString();
+    const draftItems = items && typeof items === 'object' ? items : {};
+    // jsonb doesn't keep key order — compare with sorted keys.
+    const stable = (v: any): string => Array.isArray(v) ? `[${v.map(stable).join(',')}]`
+      : v && typeof v === 'object' ? `{${Object.keys(v).sort().map(k => `${JSON.stringify(k)}:${stable(v[k])}`).join(',')}}` : JSON.stringify(v ?? null);
+    const { meta: _m, draft: _d, ...live } = existing as any;
+    const next: any = { ...existing, meta: { ...(existing.meta || {}), draftSavedAt: savedAt } };
+    // A draft identical to the saved quote is no draft at all (e.g. autosave landing just after Save).
+    if (Object.keys(live).length && stable(live) === stable(draftItems)) delete next.draft;
+    else next.draft = { items: draftItems, total: Number(total) || 0, note: note || null, savedAt };
+    const { error } = await supabase.from('bookings').update({ quote_items: next }).eq('id', row.id);
+    if (error) return res.status(500).json({ error: error.message });
+    res.json({ success: true, savedAt, quoteItems: next });
+  } catch (err) {
+    console.error('[quote-draft]', err);
+    res.status(500).json({ error: 'Could not autosave' });
+  }
+});
+
+// POST /api/mechanic/quote-settings — payment requirement (none / deposit /
+// full before work / on collection), how it'll be paid (Torqued invoice or
+// manual), and whether the customer may pick a date and book from the quote link.
+app.post('/api/mechanic/quote-settings', async (req, res) => {
+  try {
+    const { bookingId, mechanicId, paymentTerms, billing, allowOnlineBooking } = req.body;
+    const supabase = getSupabaseAdmin();
+    if (!supabase) return res.status(500).json({ error: 'Database not configured' });
+    const row = await loadOwnedBooking(supabase, bookingId, mechanicId);
+    if (!row) return res.status(404).json({ error: 'Quote not found' });
+    const patch: Record<string, any> = {};
+    if (paymentTerms && typeof paymentTerms === 'object') {
+      const require = PAYMENT_REQUIREMENTS.includes(paymentTerms.require) ? paymentTerms.require : 'none';
+      patch.paymentTerms = { require, depositAmount: require === 'deposit' ? Math.max(0, round2(Number(paymentTerms.depositAmount) || 0)) : 0 };
+    }
+    if (billing === 'torqued' || billing === 'manual') patch.billing = billing;
+    if (typeof allowOnlineBooking === 'boolean') patch.allowOnlineBooking = allowOnlineBooking;
+    await mergeQuoteMeta(supabase, row.id, patch);
+    const fresh = await syncPaymentColumns(supabase, row.id);
+    res.json({ success: true, row: fresh });
+  } catch (err) {
+    console.error('[quote-settings]', err);
+    res.status(500).json({ error: 'Could not save settings' });
+  }
+});
+
+// POST /api/mechanic/record-payment — a deposit or payment taken outside Torqued
+// (cash, EFTPOS, bank transfer, internal account), or credit added to a draft
+// or finalised quote. Appends to the ledger; marks the job paid once settled.
+app.post('/api/mechanic/record-payment', async (req, res) => {
+  try {
+    const { bookingId, mechanicId, method, kind, note } = req.body;
+    const amount = round2(Number(req.body.amount));
+    if (!(amount > 0) || amount > 100000) return res.status(400).json({ error: 'Enter an amount greater than $0.' });
+    if (!MANUAL_PAYMENT_METHODS.includes(method)) return res.status(400).json({ error: 'Choose how the customer paid.' });
+    const supabase = getSupabaseAdmin();
+    if (!supabase) return res.status(500).json({ error: 'Database not configured' });
+    const row = await loadOwnedBooking(supabase, bookingId, mechanicId);
+    if (!row) return res.status(404).json({ error: 'Quote or job not found' });
+    const meta = row.quote_items?.meta || {};
+    const payments = Array.isArray(meta.payments) ? [...meta.payments] : [];
+    const entry = {
+      id: newPaymentId(), amount, method,
+      kind: kind === 'deposit' ? 'deposit' : kind === 'credit' ? 'credit' : 'payment',
+      note: note ? String(note).slice(0, 300) : null, at: new Date().toISOString(),
+    };
+    payments.push(entry);
+    await mergeQuoteMeta(supabase, row.id, { payments, ...(meta.billing ? {} : { billing: 'manual' }) });
+    const fresh = await syncPaymentColumns(supabase, row.id);
+    res.json({ success: true, payment: entry, row: fresh });
+  } catch (err) {
+    console.error('[record-payment]', err);
+    res.status(500).json({ error: 'Could not record the payment' });
+  }
+});
+
+// POST /api/mechanic/void-payment — reverse a manual entry made in error. Kept in
+// the ledger (marked voided) so the transaction history stays auditable.
+app.post('/api/mechanic/void-payment', async (req, res) => {
+  try {
+    const { bookingId, mechanicId, paymentId } = req.body;
+    const supabase = getSupabaseAdmin();
+    if (!supabase) return res.status(500).json({ error: 'Database not configured' });
+    const row = await loadOwnedBooking(supabase, bookingId, mechanicId);
+    if (!row) return res.status(404).json({ error: 'Quote or job not found' });
+    const meta = row.quote_items?.meta || {};
+    const payments = (Array.isArray(meta.payments) ? meta.payments : []).map((p: any) => ({ ...p }));
+    const target = payments.find((p: any) => p.id === paymentId);
+    if (!target) return res.status(404).json({ error: 'Payment not found' });
+    if (target.method === 'torqued_online') return res.status(400).json({ error: 'Online payments are refunded through Stripe, not voided here.' });
+    target.voided = true; target.voidedAt = new Date().toISOString();
+    await mergeQuoteMeta(supabase, row.id, { payments });
+    const fresh = await syncPaymentColumns(supabase, row.id);
+    res.json({ success: true, row: fresh });
+  } catch (err) {
+    console.error('[void-payment]', err);
+    res.status(500).json({ error: 'Could not void the payment' });
+  }
+});
+
+// POST /api/mechanic/schedule-quote — "Add to calendar": the mechanic books a
+// quote in for a date/time. It becomes a job (My Jobs + the diary).
+app.post('/api/mechanic/schedule-quote', async (req, res) => {
+  try {
+    const { bookingId, mechanicId, date } = req.body;
+    if (!date || isNaN(new Date(date).getTime())) return res.status(400).json({ error: 'Pick a date and time.' });
+    const supabase = getSupabaseAdmin();
+    if (!supabase) return res.status(500).json({ error: 'Database not configured' });
+    const row = await loadOwnedBooking(supabase, bookingId, mechanicId);
+    if (!row) return res.status(404).json({ error: 'Quote not found' });
+    const update: Record<string, any> = { date: String(date) };
+    if (!['in_progress', 'completed'].includes(row.status)) update.status = 'accepted';
+    await supabase.from('bookings').update(update).eq('id', row.id);
+    await mergeQuoteMeta(supabase, row.id, { scheduledAt: new Date().toISOString(), bookedBy: 'mechanic' });
+    const { data: fresh } = await supabase.from('bookings').select('*').eq('id', row.id).maybeSingle();
+    res.json({ success: true, row: fresh });
+  } catch (err) {
+    console.error('[schedule-quote]', err);
+    res.status(500).json({ error: 'Could not add it to the calendar' });
+  }
+});
+
+function invoiceEmailHtml(custName: string, vehicleLabel: string, mechanicName: string, bookingId: string, amountDue: number): string {
+  const car = vehicleLabel || 'your vehicle';
+  const mech = mechanicName ? ` from ${mechanicName}` : '';
+  const link = `https://torqued.site/customer?quote=${encodeURIComponent(bookingId)}`;
+  return emailWrap(`<tr><td style="padding:36px 32px;">
+${emailTitle('Your invoice is ready')}
+${emailGreeting(custName)}
+${emailPara(`Your invoice for your <strong>${car}</strong>${mech} is ready. Amount due: <strong>$${amountDue.toFixed(2)}</strong> (GST incl.).`)}
+${emailPara(`Pay securely online — card, Afterpay or Klarna.`)}
+<a href="${link}" style="display:inline-block;background:${EMAIL_RED};color:#fff;font-family:${EMAIL_TITLE_FONT};font-weight:900;text-transform:uppercase;font-size:13px;letter-spacing:1px;text-decoration:none;padding:14px 32px;border-radius:12px;">View &amp; pay</a>
+${emailPara(`<span style="color:#999;">Kind regards,<br/>The Torqued team</span>`)}
+</td></tr>`);
+}
+
+// POST /api/mechanic/invoice-torqued — "Invoice with Torqued": email the customer a
+// secure pay link for the balance. Always returns the link so it can be texted
+// if email is down or there's no address.
+app.post('/api/mechanic/invoice-torqued', async (req, res) => {
+  try {
+    const { bookingId, mechanicId } = req.body;
+    const supabase = getSupabaseAdmin();
+    if (!supabase) return res.status(500).json({ error: 'Database not configured' });
+    const row = await loadOwnedBooking(supabase, bookingId, mechanicId);
+    if (!row) return res.status(404).json({ error: 'Quote or job not found' });
+    const s = paymentSummary(row);
+    if (!(s.total > 0)) return res.status(400).json({ error: 'Save the quote with prices before invoicing.' });
+    if (!(s.balance > 0)) return res.status(400).json({ error: 'Nothing left to pay on this job.' });
+    const payLink = `https://torqued.site/customer?quote=${encodeURIComponent(row.id)}`;
+    await mergeQuoteMeta(supabase, row.id, { billing: 'torqued', invoicedAt: new Date().toISOString() });
+    const ctx = await getBookingContext(row.id);
+    let emailed = false; let reason: string | null = null;
+    const transporter = getMailTransporter();
+    if (!ctx.email) reason = 'No email address on file — copy the pay link and text it to the customer.';
+    else if (!transporter) reason = 'Email is not set up on the server — copy the pay link instead.';
+    else {
+      try {
+        await transporter.sendMail({
+          from: process.env.SMTP_FROM || '"Torqued" <torquedapp.nz@gmail.com>',
+          to: ctx.email,
+          subject: `Your invoice for your ${ctx.vehicleLabel || 'vehicle'} — Torqued`,
+          html: invoiceEmailHtml(ctx.custName, ctx.vehicleLabel, ctx.mechanicName, row.id, s.balance),
+        });
+        emailed = true;
+      } catch (mailErr: any) {
+        console.error('[invoice-torqued] email failed:', mailErr?.message);
+        reason = /auth|login|credential|535/i.test(mailErr?.message || '')
+          ? 'The email service rejected the login — email is down. Copy the pay link and text it instead.'
+          : 'The email could not be delivered. Copy the pay link and text it instead.';
+      }
+    }
+    if (emailed) await notify({ bookingId: row.id, type: 'quote_ready', title: 'Your invoice is ready', body: `Amount due: $${s.balance.toFixed(2)}.` }).catch(() => {});
+    const { data: fresh } = await supabase.from('bookings').select('*').eq('id', row.id).maybeSingle();
+    res.json({ success: true, emailed, reason, sentTo: emailed ? ctx.email : null, payLink, amountDue: s.balance, row: fresh });
+  } catch (err) {
+    console.error('[invoice-torqued]', err);
+    res.status(500).json({ error: 'Could not create the invoice' });
+  }
+});
+
+// A quote checkout (deposit or full, optionally with the customer's chosen date)
+// confirmed by Stripe. Idempotent: the webhook and verify-session both call it.
+async function applyQuoteCheckout(supabase: any, session: any) {
+  const md = session?.metadata || {};
+  const bookingId = md.bookingId;
+  if (!bookingId) return;
+  const { data: row } = await supabase.from('bookings').select('*').eq('id', bookingId).maybeSingle();
+  if (!row) return;
+  const meta = row.quote_items?.meta || {};
+  const payments = Array.isArray(meta.payments) ? [...meta.payments] : [];
+  const nowIso = new Date().toISOString();
+  if (!payments.some((p: any) => p.stripeSessionId === session.id)) {
+    payments.push({
+      id: newPaymentId(), amount: round2((session.amount_total || 0) / 100), method: 'torqued_online',
+      kind: md.quotePayKind === 'deposit' ? 'deposit' : 'payment', note: 'Paid online via Torqued', at: nowIso, stripeSessionId: session.id,
+    });
+  }
+  const patch: Record<string, any> = { payments, billing: meta.billing || 'torqued' };
+  const update: Record<string, any> = { stripe_session_id: session.id };
+  if (md.quoteDate && !meta.scheduledAt) { update.date = md.quoteDate; patch.scheduledAt = nowIso; patch.bookedBy = 'customer'; }
+  if (!['in_progress', 'completed'].includes(row.status)) update.status = 'accepted';   // paid/booked quote → a job
+  if (session.customer_details?.email && !row.email) update.email = session.customer_details.email;
+  if (session.customer_details?.phone && !row.customer_phone) update.customer_phone = session.customer_details.phone;
+  await supabase.from('bookings').update(update).eq('id', bookingId);
+  await mergeQuoteMeta(supabase, bookingId, patch);
+  if (row.is_cold_quote) await syncPaymentColumns(supabase, bookingId);
+  else await supabase.from('bookings').update({ payment_status: 'confirmed' }).eq('id', bookingId);
+}
+
+// Public view of what the customer owes / may do on a quote link.
+function quoteCustomerTerms(row: any) {
+  const meta = row?.quote_items?.meta || {};
+  const s = paymentSummary(row);
+  const scheduled = !!meta.scheduledAt || ['accepted', 'in_progress', 'completed'].includes(row?.status);
+  const allowBooking = !!row?.is_cold_quote && !!meta.allowOnlineBooking && !scheduled && s.total > 0;
+  return {
+    isManual: !!row?.is_cold_quote, paymentRequirement: s.terms.require || 'none',
+    depositRequired: s.depositRequired, depositOutstanding: Math.min(s.depositOutstanding, s.balance),
+    paid: s.paid, balance: s.balance, allowBooking, scheduled,
+    leadTimeDays: Number(row?.quote_items?.leadTimeDays) || 0,
+  };
+}
+
+// POST /api/quote/:bookingId/checkout — the customer pays a deposit or the balance
+// from their quote link (amount worked out here, never trusted from the browser),
+// optionally choosing a drop-off date when the workshop allows online booking.
+app.post('/api/quote/:bookingId/checkout', async (req, res) => {
+  try {
+    const supabase = getSupabaseAdmin();
+    if (!supabase) return res.status(500).json({ error: 'Database not configured' });
+    const { data: row } = await supabase.from('bookings').select('*').eq('id', req.params.bookingId).maybeSingle();
+    if (!row) return res.status(404).json({ error: 'Quote not found' });
+    const t = quoteCustomerTerms(row);
+    if (!(t.balance > 0)) return res.status(400).json({ error: 'This quote has already been paid.' });
+    const payKind = req.body.payKind === 'deposit' && t.depositOutstanding > 0 ? 'deposit' : 'full';
+    const amount = payKind === 'deposit' ? t.depositOutstanding : t.balance;
+    let quoteDate = '';
+    if (t.allowBooking) {
+      const d = String(req.body.date || '');
+      if (!d || isNaN(new Date(d).getTime()) || new Date(d).getTime() < Date.now()) return res.status(400).json({ error: 'Choose a drop-off date and time in the future.' });
+      quoteDate = d.slice(0, 16);
+    }
+    const stripe = getStripe();
+    if (!stripe) return res.status(503).json({ error: 'Online payments are not available right now.' });
+    const origin = getOrigin(req);
+    const ctx = await getBookingContext(row.id);
+    const email = String(req.body.customerEmail || ctx.email || '').trim();
+    const session = await stripe.checkout.sessions.create({
+      payment_method_types: ['card', 'afterpay_clearpay', 'klarna'],
+      mode: 'payment',
+      phone_number_collection: { enabled: true },
+      line_items: [{
+        price_data: {
+          currency: 'nzd',
+          product_data: {
+            name: `${payKind === 'deposit' ? 'Deposit' : 'Payment'} — ${ctx.vehicleLabel || 'vehicle'}${ctx.mechanicName ? ` · ${ctx.mechanicName}` : ''}`,
+            description: `Booking Reference: ${row.id}`,
+          },
+          unit_amount: Math.round(amount * 100),
+        },
+        quantity: 1,
+      }],
+      success_url: `${origin}/customer?session_id={CHECKOUT_SESSION_ID}&booking_id=${row.id}`,
+      cancel_url: `${origin}/customer?quote=${encodeURIComponent(row.id)}`,
+      customer_email: email && !isPlaceholderEmail(email) ? email : undefined,
+      metadata: { bookingId: row.id, type: 'repair_payment', source: 'web', userId: '', quotePayKind: payKind, quoteDate },
+    } as any);
+    res.json({ url: session.url, amount, payKind });
+  } catch (err) {
+    console.error('[quote/checkout]', err);
+    res.status(500).json({ error: 'Could not start checkout' });
+  }
+});
+
+// POST /api/quote/:bookingId/book — the customer picks a date on a quote the
+// workshop lets them book online with no upfront payment (pay at collection).
+app.post('/api/quote/:bookingId/book', async (req, res) => {
+  try {
+    const supabase = getSupabaseAdmin();
+    if (!supabase) return res.status(500).json({ error: 'Database not configured' });
+    const { data: row } = await supabase.from('bookings').select('*').eq('id', req.params.bookingId).maybeSingle();
+    if (!row) return res.status(404).json({ error: 'Quote not found' });
+    const t = quoteCustomerTerms(row);
+    if (!t.allowBooking) return res.status(400).json({ error: 'This quote can\'t be booked online.' });
+    if (t.paymentRequirement === 'deposit' && t.depositOutstanding > 0) return res.status(400).json({ error: 'A deposit is needed to book.' });
+    if (t.paymentRequirement === 'full_before' && t.balance > 0) return res.status(400).json({ error: 'Payment is needed to book.' });
+    const d = String(req.body.date || '');
+    if (!d || isNaN(new Date(d).getTime()) || new Date(d).getTime() < Date.now()) return res.status(400).json({ error: 'Choose a drop-off date and time in the future.' });
+    await supabase.from('bookings').update({ date: d.slice(0, 16), status: 'accepted' }).eq('id', row.id);
+    await mergeQuoteMeta(supabase, row.id, { scheduledAt: new Date().toISOString(), bookedBy: 'customer' });
+    res.json({ success: true, date: d.slice(0, 16) });
+  } catch (err) {
+    console.error('[quote/book]', err);
+    res.status(500).json({ error: 'Could not book' });
+  }
+});
 
 // POST /api/mechanic/save-quote — save a quote WITHOUT emailing it (walk-ins with
 // no email, or when the mechanic wants to print/hand it over). Listed under Quotes.
@@ -2836,7 +3224,8 @@ app.post('/api/mechanic/save-quote', async (req, res) => {
     const quoteItems = await persistQuote(supabase, bookingId, total, note, items, {
       quoteStatus: prevStatus === 'sent' ? 'sent' : 'saved', savedAt: new Date().toISOString(),
     });
-    res.json({ success: true, saved: true, quoteItems });
+    const { data: fresh } = await supabase.from('bookings').select('*').eq('id', bookingId).maybeSingle();
+    res.json({ success: true, saved: true, quoteItems, row: fresh });
   } catch (err) {
     console.error('[save-quote]', err);
     res.status(500).json({ error: 'Could not save quote' });
@@ -7762,7 +8151,10 @@ app.post('/api/stripe/webhook', async (req, res) => {
       const session = event.data.object as Stripe.Checkout.Session;
       const { type, bookingId, mechanicId, source, userId } = session.metadata ?? {};
 
-      if (type === 'repair_payment' && bookingId) {
+      if (type === 'repair_payment' && bookingId && (session.metadata as any)?.quotePayKind) {
+        try { await applyQuoteCheckout(supabase, session); console.log(`[Webhook] Quote ${bookingId} payment recorded`); }
+        catch (e) { console.error('[Webhook] quote checkout failed:', e); }
+      } else if (type === 'repair_payment' && bookingId) {
         // Don't overwrite an existing customer email with Stripe's if we already have one on the booking.
         const update: Record<string, any> = {
           payment_status: 'confirmed', status: 'booked', stripe_session_id: session.id,
@@ -8448,7 +8840,10 @@ app.get('/api/stripe/verify-session', async (req, res) => {
     // Webhook fallback: confirm the booking here too, idempotently, so a paid job is
     // never left stuck on "Pending Payment" if the Stripe webhook is delayed/unconfigured.
     const bookingId = (session.metadata as any)?.bookingId;
-    if (paid && bookingId) {
+    if (paid && bookingId && (session.metadata as any)?.quotePayKind) {
+      const supabase = getSupabaseAdmin();
+      if (supabase) { try { await applyQuoteCheckout(supabase, session); } catch (e) { console.warn('[verify-session] quote checkout failed:', (e as Error).message); } }
+    } else if (paid && bookingId) {
       const supabase = getSupabaseAdmin();
       if (supabase) {
         const update: Record<string, any> = { payment_status: 'confirmed', status: 'booked', stripe_session_id: session.id };

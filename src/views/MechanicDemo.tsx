@@ -128,7 +128,7 @@ const apptColor: Record<DemoAppt['type'], string> = {
 const SIDEBAR_ITEMS = [
   { id: 'dashboard', label: 'Dashboard', icon: LayoutDashboard },
   { id: 'jobs', label: 'My Jobs', icon: Inbox },
-  { id: 'manual-quotes', label: 'Manual Quotes', icon: PenSquare },
+  { id: 'manual-quotes', label: 'Quotes', icon: PenSquare },
   { id: 'customers', label: 'Customers', icon: User },
   { id: 'vehicle-health', label: 'Vehicle Health', icon: HeartPulse },
   { id: 'assistant', label: 'Assistant', icon: MessageCircle },
@@ -254,7 +254,7 @@ export const MechanicDemo: React.FC<{ onBack?: () => void }> = ({ onBack }) => {
     const list = quoteFilter === 'queue' ? toBeQuoted : quoted;
     return (
       <div className="space-y-6">
-        <div><h2 className="text-2xl font-black tracking-tight text-foreground">Manual Quotes</h2><p className="text-sm text-muted">Build a demo quote and "send" it — nothing leaves this page.</p></div>
+        <div><h2 className="text-2xl font-black tracking-tight text-foreground">Quotes</h2><p className="text-sm text-muted">Build a demo quote and "send" it — nothing leaves this page.</p></div>
         <div className="flex gap-2">
           {([['queue', 'To Be Quoted', toBeQuoted.length], ['sent', 'Quoted', quoted.length]] as const).map(([id, label, count]) => (
             <button key={id} onClick={() => setQuoteFilter(id)} className={cn('px-4 py-2 rounded-lg text-xs font-black uppercase tracking-wider transition-all', quoteFilter === id ? 'bg-torqued-red text-white shadow' : 'text-muted hover:text-foreground bg-card border border-border')}>

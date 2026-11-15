@@ -381,6 +381,19 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
   const [qShopFee, setQShopFee] = useState(0);
   const [qLeadTimeDays, setQLeadTimeDays] = useState(0);
   const [qNotes, setQNotes] = useState('');
+  // Quote workspace: payment terms, how it'll be paid, online self-booking, booking time, autosave
+  const [qTerms, setQTerms] = useState<{ require: string; depositAmount: number }>({ require: 'on_collection', depositAmount: 0 });
+  const [qBilling, setQBilling] = useState<'torqued' | 'manual' | ''>('');
+  const [qAllowOnline, setQAllowOnline] = useState(false);
+  const [qSchedule, setQSchedule] = useState('');
+  const [qDraftState, setQDraftState] = useState<{ status: 'idle' | 'saving' | 'saved' | 'error'; at?: string; restored?: string }>({ status: 'idle' });
+  const qBaselineRef = useRef<string | null>(null);
+  const qDraftTimer = useRef<any>(null);
+  // Record-payment dialog + customer transactions panel
+  const [payModal, setPayModal] = useState<{ rowId: string; choices?: string[] } | null>(null);
+  const [payForm, setPayForm] = useState<{ amount: string; method: string; kind: 'deposit' | 'payment' | 'credit'; note: string }>({ amount: '', method: 'eftpos', kind: 'payment', note: '' });
+  const [payBusy, setPayBusy] = useState(false);
+  const [custPanel, setCustPanel] = useState<any | null>(null);
   // Parts-to-order is cached locally PER MECHANIC so one workshop never sees another's
   // list on a shared browser. Keyed by the signed-in user's id.
   const [partsToOrder, setPartsToOrder] = useState<{ id: string; name: string; qty: number; forRego?: string }[]>([]);
@@ -422,10 +435,34 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
   };
   const [qSending, setQSending] = useState(false);
 
-  const openQuoteEditor = (job: any) => {
+  // 'YYYY-MM-DDTHH:mm' for a datetime-local input, from whatever a booking stores.
+  const toLocalInput = (d: any) => {
+    if (!d) return '';
+    const str = String(d);
+    if (/^\d{4}-\d{2}-\d{2}$/.test(str)) return `${str}T09:00`;
+    if (/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/.test(str) && !/(Z|[+-]\d{2}:?\d{2})$/i.test(str)) return str.slice(0, 16);
+    const x = new Date(str); if (isNaN(x.getTime())) return '';
+    const pad = (n: number) => String(n).padStart(2, '0');
+    return `${x.getFullYear()}-${pad(x.getMonth() + 1)}-${pad(x.getDate())}T${pad(x.getHours())}:${pad(x.getMinutes())}`;
+  };
+  const openQuoteEditor = (job: any, rowIn?: any) => {
+    // Switching quotes with edits still pending? Save them to the old quote's draft first.
+    if (quoteJob?.id && quoteJob.id !== job.id && qBaselineRef.current !== null && qSnapshot !== qBaselineRef.current) { clearTimeout(qDraftTimer.current); saveDraftNow(); }
     setQuoteJob(job);
+    const row = rowIn || allJobRows.find((r: any) => r.id === job.id) || null;
+    const qiRaw = row?.quote_items ?? job.quoteItems ?? null;
+    // An autosaved draft wins over the last saved quote — it's the newer work.
+    const draft = qiRaw?.draft?.items && Object.keys(qiRaw.draft.items).length ? qiRaw.draft : null;
+    const meta = qiRaw?.meta || {};
+    setQTerms(meta.paymentTerms || { require: row?.is_cold_quote ? 'on_collection' : 'none', depositAmount: 0 });
+    setQBilling(meta.billing || '');
+    setQAllowOnline(!!meta.allowOnlineBooking);
+    setQSchedule(toLocalInput(row?.date));
+    setQDraftState({ status: 'idle', restored: draft ? draft.savedAt : undefined });
+    qBaselineRef.current = null;
+    clearTimeout(qDraftTimer.current);
     // Re-open with the previously saved quote breakdown if there is one
-    const qi = job.quoteItems;
+    const qi = draft ? draft.items : qiRaw;
     if (qi) {
       setQParts(Array.isArray(qi.parts) && qi.parts.length ? qi.parts : [{ name: '', qty: 1, unitPrice: 0 }]);
       setQLabourHours(qi.labourHours ?? 1);
@@ -450,6 +487,38 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
   const qLabourTotal = (qLabourHours || 0) * (qLabourRate || 0);
   const qOtherTotal = qOther.reduce((s, o) => s + (o.amount || 0), 0);
   const qTotal = Math.max(0, qPartsTotal + qLabourTotal + qOtherTotal + (qShopFee || 0) - (qDiscount || 0));
+  const qItemsNow = useMemo(() => ({ parts: qParts, labourHours: qLabourHours, labourRate: qLabourRate, shopFee: qShopFee, other: qOther, discount: qDiscount, notes: qNotes, leadTimeDays: qLeadTimeDays || 0 }),
+    [qParts, qLabourHours, qLabourRate, qShopFee, qOther, qDiscount, qNotes, qLeadTimeDays]);
+  const qSnapshot = JSON.stringify(qItemsNow);
+  // Autosave: every edit is saved to the quote's draft ~1s after typing stops.
+  const saveDraftNow = async (jobId = quoteJob?.id, items: any = qItemsNow, total = qTotal, snapshot = qSnapshot) => {
+    if (!jobId || !user?.id) return;
+    setQDraftState(st => ({ ...st, status: 'saving' }));
+    try {
+      const r = await fetch('/api/mechanic/quote-draft', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ mechanicId: user.id, bookingId: jobId, items, total }) });
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(d.error || 'autosave failed');
+      qBaselineRef.current = snapshot;
+      const patch = (row: any) => row.id === jobId ? { ...row, quote_items: d.quoteItems } : row;
+      setAllJobRows(prev => prev.map(patch));
+      setPastJobs(prev => prev.map(patch));
+      setQDraftState(st => ({ ...st, status: 'saved', at: d.savedAt }));
+    } catch { setQDraftState(st => ({ ...st, status: 'error' })); }
+  };
+  useEffect(() => {
+    if (!quoteJob?.id) return;
+    if (qBaselineRef.current === null) { qBaselineRef.current = qSnapshot; return; }   // first render after opening
+    if (qSnapshot === qBaselineRef.current) return;
+    clearTimeout(qDraftTimer.current);
+    qDraftTimer.current = setTimeout(() => { saveDraftNow(); }, 1000);
+    return () => clearTimeout(qDraftTimer.current);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [qSnapshot, quoteJob?.id]);
+  // Closing never loses typing: flush any pending change straight to the draft.
+  const closeQuoteEditor = () => {
+    if (quoteJob?.id && qBaselineRef.current !== null && qSnapshot !== qBaselineRef.current) { clearTimeout(qDraftTimer.current); saveDraftNow(); }
+    setQuoteJob(null);
+  };
 
   const fetchDataUrl = (src: string): Promise<string | null> => new Promise(resolve => {
     fetch(src).then(r => r.blob()).then(b => { const fr = new FileReader(); fr.onloadend = () => resolve(fr.result as string); fr.onerror = () => resolve(null); fr.readAsDataURL(b); }).catch(() => resolve(null));
@@ -639,7 +708,12 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
     doc.setFontSize(9);
     const bRow = (label: string, val: string) => { doc.setFont('Helvetica', 'normal'); doc.setTextColor(120, 120, 120); doc.text(label, 15, y); doc.setTextColor(21, 4, 2); doc.text(val, 195, y, { align: 'right' }); y += 6; };
     if (job.date) bRow('Drop-off', new Date(job.date).toLocaleDateString('en-NZ', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' }));
-    if (job.payment_method) bRow('Payment method', job.payment_method);
+    if (job.payment_method) bRow('Payment method', PAY_METHOD_LABEL[job.payment_method] || (job.payment_method === 'torqued' ? 'Online via Torqued' : job.payment_method));
+    if (job.is_cold_quote) {
+      const ps = paySummary(job);
+      ps.ledger.filter((x: any) => !x.voided).forEach((x: any) => bRow(`${x.kind === 'deposit' ? 'Deposit' : x.kind === 'credit' ? 'Credit' : 'Payment'} (${PAY_METHOD_LABEL[x.method] || x.method}) ${x.at ? new Date(x.at).toLocaleDateString('en-NZ') : ''}`, `$${Number(x.amount).toFixed(2)}`));
+      if (ps.paid > 0 && ps.balance > 0) { bRow('Paid to date', `$${ps.paid.toFixed(2)}`); bRow('Balance due', `$${ps.balance.toFixed(2)}`); }
+    }
     bRow('Payment status', isPaid ? 'PAID IN FULL' : (job.payment_status || 'Pending'));
     if (qi.notes) { y += 4; doc.setFont('Helvetica', 'bold'); doc.setFontSize(9); doc.setTextColor(21, 4, 2); doc.text('Notes', 15, y); y += 5; doc.setFont('Helvetica', 'normal'); doc.setFontSize(8.5); doc.setTextColor(80, 80, 80); doc.splitTextToSize(String(qi.notes), 180).forEach((line: string) => { doc.text(line, 15, y); y += 4.5; }); }
 
@@ -657,25 +731,101 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
     manual:  { label: 'Manual',  dot: 'bg-slate-500',  block: 'bg-slate-500' },
   };
   const channelOf = (row: any): Channel => row?.is_cold_quote ? ((row.quote_items?.meta?.channel as Channel) || 'manual') : 'online';
-  const quoteHasPrices = (row: any) => {
-    const qi = row?.quote_items;
-    return (parseFloat(row?.quoted_price) || 0) > 0 || !!(qi && ((qi.parts || []).some((x: any) => x?.name) || (qi.labourHours || 0) > 0));
+  const hasLiveItems = (qi: any) => !!(qi && ((qi.parts || []).some((x: any) => x?.name) || (qi.labourHours || 0) > 0 || (qi.other || []).some((x: any) => x?.name)));
+  const quoteHasPrices = (row: any) => (parseFloat(row?.quoted_price) || 0) > 0 || hasLiveItems(row?.quote_items);
+  const isDiagRow = (r: any) => (r?.service_ids || []).includes('diag_inspection') || String(r?.description || '').startsWith('[EV Quote Request]');
+  // A booking is a JOB once it's booked in: accepted / in progress / done, or — for
+  // phone & walk-in quotes — paid, or added to the calendar (by the workshop or the customer).
+  const isJobRow = (r: any) => {
+    if (!r || r.status === 'cancelled' || r.status === 'declined') return false;
+    if (['accepted', 'in_progress', 'completed'].includes(r.status)) return true;
+    return !!r.is_cold_quote && (r.payment_status === 'confirmed' || !!r.quote_items?.meta?.scheduledAt);
   };
-  type QuoteStatus = 'paid' | 'sent' | 'not_sent' | 'saved' | 'draft';
+  // Quotes = every phone/walk-in quote, plus online requests that need or have a quote.
+  const isQuoteRow = (r: any) => {
+    if (!r || ['cancelled', 'declined', 'pending_payment'].includes(r.status)) return false;
+    if (r.is_cold_quote) return true;
+    if (isJobRow(r)) return quoteHasPrices(r) || !!r.quote_items?.meta?.quoteStatus;
+    return r.status === 'quoted' || isDiagRow(r) || quoteHasPrices(r) || !!r.quote_items?.draft;
+  };
+  type QuoteStatus = 'needs_quote' | 'draft' | 'saved' | 'not_sent' | 'sent' | 'booked' | 'paid';
   const quoteStatusOf = (row: any): QuoteStatus => {
-    if (row?.payment_status === 'confirmed') return 'paid';
+    if (row?.payment_status === 'confirmed' && (row?.is_cold_quote || isJobRow(row))) return 'paid';
+    if (isJobRow(row)) return 'booked';
     const st = row?.quote_items?.meta?.quoteStatus;
     if (st === 'sent' || st === 'not_sent' || st === 'saved') return st;
-    if (!quoteHasPrices(row)) return 'draft';
-    return row?.status === 'quoted' ? 'sent' : 'saved';
+    if (row?.status === 'quoted') return 'sent';
+    if (!row?.is_cold_quote && isDiagRow(row) && !quoteHasPrices(row) && !row?.quote_items?.draft) return 'needs_quote';
+    return quoteHasPrices(row) ? 'saved' : 'draft';
   };
   const QUOTE_STATUS_META: Record<QuoteStatus, { label: string; cls: string }> = {
-    paid:     { label: 'Accepted & paid', cls: 'bg-emerald-500/15 text-emerald-600 border-emerald-500/30' },
-    sent:     { label: 'Emailed',         cls: 'bg-blue-500/15 text-blue-600 border-blue-500/30' },
-    not_sent: { label: 'Not emailed',     cls: 'bg-amber-500/15 text-amber-600 border-amber-500/40' },
-    saved:    { label: 'Saved · not sent', cls: 'bg-foreground/5 text-muted border-border' },
-    draft:    { label: 'Draft · no prices', cls: 'bg-foreground/5 text-muted border-border' },
+    needs_quote: { label: 'Needs a quote',     cls: 'bg-torqued-red/10 text-torqued-red border-torqued-red/30' },
+    draft:       { label: 'Draft',             cls: 'bg-foreground/5 text-muted border-border' },
+    saved:       { label: 'Saved · not sent',  cls: 'bg-foreground/5 text-muted border-border' },
+    not_sent:    { label: 'Not emailed',       cls: 'bg-amber-500/15 text-amber-600 border-amber-500/40' },
+    sent:        { label: 'Emailed',           cls: 'bg-blue-500/15 text-blue-600 border-blue-500/30' },
+    booked:      { label: 'Booked · in My Jobs', cls: 'bg-violet-500/15 text-violet-600 border-violet-500/30' },
+    paid:        { label: 'Paid · in My Jobs', cls: 'bg-emerald-500/15 text-emerald-600 border-emerald-500/30' },
   };
+  // ── Payments (phone/walk-in ledger; online bookings are prepaid via Torqued) ──
+  const PAY_METHOD_LABEL: Record<string, string> = { cash: 'Cash', eftpos: 'EFTPOS', bank_transfer: 'Bank transfer', internal: 'Internal / account', other: 'Other', torqued_online: 'Online via Torqued' };
+  const MANUAL_METHODS = ['cash', 'eftpos', 'bank_transfer', 'internal', 'other'];
+  const PAY_REQ_LABEL: Record<string, string> = { none: 'No upfront payment', deposit: 'Minimum deposit before work', full_before: 'Full payment before work', on_collection: 'Pay on or before collection' };
+  const r2 = (n: number) => Math.round(n * 100) / 100;
+  const quoteTotalOf = (r: any) => {
+    const q = parseFloat(r?.quoted_price) || 0; if (q > 0) return r2(q);
+    const d = Number(r?.quote_items?.draft?.total) || 0; if (d > 0) return r2(d);
+    return r2(parseFloat(r?.total_price) || 0);
+  };
+  const paySummary = (r: any) => {
+    const meta = r?.quote_items?.meta || {};
+    const ledger: any[] = Array.isArray(meta.payments) ? meta.payments : [];
+    const total = quoteTotalOf(r);
+    if (!r?.is_cold_quote) {
+      const paid = r?.payment_status === 'confirmed' ? r2(parseFloat(r?.total_price) || total) : 0;
+      return { online: true, ledger, paid, total, balance: r?.payment_status === 'confirmed' ? 0 : total, terms: { require: 'none', depositAmount: 0 }, depositRequired: 0, depositOutstanding: 0 };
+    }
+    const paidLedger = r2(ledger.filter(x => !x.voided).reduce((t, x) => t + (Number(x.amount) || 0), 0));
+    const terms = meta.paymentTerms || { require: 'none', depositAmount: 0 };
+    const settledOutside = r?.payment_status === 'confirmed' && meta.paidVia !== 'ledger';   // paid online before the ledger existed
+    const paid = settledOutside ? Math.max(paidLedger, total) : paidLedger;
+    const balance = settledOutside ? 0 : Math.max(0, r2(total - paid));
+    const depositRequired = terms.require === 'deposit' ? r2(Math.min(Number(terms.depositAmount) || 0, total || Infinity)) : 0;
+    return { online: false, ledger, paid, total, balance, terms, depositRequired, depositOutstanding: Math.min(balance, Math.max(0, r2(depositRequired - paid))) };
+  };
+  // Why a job needs paying attention (null = nothing owing).
+  const paymentFlag = (r: any): { tone: 'red' | 'amber'; text: string } | null => {
+    const ps = paySummary(r);
+    if (ps.online) return r.payment_status === 'confirmed' ? null : { tone: 'amber', text: 'Awaiting online payment' };
+    if (!(ps.total > 0) || ps.balance <= 0) return null;
+    if (ps.terms.require === 'deposit' && ps.depositOutstanding > 0 && r.status !== 'completed') return { tone: 'red', text: `Deposit ${formatCurrency(ps.depositOutstanding)} required before work starts` };
+    if (ps.terms.require === 'full_before' && r.status !== 'completed') return { tone: 'red', text: `Full payment ${formatCurrency(ps.balance)} required before work starts` };
+    if (r.status === 'completed') return { tone: 'red', text: `${formatCurrency(ps.balance)} still owing` };
+    return { tone: 'amber', text: ps.terms.require === 'on_collection' ? `${formatCurrency(ps.balance)} due on or before collection` : `${formatCurrency(ps.balance)} balance due` };
+  };
+  const digitsOnly = (v: any) => String(v || '').replace(/\D/g, '');
+  const customerForRow = (r: any) => ({ name: r?.customer_name && r.customer_name !== r.vehicle_rego ? r.customer_name : '', email: r?.email || r?.customer_email || '', phone: r?.customer_phone || r?.phone || '', regos: r?.vehicle_rego ? [r.vehicle_rego] : [] });
+  const rowsForCustomer = (c: any) => allJobRows.filter((r: any) => {
+    const em = String(r.email || r.customer_email || '').toLowerCase().trim();
+    const ph = digitsOnly(r.customer_phone || r.phone);
+    if (c?.email && em && em === String(c.email).toLowerCase().trim()) return true;
+    if (c?.phone && ph && ph === digitsOnly(c.phone)) return true;
+    return !c?.email && !c?.phone && !!c?.name && r.customer_name === c.name;
+  });
+  // Every money movement for a set of bookings, newest first.
+  const transactionsFor = (rows: any[]) => rows.flatMap((r: any) => {
+    const ps = paySummary(r);
+    const tx: any[] = ps.ledger.map((x: any) => ({ ...x, row: r }));
+    if (r.payment_status === 'confirmed' && (ps.online || (r.quote_items?.meta?.paidVia !== 'ledger' && !ps.ledger.some((x: any) => !x.voided)))) {
+      tx.push({ id: `online-${r.id}`, amount: ps.online ? (parseFloat(r.total_price) || 0) : ps.total, method: 'torqued_online', kind: 'payment', note: ps.online ? 'Booked & paid online' : 'Paid online', at: r.completed_at || r.created_at, row: r, online: true });
+    }
+    return tx;
+  }).sort((a: any, b: any) => new Date(b.at || 0).getTime() - new Date(a.at || 0).getTime());
+  // Shared UI tokens for the quote workspace & payment dialogs (one font: Raleway)
+  const UI_LABEL = 'block text-xs font-semibold uppercase tracking-wide text-muted mb-1.5';
+  const UI_INPUT = 'w-full bg-background border border-border rounded-xl px-3 h-11 text-sm text-foreground focus:outline-none focus:border-torqued-red';
+  const UI_CARD = 'rounded-2xl border border-border bg-card p-4 sm:p-5 space-y-3';
+  const UI_HEAD = 'text-sm font-bold uppercase tracking-wide text-foreground';
   // A raw booking row → the job shape the quote editor / PDF builder use.
   const rowToJobShape = (j: any) => ({
     id: j.id, reg: j.vehicle_rego || '', rego: j.vehicle_rego || '', customerName: j.customer_name,
@@ -690,7 +840,8 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
     quoteItems: j.quote_items || null,
   });
   type QuoteData = { parts: { name: string; qty: number; unitPrice: number }[]; labourHours: number; labourRate: number; other: { name: string; amount: number }[]; shopFee: number; discount: number; notes: string; total: number };
-  const quoteDataFromItems = (qi: any, fallbackTotal = 0): QuoteData => {
+  const quoteDataFromItems = (qiIn: any, fallbackTotal = 0): QuoteData => {
+    const qi = !hasLiveItems(qiIn) && qiIn?.draft?.items ? qiIn.draft.items : qiIn;
     const parts = Array.isArray(qi?.parts) ? qi.parts.filter((x: any) => x?.name) : [];
     const other = Array.isArray(qi?.other) ? qi.other.filter((x: any) => x?.name) : [];
     const d = { parts, labourHours: qi?.labourHours || 0, labourRate: qi?.labourRate || 0, other, shopFee: qi?.shopFee || 0, discount: qi?.discount || 0, notes: qi?.notes || '', total: 0 };
@@ -705,6 +856,78 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
     const a = document.createElement('a'); a.href = url; a.download = filename; a.click();
     setTimeout(() => URL.revokeObjectURL(url), 5000);
   };
+  // Merge a fresh booking row from the server into every list that shows it.
+  const upsertRow = (row: any) => {
+    if (!row?.id) return;
+    const merge = (list: any[]) => { const i = list.findIndex(x => x.id === row.id); if (i < 0) return [row, ...list]; const n = [...list]; n[i] = { ...list[i], ...row }; return n; };
+    setAllJobRows(prev => merge(prev));
+    setPastJobs(prev => (prev.some(x => x.id === row.id) || row.is_cold_quote || ['accepted', 'in_progress', 'completed'].includes(row.status)) ? merge(prev) : prev);
+    setIncomingJobs(prev => prev.map(j => j.id === row.id ? { ...j, quoteItems: row.quote_items ?? j.quoteItems } : j));
+  };
+  const patchRow = (id: string, patch: Record<string, any>) => {
+    const f = (r: any) => r.id === id ? { ...r, ...patch } : r;
+    setAllJobRows(prev => prev.map(f));
+    setPastJobs(prev => prev.map(f));
+  };
+  const mpost = async (url: string, body: Record<string, any>) => {
+    const r = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ mechanicId: user?.id, ...body }) });
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(d.error || 'Something went wrong — please try again.');
+    return d;
+  };
+  const openPayModal = (row: any, kind?: 'deposit' | 'payment' | 'credit', choices?: string[]) => {
+    if (!row) return;
+    const ps = paySummary(row);
+    const k = kind || (ps.depositOutstanding > 0 ? 'deposit' : 'payment');
+    const amt = k === 'deposit' && ps.depositOutstanding > 0 ? ps.depositOutstanding : k === 'credit' ? 0 : ps.balance;
+    setPayForm({ amount: amt > 0 ? amt.toFixed(2) : '', method: 'eftpos', kind: k, note: '' });
+    setPayModal({ rowId: row.id, choices });
+  };
+  const submitPayment = async () => {
+    if (!payModal) return;
+    const amount = parseFloat(payForm.amount);
+    if (!(amount > 0)) { alert('Enter an amount greater than $0.'); return; }
+    setPayBusy(true);
+    try {
+      const d = await mpost('/api/mechanic/record-payment', { bookingId: payModal.rowId, amount, method: payForm.method, kind: payForm.kind, note: payForm.note.trim() || undefined });
+      upsertRow(d.row);
+      setPayModal(null);
+    } catch (e: any) { alert(e?.message || 'Could not record the payment.'); }
+    finally { setPayBusy(false); }
+  };
+  const voidPayment = async (row: any, pmt: any) => {
+    if (!confirm(`Void this ${PAY_METHOD_LABEL[pmt.method] || ''} ${pmt.kind} of ${formatCurrency(Number(pmt.amount) || 0)}? It stays in the history, marked void.`)) return;
+    try { const d = await mpost('/api/mechanic/void-payment', { bookingId: row.id, paymentId: pmt.id }); upsertRow(d.row); }
+    catch (e: any) { alert(e?.message || 'Could not void the payment.'); }
+  };
+  // "Invoice with Torqued" — email a secure pay link for the balance (or copy it to text).
+  const invoiceWithTorqued = async (row: any) => {
+    const ps = paySummary(row);
+    if (!confirm(`Send ${row.customer_name || 'the customer'} a Torqued invoice for ${formatCurrency(ps.balance)}? They can pay by card, Afterpay or Klarna.`)) return;
+    try {
+      const d = await mpost('/api/mechanic/invoice-torqued', { bookingId: row.id });
+      if (d.row) upsertRow(d.row);
+      let copied = false;
+      try { await navigator.clipboard.writeText(d.payLink); copied = true; } catch {}
+      alert(d.emailed
+        ? `Invoice for ${formatCurrency(d.amountDue)} emailed to ${d.sentTo}.${copied ? '\n\nThe pay link is also copied if you want to text it.' : ''}`
+        : `Not emailed: ${d.reason}\n\nPay link${copied ? ' (copied)' : ''}: ${d.payLink}`);
+    } catch (e: any) { alert(e?.message || 'Could not create the invoice.'); }
+  };
+  const renderLedgerItem = (row: any, pmt: any) => (
+    <li key={pmt.id} className={cn('flex items-center justify-between gap-3 py-2 text-xs', pmt.voided && 'opacity-50')}>
+      <span className={cn('min-w-0', pmt.voided && 'line-through')}>
+        <span className="font-semibold text-foreground">{pmt.kind === 'deposit' ? 'Deposit' : pmt.kind === 'credit' ? 'Credit' : 'Payment'}</span>
+        <span className="text-muted"> · {PAY_METHOD_LABEL[pmt.method] || pmt.method} · {pmt.at ? new Date(pmt.at).toLocaleDateString('en-NZ', { day: 'numeric', month: 'short', year: 'numeric' }) : ''}{pmt.note ? ` · ${pmt.note}` : ''}</span>
+      </span>
+      <span className="flex items-center gap-2 shrink-0">
+        <span className={cn('font-semibold tabular-nums text-foreground', pmt.voided && 'line-through')}>{formatCurrency(Number(pmt.amount) || 0)}</span>
+        {pmt.voided ? <span className="text-muted">void</span>
+          : (!pmt.online && pmt.method !== 'torqued_online' && row?.is_cold_quote) && <button onClick={() => voidPayment(row, pmt)} className="text-muted hover:text-torqued-red underline underline-offset-2">Void</button>}
+      </span>
+    </li>
+  );
+
   // Reflect a saved/sent quote everywhere it's shown, without a reload.
   const applyQuoteResult = (bookingId: string, quoteItems: any, total: number) => {
     const patch = (r: any) => r.id === bookingId ? { ...r, quote_items: quoteItems, quoted_price: total } : r;
@@ -996,7 +1219,7 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
   const [searchQuery, setSearchQuery] = useState('');
   const [billingStartDate, setBillingStartDate] = useState<string | null>(null);
   const [activeTab, setActiveTab ] = useState('dashboard');
-  const [jobsSubtab, setJobsSubtab] = useState<'accept' | 'today' | 'upcoming' | 'history' | 'cold'>('accept');
+  const [jobsSubtab, setJobsSubtab] = useState<'accept' | 'today' | 'upcoming' | 'history' | 'payments' | 'cold'>('accept');
   const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
   const [selectedJobId, setSelectedJobId] = useState<string | null>(null);
   const [modalInsights, setModalInsights] = useState<{ title: string; detail: string; severity: string }[]>([]);
@@ -1292,7 +1515,7 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
         body: JSON.stringify({ bookingId: job.id, km, notes: checkoutNotes.trim() || undefined, mechanicName: profileData.name }),
       });
       if (!r.ok) { alert('Could not complete checkout. Please try again.'); return; }
-      setPastJobs(prev => prev.filter((j: any) => j.id !== job.id));
+      patchRow(job.id, { status: 'completed', completed_at: new Date().toISOString() });
       setIncomingJobs(prev => prev.filter(j => j.id !== job.id));
       setCheckoutModal(null);
     } catch { alert('Could not complete checkout.'); }
@@ -1346,6 +1569,7 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
       return;
     }
     setIncomingJobs(incomingJobs.filter(j => j.id !== jobId));
+    patchRow(jobId, { status: 'accepted' });
     // Add to pastJobs so it appears immediately in Today / Upcoming tabs
     setPastJobs(prev => [{
       id: job.id, vehicle_rego: job.reg, customer_name: customerName || job.model,
@@ -1393,13 +1617,13 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
   };
 
   const isDiagnosticJob = (j: any) => j.services?.includes('Diagnostic Inspection');
-  const manualQuotesCount = incomingJobs.filter(isDiagnosticJob).length;
+  const quotesNeedingAction = allJobRows.filter(isQuoteRow).filter((r: any) => ['needs_quote', 'not_sent'].includes(quoteStatusOf(r))).length;
   const pendingJobsCount = incomingJobs.filter(j => !isDiagnosticJob(j)).length;
 
   const sidebarItems = [
     { id: 'dashboard', label: 'Dashboard', icon: LayoutDashboard },
     { id: 'jobs', label: 'My Jobs', icon: Inbox, badge: pendingJobsCount > 0 ? pendingJobsCount : undefined },
-    { id: 'manual-quotes', label: 'Manual Quotes', icon: PenSquare, badge: manualQuotesCount > 0 ? manualQuotesCount : undefined },
+    { id: 'quotes', label: 'Quotes', icon: PenSquare, badge: quotesNeedingAction > 0 ? quotesNeedingAction : undefined },
     { id: 'customers', label: 'Customers', icon: User },
     { id: 'vehicle-health', label: 'Vehicle Health', icon: HeartPulse },
     { id: 'assistant', label: 'Assistant', icon: MessageCircle },
@@ -1910,7 +2134,7 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
           </div>
           {showOnlyDiagnostics && (
             <div className="flex gap-2 shrink-0">
-              <Button size="sm" variant="outline" className="text-foreground border-border" onClick={() => { setActiveTab('jobs'); setJobsSubtab('cold'); }}>View all quotes</Button>
+              <Button size="sm" variant="outline" className="text-foreground border-border" onClick={() => { setActiveTab('quotes'); }}>View all quotes</Button>
               <Button size="sm" className="bg-torqued-red text-white" onClick={() => { setColdForm({ customerName: '', email: '', phone: '', rego: '', make: '', model: '', description: '', date: '', channel: 'walk_in' }); setShowColdQuote(true); }}>+ New quote</Button>
             </div>
           )}
@@ -3520,13 +3744,15 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
           suggestedQuote: parseFloat(j.total_price) || 0,
           quoteItems: j.quote_items || null,
         };
+        const flag = paymentFlag(j);
+        const ps = paySummary(j);
         return (
-          <Card key={j.id} className="p-4 sm:p-5 bg-card border-border space-y-3">
+          <Card key={j.id} className={cn('p-4 sm:p-5 bg-card space-y-3', flag?.tone === 'red' ? 'border-torqued-red/60 ring-1 ring-torqued-red/25' : flag ? 'border-amber-500/60' : 'border-border')}>
             <div className="flex items-start justify-between gap-3">
               <div className="space-y-1 min-w-0">
                 <div className="flex items-center gap-2 flex-wrap">
                   {j.vehicle_rego && <span className="torqued-badge text-[10px]">{j.vehicle_rego}</span>}
-                  {j.is_cold_quote && <span className="text-[9px] uppercase font-black tracking-widest bg-torqued-red/10 text-torqued-red px-1.5 py-0.5 rounded">Cold quote</span>}
+                  <span className="inline-flex items-center gap-1 text-[10px] uppercase font-bold tracking-wide text-muted"><span className={cn('w-2 h-2 rounded-full', CHANNEL_META[channelOf(j)].dot)} />{CHANNEL_META[channelOf(j)].label}</span>
                   {j.transaction_id && <span className="text-[9px] uppercase font-black tracking-widest bg-amber-500/10 text-amber-500 px-1.5 py-0.5 rounded">Linked job</span>}
                 </div>
                 {(() => {
@@ -3557,7 +3783,23 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                 )}
               </div>
             </div>
+            {(flag || (!ps.online && ps.total > 0)) && (
+              <div className={cn('rounded-xl border px-3 py-2.5 flex flex-wrap items-center gap-x-4 gap-y-1 text-xs', flag?.tone === 'red' ? 'border-torqued-red/40 bg-torqued-red/5' : flag ? 'border-amber-500/40 bg-amber-500/5' : 'border-border bg-background')}>
+                <span className={cn('font-bold', flag?.tone === 'red' ? 'text-torqued-red' : flag ? 'text-amber-600' : 'text-emerald-600')}>{flag ? flag.text : 'Paid in full'}</span>
+                {!ps.online && <span className="text-muted">Total {formatCurrency(ps.total)} · Paid {formatCurrency(ps.paid)}{ps.balance > 0 ? ` · Balance ${formatCurrency(ps.balance)}` : ''}</span>}
+                {!ps.online && ps.terms.require !== 'none' && <span className="text-muted">{PAY_REQ_LABEL[ps.terms.require] || ''}{ps.terms.require === 'deposit' && ps.depositRequired ? ` (${formatCurrency(ps.depositRequired)})` : ''}</span>}
+              </div>
+            )}
             <div className="flex flex-wrap gap-2">
+              {!ps.online && ps.balance > 0 && (
+                <Button size="sm" className={cn('text-white', flag?.tone === 'red' ? 'bg-torqued-red' : 'bg-emerald-600 hover:bg-emerald-700')} onClick={() => openPayModal(j)}>Record payment</Button>
+              )}
+              {!ps.online && ps.balance > 0 && ps.total > 0 && (
+                <Button size="sm" variant="outline" className="text-foreground border-border hover:bg-background" onClick={() => invoiceWithTorqued(j)}>Invoice with Torqued</Button>
+              )}
+              {j.is_cold_quote && (
+                <Button size="sm" variant="outline" className="text-foreground border-border hover:bg-background" onClick={() => setCustPanel(customerForRow(j))}>Payments & customer</Button>
+              )}
               {(j.service_ids || []).includes('ppi') && j.status !== 'completed' && (
                 <Button size="sm" className="bg-torqued-red text-white" onClick={() => {
                   setPpiPreloadRego(j.vehicle_rego || '');
@@ -3583,7 +3825,7 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
               )}
               <Button size="sm" variant="outline" className="text-foreground border-border hover:bg-background" onClick={() => recordMileage(jobShape, 'out')}>Check-out km</Button>
               <Button size="sm" variant="outline" className="text-emerald-600 border-border hover:bg-background" onClick={() => exportInvoice(j)}>{j.payment_status === 'confirmed' ? 'Export invoice' : 'Download PDF'}</Button>
-              {j.status === 'completed' && j.payment_status === 'confirmed' && (
+              {j.status === 'completed' && j.payment_status === 'confirmed' && j.quote_items?.meta?.paidVia !== 'ledger' && (
                 <Button size="sm" variant="outline" className="text-amber-500 border-border hover:bg-background" onClick={() => { setRefundModal({ job: j }); setRefundAmount(''); setRefundReason(''); }}>Refund</Button>
               )}
               <Button size="sm" variant="outline" className="text-foreground border-border hover:bg-background" onClick={() => jobNotes[j.id]?.open ? setJobNotes(p => ({...p, [j.id]: {...p[j.id], open: false}})) : openJobNotes(j.id)}>
@@ -3654,40 +3896,45 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
     </div>
   );
 
-  // Quotes = every manual (phone/walk-in) quote + every online job that has been
-  // quoted. Saved here whether or not the email went out, each downloadable as a PDF.
-  const isQuoteRow = (r: any) => r?.status !== 'cancelled' && (r?.is_cold_quote || r?.status === 'quoted' || quoteHasPrices(r));
-  const [quotesFilter, setQuotesFilter] = useState<'open' | 'not_sent' | 'sent' | 'paid' | 'all'>('open');
+  // Quotes — every phone/walk-in quote and every online request that needs or has a
+  // quote. Autosaved drafts, saved and emailed quotes all live here; once a quote is
+  // paid or booked into the calendar it moves to My Jobs. Filter by how it came in.
+  const [quotesFilter, setQuotesFilter] = useState<'open' | 'needs' | 'draft' | 'not_sent' | 'sent' | 'booked' | 'all'>('open');
+  const [quotesChannel, setQuotesChannel] = useState<'all' | 'online' | 'phone' | 'walk_in'>('all');
   const [quoteRowBusy, setQuoteRowBusy] = useState<string | null>(null);
+  const quoteFilterMatch = (f: typeof quotesFilter, st: QuoteStatus) =>
+    f === 'all' ? true
+    : f === 'open' ? st !== 'booked' && st !== 'paid'
+    : f === 'needs' ? st === 'needs_quote'
+    : f === 'draft' ? st === 'draft' || st === 'saved'
+    : f === 'not_sent' ? st === 'not_sent'
+    : f === 'sent' ? st === 'sent'
+    : st === 'booked' || st === 'paid';
+  const channelMatch = (c: typeof quotesChannel, r: any) => c === 'all' ? true : c === 'walk_in' ? ['walk_in', 'manual'].includes(channelOf(r)) : channelOf(r) === c;
+  const newQuote = () => { setColdForm({ customerName: '', email: '', phone: '', rego: '', make: '', model: '', description: '', date: '', channel: 'walk_in' }); setShowColdQuote(true); };
   const renderQuotes = () => {
-    const rows = allJobRows.filter(isQuoteRow)
-      .sort((a: any, b: any) => new Date(b.created_at || 0).getTime() - new Date(a.created_at || 0).getTime());
-    const filtered = rows.filter((r: any) => {
-      const st = quoteStatusOf(r);
-      if (quotesFilter === 'open') return st !== 'paid' && r.status !== 'completed';
-      if (quotesFilter === 'not_sent') return st === 'not_sent' || st === 'saved';
-      if (quotesFilter === 'sent') return st === 'sent';
-      if (quotesFilter === 'paid') return st === 'paid' || r.status === 'completed';
-      return true;
-    });
-    const count = (f: typeof quotesFilter) => rows.filter((r: any) => {
-      const st = quoteStatusOf(r);
-      return f === 'open' ? st !== 'paid' && r.status !== 'completed' : f === 'not_sent' ? (st === 'not_sent' || st === 'saved') : f === 'sent' ? st === 'sent' : f === 'paid' ? (st === 'paid' || r.status === 'completed') : true;
-    }).length;
+    const rows = allJobRows.filter(isQuoteRow).sort((a: any, b: any) => new Date(b.created_at || 0).getTime() - new Date(a.created_at || 0).getTime());
+    const inChannel = rows.filter((r: any) => channelMatch(quotesChannel, r));
+    const filtered = inChannel.filter((r: any) => quoteFilterMatch(quotesFilter, quoteStatusOf(r)));
+    const count = (f: typeof quotesFilter) => inChannel.filter((r: any) => quoteFilterMatch(f, quoteStatusOf(r))).length;
+    const chCount = (c: typeof quotesChannel) => rows.filter((r: any) => channelMatch(c, r) && quoteFilterMatch(quotesFilter, quoteStatusOf(r))).length;
+    const itemsOf = (r: any) => {
+      const { meta: _m, draft: _d, ...live } = r.quote_items || {};
+      return hasLiveItems(live) ? live : (r.quote_items?.draft?.items || live);
+    };
     const downloadRow = async (r: any) => {
       setQuoteRowBusy(r.id);
-      try { downloadBase64Pdf(await buildQuotePdf(rowToJobShape(r), quoteDataFromItems(r.quote_items, parseFloat(r.quoted_price ?? r.total_price) || 0)), `Torqued-Quote-${String(r.id).toUpperCase()}.pdf`); }
+      try { downloadBase64Pdf(await buildQuotePdf(rowToJobShape(r), quoteDataFromItems(r.quote_items, quoteTotalOf(r))), `Torqued-Quote-${String(r.id).toUpperCase()}.pdf`); }
       catch { alert('Could not build the PDF.'); }
       finally { setQuoteRowBusy(null); }
     };
     const emailRow = async (r: any) => {
       setQuoteRowBusy(r.id);
       try {
-        const data = quoteDataFromItems(r.quote_items, parseFloat(r.quoted_price ?? r.total_price) || 0);
+        const data = quoteDataFromItems(r.quote_items, quoteTotalOf(r));
         const pdfBase64 = await buildQuotePdf(rowToJobShape(r), data);
-        const { meta: _m, ...items } = r.quote_items || {};
         const resp = await fetch('/api/mechanic/send-quote-pdf', { method: 'POST', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ bookingId: r.id, total: data.total, note: r.quote_note || null, pdfBase64, items }) });
+          body: JSON.stringify({ bookingId: r.id, total: data.total, note: r.quote_note || null, pdfBase64, items: itemsOf(r) }) });
         const d = await resp.json().catch(() => ({}));
         if (!resp.ok) { alert(d.error || 'Could not send.'); return; }
         applyQuoteResult(r.id, d.quoteItems, data.total);
@@ -3695,54 +3942,78 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
       } catch { alert('Could not send the quote.'); }
       finally { setQuoteRowBusy(null); }
     };
-    const chips: [typeof quotesFilter, string][] = [['open', 'Open'], ['not_sent', 'Not emailed'], ['sent', 'Emailed'], ['paid', 'Accepted / done'], ['all', 'All']];
+    const statusChips: [typeof quotesFilter, string][] = [['open', 'Open'], ['needs', 'Needs a quote'], ['draft', 'Drafts'], ['not_sent', 'Not emailed'], ['sent', 'Emailed'], ['booked', 'Booked → My Jobs'], ['all', 'All']];
+    const channelChips: [typeof quotesChannel, string, string | null][] = [['all', 'All channels', null], ['online', 'Online', CHANNEL_META.online.dot], ['phone', 'Phone', CHANNEL_META.phone.dot], ['walk_in', 'Walk-in', CHANNEL_META.walk_in.dot]];
+    const when = (d: any) => new Date(d).toLocaleString('en-NZ', { weekday: 'short', day: 'numeric', month: 'short', hour: 'numeric', minute: '2-digit' });
     return (
-      <div className="space-y-4">
+      <div className="space-y-4 pb-12 font-raleway">
         <div className="flex items-start justify-between gap-3 flex-wrap">
-          <p className="text-sm text-muted max-w-xl">Every quote you write — phone, walk-in or online — is kept here, whether or not the email went out. Download any quote as a PDF to print or hand over.</p>
-          <Button size="sm" className="bg-torqued-red text-white shrink-0" onClick={() => { setColdForm({ customerName: '', email: '', phone: '', rego: '', make: '', model: '', description: '', date: '', channel: 'walk_in' }); setShowColdQuote(true); }}>+ New quote</Button>
+          <p className="text-sm text-muted max-w-2xl">Every quote — online, phone or walk-in. Drafts save automatically as you type. Once a quote is paid or added to the calendar it moves to My Jobs.</p>
+          <Button size="sm" className="bg-torqued-red text-white shrink-0" onClick={newQuote}>+ New quote</Button>
         </div>
-        <div className="flex gap-1.5 flex-wrap" role="tablist" aria-label="Quote filter">
-          {chips.map(([id, label]) => (
-            <button key={id} role="tab" aria-selected={quotesFilter === id} onClick={() => setQuotesFilter(id)}
-              className={cn('px-3 h-8 rounded-lg text-[11px] font-black uppercase tracking-wider transition-all', quotesFilter === id ? 'bg-foreground text-background' : 'bg-card border border-border text-muted hover:text-foreground')}>
-              {label} ({count(id)})
+        <div className="flex gap-2 flex-wrap" role="group" aria-label="How the quote came in">
+          {channelChips.map(([id, label, dot]) => (
+            <button key={id} aria-pressed={quotesChannel === id} onClick={() => setQuotesChannel(id)}
+              className={cn('px-3.5 h-10 rounded-xl text-sm font-semibold inline-flex items-center gap-2 transition-all', quotesChannel === id ? 'bg-foreground text-background' : 'bg-card border border-border text-muted hover:text-foreground')}>
+              {dot && <span className={cn('w-2.5 h-2.5 rounded-full', dot)} />}{label}<span className="opacity-60 tabular-nums">{chCount(id)}</span>
             </button>
           ))}
         </div>
-        {filtered.length === 0 && <Card className="p-10 text-center text-muted italic bg-card border-border">No quotes here.</Card>}
+        <div className="flex gap-1.5 flex-wrap" role="group" aria-label="Quote status">
+          {statusChips.map(([id, label]) => (
+            <button key={id} aria-pressed={quotesFilter === id} onClick={() => setQuotesFilter(id)}
+              className={cn('px-3 h-8 rounded-lg text-xs font-semibold transition-all', quotesFilter === id ? 'bg-torqued-red text-white' : 'border border-border text-muted hover:text-foreground')}>
+              {label} <span className="opacity-70 tabular-nums">{count(id)}</span>
+            </button>
+          ))}
+        </div>
+        {filtered.length === 0 && <Card className="p-10 text-center text-muted bg-card border-border">No quotes here.</Card>}
         {filtered.map((r: any) => {
           const st = quoteStatusOf(r);
           const ch = channelOf(r);
           const meta = r.quote_items?.meta || {};
           const email = r.email || r.customer_email || '';
-          const total = quoteDataFromItems(r.quote_items, parseFloat(r.quoted_price ?? r.total_price) || 0).total;
+          const total = quoteTotalOf(r) || quoteDataFromItems(r.quote_items, 0).total;
+          const ps = paySummary(r);
           const custName = r.customer_name && r.customer_name !== r.vehicle_rego ? r.customer_name : null;
           const busy = quoteRowBusy === r.id;
+          const booked = st === 'booked' || st === 'paid';
           return (
-            <Card key={r.id} className={cn('p-4 bg-card space-y-3', st === 'not_sent' ? 'border-amber-500/50' : 'border-border')}>
+            <Card key={r.id} className={cn('p-4 sm:p-5 bg-card space-y-3', st === 'not_sent' || st === 'needs_quote' ? 'border-amber-500/50' : 'border-border')}>
               <div className="flex items-start justify-between gap-3">
                 <div className="min-w-0 space-y-1">
-                  <div className="flex items-center gap-1.5 flex-wrap">
+                  <div className="flex items-center gap-2 flex-wrap">
                     {r.vehicle_rego && <span className="torqued-badge text-[10px]">{r.vehicle_rego}</span>}
-                    <span className="inline-flex items-center gap-1 text-[9px] uppercase font-black tracking-widest text-muted"><span className={cn('w-2 h-2 rounded-full', CHANNEL_META[ch].dot)} />{CHANNEL_META[ch].label}</span>
-                    <span className={cn('text-[9px] uppercase font-black tracking-widest px-1.5 py-0.5 rounded border', QUOTE_STATUS_META[st].cls)}>{QUOTE_STATUS_META[st].label}</span>
+                    <span className="inline-flex items-center gap-1 text-xs font-semibold text-muted"><span className={cn('w-2 h-2 rounded-full', CHANNEL_META[ch].dot)} />{CHANNEL_META[ch].label}</span>
+                    <span className={cn('text-[11px] font-semibold px-2 py-0.5 rounded-md border', QUOTE_STATUS_META[st].cls)}>{QUOTE_STATUS_META[st].label}</span>
+                    {r.quote_items?.draft && !booked && <span className="text-[11px] text-muted">Draft autosaved {meta.draftSavedAt ? new Date(meta.draftSavedAt).toLocaleString('en-NZ', { day: 'numeric', month: 'short', hour: 'numeric', minute: '2-digit' }) : ''}</span>}
                   </div>
-                  <p className="font-black text-foreground truncate">{custName || r.vehicle_rego || 'Customer'}</p>
-                  <p className="text-xs text-muted truncate">{[r.vehicle_label, email, r.customer_phone].filter(Boolean).join(' · ')}</p>
-                  <p className="text-[11px] text-muted">
+                  <p className="font-bold text-foreground truncate">{custName || r.vehicle_rego || 'Customer'}</p>
+                  <p className="text-sm text-muted truncate">{[r.vehicle_label, r.customer_phone, email].filter(Boolean).join(' · ')}</p>
+                  <p className="text-xs text-muted">
                     Ref {String(r.id).toUpperCase()} · created {new Date(r.created_at).toLocaleDateString('en-NZ')}
-                    {r.date ? ` · booked ${new Date(r.date).toLocaleString('en-NZ', { weekday: 'short', day: 'numeric', month: 'short', hour: 'numeric', minute: '2-digit' })}` : ''}
+                    {r.date && booked ? ` · booked ${when(r.date)}` : ''}
                     {st === 'sent' && meta.sentAt ? ` · emailed ${new Date(meta.sentAt).toLocaleDateString('en-NZ')}${meta.sentTo ? ` to ${meta.sentTo}` : ''}` : ''}
                   </p>
-                  {st === 'not_sent' && meta.sendError && <p className="text-[11px] font-bold text-amber-600">{meta.sendError}</p>}
+                  {r.description && <p className="text-xs text-muted italic line-clamp-2">&ldquo;{String(r.description).replace(/^\[EV Quote Request\]\s*/, '')}&rdquo;</p>}
+                  {st === 'not_sent' && meta.sendError && <p className="text-xs font-semibold text-amber-600">{meta.sendError}</p>}
+                  {r.is_cold_quote && (ps.paid > 0 || ps.terms.require === 'deposit') && (
+                    <p className="text-xs"><span className="font-semibold text-emerald-600">{ps.paid > 0 ? `${formatCurrency(ps.paid)} paid` : 'No deposit yet'}</span>
+                      <span className="text-muted">{ps.depositOutstanding > 0 ? ` · deposit ${formatCurrency(ps.depositOutstanding)} to collect` : ''}{ps.paid > 0 && ps.balance > 0 ? ` · balance ${formatCurrency(ps.balance)}` : ''}</span></p>
+                  )}
                 </div>
-                <p className="font-black text-torqued-red shrink-0">{total > 0 ? formatCurrency(total) : '—'}</p>
+                <div className="text-right shrink-0">
+                  <p className="font-bold text-lg text-torqued-red tabular-nums">{total > 0 ? formatCurrency(total) : '—'}</p>
+                  <p className="text-[11px] text-muted">GST incl.</p>
+                </div>
               </div>
               <div className="flex flex-wrap gap-2">
-                <Button size="sm" variant="outline" disabled={busy || st === 'draft'} className="text-emerald-600 border-border hover:bg-background" onClick={() => downloadRow(r)}>{busy ? 'Working…' : 'Download PDF'}</Button>
-                <Button size="sm" variant="outline" disabled={busy || !email || st === 'draft' || st === 'paid'} title={!email ? 'No email address on file' : undefined} className="text-foreground border-border hover:bg-background" onClick={() => emailRow(r)}>{st === 'sent' ? 'Re-send email' : 'Email quote'}</Button>
-                <Button size="sm" variant="outline" disabled={busy} className="text-foreground border-border hover:bg-background" onClick={() => openQuoteEditor(rowToJobShape(r))}>{st === 'draft' ? 'Build quote' : 'Edit quote'}</Button>
+                <Button size="sm" disabled={busy} className="bg-torqued-red text-white" onClick={() => openQuoteEditor(rowToJobShape(r), r)}>{st === 'needs_quote' ? 'Write quote' : st === 'draft' ? 'Continue draft' : 'Open quote'}</Button>
+                <Button size="sm" variant="outline" disabled={busy || !(total > 0)} className="text-foreground border-border hover:bg-background" onClick={() => downloadRow(r)}>{busy ? 'Working…' : 'Download PDF'}</Button>
+                {!booked && <Button size="sm" variant="outline" disabled={busy || !email || !(total > 0)} title={!email ? 'No email address on file' : undefined} className="text-foreground border-border hover:bg-background" onClick={() => emailRow(r)}>{st === 'sent' ? 'Re-send email' : 'Email quote'}</Button>}
+                {r.is_cold_quote && st !== 'paid' && <Button size="sm" variant="outline" disabled={busy} className="text-foreground border-border hover:bg-background" onClick={() => openPayModal(r, ps.depositOutstanding > 0 ? 'deposit' : 'credit')}>+ Deposit / credit</Button>}
+                {!r.is_cold_quote && isDiagRow(r) && incomingJobs.some(j => j.id === r.id) && <Button size="sm" variant="outline" className="text-foreground border-border hover:bg-background" onClick={() => setSelectedJobId(r.id)}>Diagnostic report</Button>}
+                {booked && <Button size="sm" variant="outline" className="text-foreground border-border hover:bg-background" onClick={() => { setActiveTab('jobs'); setJobsSubtab(r.status === 'completed' ? 'history' : paymentFlag(r) ? 'payments' : 'upcoming'); }}>View in My Jobs</Button>}
               </div>
             </Card>
           );
@@ -3752,37 +4023,41 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
   };
 
   const renderMyJobs = () => {
-    const isToday = (d?: string) => d && new Date(d).toDateString() === new Date().toDateString();
-    // A job is "active" once it's accepted OR paid (incl. paid cold quotes) — but not completed.
-    const isActiveJob = (j: any) => j.status !== 'completed' && (j.status === 'in_progress' || j.status === 'booked' || j.payment_status === 'confirmed');
-    const accepted = pastJobs.filter(isActiveJob);
-    const todayJobs = accepted.filter((j: any) => isToday(j.date));
-    const upcoming = accepted.filter((j: any) => j.date && new Date(j.date).getTime() > Date.now() && !isToday(j.date));
-    // Cold quotes still awaiting payment/acceptance only — paid ones move into the active lists above.
-    const coldQuotes = pastJobs.filter((j: any) => j.is_cold_quote && !isActiveJob(j) && j.status !== 'completed');
-    const history = pastJobs.filter((j: any) => j.status === 'completed');
+    const endToday = new Date(); endToday.setHours(23, 59, 59, 999);
+    const when = (j: any) => j.date ? new Date(j.date).getTime() : Number.POSITIVE_INFINITY;
+    // One list of jobs for every channel: online bookings once accepted, and phone /
+    // walk-in quotes once paid or added to the calendar.
+    const jobs = allJobRows.filter(isJobRow);
+    const active = jobs.filter((j: any) => j.status !== 'completed').sort((a: any, b: any) => when(a) - when(b));
+    const todayJobs = active.filter((j: any) => when(j) <= endToday.getTime());
+    const upcoming = active.filter((j: any) => when(j) > endToday.getTime());
+    const payDue = jobs.filter((j: any) => !!paymentFlag(j)).sort((a: any, b: any) => when(a) - when(b));
+    const history = jobs.filter((j: any) => j.status === 'completed')
+      .sort((a: any, b: any) => new Date(b.completed_at || b.date || b.created_at || 0).getTime() - new Date(a.completed_at || a.date || a.created_at || 0).getTime());
+    const sub = jobsSubtab === 'cold' ? 'accept' : jobsSubtab;
     const subtabs = [
-      { id: 'accept' as const, label: 'To accept', n: incomingJobs.length },
-      { id: 'today' as const, label: 'Today', n: todayJobs.length },
-      { id: 'upcoming' as const, label: 'Upcoming', n: upcoming.length },
-      { id: 'history' as const, label: 'History', n: history.length },
-      { id: 'cold' as const, label: 'Quotes', n: allJobRows.filter(isQuoteRow).filter(r => ['not_sent', 'saved', 'draft'].includes(quoteStatusOf(r))).length },
+      { id: 'accept' as const, label: 'To accept', n: incomingJobs.filter(j => !isDiagnosticJob(j)).length, alert: false },
+      { id: 'today' as const, label: 'Today', n: todayJobs.length, alert: false },
+      { id: 'upcoming' as const, label: 'Upcoming', n: upcoming.length, alert: false },
+      { id: 'payments' as const, label: 'Payment due', n: payDue.length, alert: payDue.length > 0 },
+      { id: 'history' as const, label: 'History', n: history.length, alert: false },
     ];
     return (
       <div className="space-y-5 pb-12">
         <div className="flex gap-2 flex-wrap">
-          {subtabs.map(s => (
-            <button key={s.id} onClick={() => setJobsSubtab(s.id)}
-              className={cn('px-4 h-9 rounded-xl text-xs font-black uppercase tracking-wider transition-all', jobsSubtab === s.id ? 'bg-torqued-red text-white' : 'bg-card border border-border text-muted hover:text-foreground')}>
-              {s.label}{s.n ? ` (${s.n})` : ''}
+          {subtabs.map(sb => (
+            <button key={sb.id} onClick={() => setJobsSubtab(sb.id)}
+              className={cn('px-4 h-9 rounded-xl text-xs font-black uppercase tracking-wider transition-all', sub === sb.id ? 'bg-torqued-red text-white' : sb.alert ? 'bg-torqued-red/10 border border-torqued-red/40 text-torqued-red' : 'bg-card border border-border text-muted hover:text-foreground')}>
+              {sb.label}{sb.n ? ` (${sb.n})` : ''}
             </button>
           ))}
         </div>
-        {jobsSubtab === 'accept' && renderIncomingJobs()}
-        {jobsSubtab === 'today' && renderJobList(todayJobs, 'No jobs scheduled for today.')}
-        {jobsSubtab === 'upcoming' && renderJobList(upcoming, 'No upcoming jobs.')}
-        {jobsSubtab === 'history' && renderJobList(history, 'No completed jobs yet.')}
-        {jobsSubtab === 'cold' && renderQuotes()}
+        {sub === 'payments' && <p className="text-sm text-muted">Jobs with money still to collect. Record cash, EFTPOS, bank transfer or internal payments, or send a Torqued invoice the customer pays online.</p>}
+        {sub === 'accept' && renderIncomingJobs()}
+        {sub === 'today' && renderJobList(todayJobs, 'Nothing booked in for today.')}
+        {sub === 'upcoming' && renderJobList(upcoming, 'No upcoming jobs.')}
+        {sub === 'payments' && renderJobList(payDue, 'Nothing owing — every job is paid up.')}
+        {sub === 'history' && renderJobList(history, 'No completed jobs yet.')}
       </div>
     );
   };
@@ -3808,6 +4083,7 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
             <p className="text-xs text-muted">{c.email || ''}{c.phone ? ` · ${c.phone}` : ''}{c.regos?.length ? ` · ${c.regos.join(', ')}` : ''}</p>
           </div>
           <div className="flex gap-2 shrink-0">
+            <Button size="sm" variant="outline" className="text-foreground border-border" onClick={() => setCustPanel(c)}>Transactions & credit</Button>
             <Button size="sm" variant="outline" className="text-foreground border-border" onClick={() => openEditCustomer(c)}>Edit</Button>
             <Button size="sm" variant="outline" className="text-foreground border-border" onClick={() => {
               setColdForm({ customerName: c.name || '', email: c.email || '', phone: c.phone || '', rego: c.regos?.[0] || '', make: '', model: '', description: '', date: '', channel: 'walk_in' });
@@ -4211,7 +4487,8 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
     switch (activeTab) {
       case 'dashboard': return renderDashboard();
       case 'jobs': return renderMyJobs();
-      case 'manual-quotes': return renderIncomingJobs(true);
+      case 'quotes':
+      case 'manual-quotes': return renderQuotes();
       case 'customers': return renderCustomers();
       case 'vehicle-health': return renderVehicleHealth();
       case 'assistant': return renderAssistant();
@@ -5104,9 +5381,9 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
       {/* Cold quote: create a booking for a customer with no prior Torqued relationship */}
       {showColdQuote && (
         <div className="fixed inset-0 z-[120] flex items-center justify-center p-4 bg-black/70 backdrop-blur-sm">
-          <div className="w-full max-w-md bg-card border border-border rounded-3xl p-6 space-y-4 max-h-[90vh] overflow-y-auto">
+          <div role="dialog" aria-modal="true" aria-label="New quote" className="font-raleway w-full max-w-3xl bg-background border border-border rounded-3xl p-6 sm:p-8 space-y-5 max-h-[92vh] overflow-y-auto">
             <div>
-              <h3 className="text-xl font-black tracking-tight text-foreground">New quote</h3>
+              <h3 className="text-2xl tracking-tight text-foreground">New quote</h3>
               <p className="text-xs text-muted">Phone booking or walk-in. Add an email to send the quote; without one it's still saved and downloadable as a PDF. If they pay online you receive the full amount — Torqued takes no commission.</p>
             </div>
             <div className="flex gap-1 p-1 bg-background border border-border rounded-xl" role="radiogroup" aria-label="How did this customer contact you?">
@@ -5135,7 +5412,7 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
 
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
               {([['customerName','Customer name *'],['email','Email (to send the quote)'],['phone','Phone'],['rego','Rego'],['make','Make'],['model','Model']] as const).map(([f,l]) => (
-                <input key={f} value={(coldForm as any)[f]} placeholder={l}
+                <input key={f} value={(coldForm as any)[f]} placeholder={l} aria-label={l}
                   onChange={e => {
                     setColdForm(c => ({ ...c, [f]: f === 'rego' ? e.target.value.toUpperCase() : e.target.value }));
                     if (f === 'rego') { setColdRegoLookedUp(false); setHistAccessState('idle'); setUnlockedHistory(null); }
@@ -5272,7 +5549,7 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
 
             <textarea value={coldForm.description} onChange={e => setColdForm(c => ({ ...c, description: e.target.value }))} rows={2} placeholder="Work required / notes" className="w-full bg-background border border-border rounded-lg px-3 py-2 text-sm text-foreground resize-none" />
             <div className="space-y-1">
-              <label className="text-[10px] font-black uppercase tracking-widest text-muted">Drop-off date & time (optional — adds it to your diary)</label>
+              <label className="block text-xs font-semibold uppercase tracking-wide text-muted">Drop-off date & time (optional — books it straight into My Jobs & the diary)</label>
               <input type="datetime-local" value={coldForm.date} onChange={e => setColdForm(c => ({ ...c, date: e.target.value }))} className="w-full bg-background border border-border rounded-lg px-3 h-10 text-sm text-foreground" />
             </div>
             <div className="flex gap-2">
@@ -5286,16 +5563,16 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                   setShowColdQuote(false);
                   setHistAccessState('idle'); setUnlockedHistory(null); setColdRegoLookedUp(false);
                   // Show it in the diary + Quotes straight away (mirrors the row the server created)
-                  const newRow = {
+                  const fallbackRow = {
                     id: d.bookingId, mechanic_id: user!.id, vehicle_rego: coldForm.rego || null, customer_name: coldForm.customerName,
                     email: coldForm.email || null, customer_phone: coldForm.phone || null, service_ids: [], status: 'booked', payment_status: 'pending',
                     date: coldForm.date || null, description: coldForm.description || null, is_cold_quote: true, total_price: 0,
                     quote_items: { meta: { channel: coldForm.channel } }, created_at: new Date().toISOString(),
                     vehicle_label: [coldForm.make, coldForm.model].filter(Boolean).join(' ') || coldForm.rego || '',
                   };
-                  setAllJobRows(prev => [newRow, ...prev]);
-                  setPastJobs(prev => [newRow, ...prev]);
-                  openQuoteEditor({ ...rowToJobShape(newRow), model: `${coldForm.make} ${coldForm.model}`.trim() || coldForm.rego, services: [] });
+                  const newRow = d.row ? { ...fallbackRow, ...d.row, vehicle_label: fallbackRow.vehicle_label, vehicle_make: coldForm.make || null, vehicle_model: coldForm.model || null } : fallbackRow;
+                  upsertRow(newRow);
+                  openQuoteEditor({ ...rowToJobShape(newRow), model: `${coldForm.make} ${coldForm.model}`.trim() || coldForm.rego, services: [] }, newRow);
                 } catch { alert('Could not create cold quote.'); }
                 finally { setColdBusy(false); }
               }}>{coldBusy ? 'Creating…' : 'Build quote →'}</Button>
@@ -5304,197 +5581,506 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
         </div>
       )}
 
-      {/* Quote Builder */}
+      {/* Quote workspace — full screen, two columns, autosaves to a draft */}
       <AnimatePresence>
-        {quoteJob && (
-          <div className="fixed inset-0 z-[120] flex items-center justify-center p-4 bg-black/70 backdrop-blur-sm overflow-y-auto">
-            <motion.div
-              initial={{ opacity: 0, scale: 0.96, y: 20 }} animate={{ opacity: 1, scale: 1, y: 0 }} exit={{ opacity: 0, scale: 0.96, y: 20 }}
-              className="w-full max-w-lg my-8 bg-card border border-border rounded-3xl p-6 sm:p-8 space-y-5 shadow-2xl"
-            >
-              <div className="flex justify-between items-start">
-                <div>
-                  <h3 className="text-xl font-black tracking-tight">Build Quote</h3>
-                  <p className="text-xs text-muted">{quoteJob.model} {quoteJob.reg ? `(${quoteJob.reg})` : ''}</p>
-                </div>
-                <button onClick={() => setQuoteJob(null)} className="text-muted hover:text-foreground"><X size={20} /></button>
-              </div>
-
-              {/* Parts */}
-              <div className="space-y-2">
-                <div className="flex justify-between items-center">
-                  <label className="text-[10px] font-black uppercase tracking-widest text-muted">Parts</label>
-                  <button onClick={() => setQParts([...qParts, { name: '', qty: 1, unitPrice: 0 }])} className="text-[10px] font-bold text-torqued-red flex items-center gap-1"><Plus size={12}/> Add manual part</button>
-                </div>
-                {parts.length > 0 && (
-                  <select onChange={e => {
-                    const inv = parts.find(p => p.id === e.target.value);
-                    if (inv) setQParts([...qParts.filter(p => p.name), { name: inv.name, qty: 1, unitPrice: inv.unitPrice }]);
-                    e.target.value = '';
-                  }} className="w-full bg-background border border-border rounded-lg px-3 h-9 text-xs text-foreground">
-                    <option value="">+ Add from inventory…</option>
-                    {parts.map(p => <option key={p.id} value={p.id}>{p.name} — ${p.unitPrice} ({p.quantity} in stock)</option>)}
-                  </select>
-                )}
-                {qParts.map((p, i) => {
-                  const stk = stockFor(p.name);
-                  const needed = p.qty || 0;
-                  const inStock = stk != null && stk >= needed && needed > 0;
-                  return (
-                  <div key={i} className="space-y-1">
-                    <div className="flex gap-2 items-center">
-                      <input value={p.name} onChange={e => { const n=[...qParts]; n[i]={...p,name:e.target.value}; setQParts(n); }} placeholder="Part name" className="flex-1 bg-background border border-border rounded-lg px-3 h-9 text-xs text-foreground" />
-                      <input type="number" value={p.qty||''} onChange={e => { const n=[...qParts]; n[i]={...p,qty:parseInt(e.target.value)||0}; setQParts(n); }} placeholder="Qty" className="w-12 bg-background border border-border rounded-lg px-2 h-9 text-xs text-foreground" />
-                      <input type="number" value={p.unitPrice||''} onChange={e => { const n=[...qParts]; n[i]={...p,unitPrice:parseFloat(e.target.value)||0}; setQParts(n); }} placeholder="$ ea" className="w-16 bg-background border border-border rounded-lg px-2 h-9 text-xs text-foreground" />
-                      <button onClick={() => aiLookupPart(i)} disabled={partLookupBusy===i} title="AI lookup (NZ suppliers)" className="text-torqued-red hover:opacity-70 text-[10px] font-black">{partLookupBusy===i?'…':'AI'}</button>
-                      <button onClick={() => setQParts(qParts.filter((_,j)=>j!==i))} className="text-muted hover:text-torqued-red"><Trash2 size={14} /></button>
+        {quoteJob && (() => {
+          const row = allJobRows.find((r: any) => r.id === quoteJob.id) || null;
+          const isManual = !!row?.is_cold_quote;
+          const ch: Channel = row ? channelOf(row) : 'online';
+          const st = row ? quoteStatusOf(row) : null;
+          const isJob = row ? isJobRow(row) : false;
+          const pay = row ? paySummary({ ...row, quoted_price: qTotal > 0 ? qTotal : row.quoted_price }) : null;
+          const quoteEmail = quoteJob.email || quoteJob.customerEmail || '';
+          const custName = quoteJob.customerName && quoteJob.customerName !== quoteJob.reg ? quoteJob.customerName : '';
+          const vehicle = quoteJob.vehicleLabel && quoteJob.vehicleLabel !== quoteJob.reg ? quoteJob.vehicleLabel : [quoteJob.year, quoteJob.make, quoteJob.vehicleModel].filter(Boolean).join(' ');
+          const items = qItemsNow;
+          const note = [
+            ...qParts.filter(p=>p.name).map(p=>`${p.name} x${p.qty} — $${(p.qty*p.unitPrice).toFixed(2)}`),
+            `Labour: ${qLabourHours}h × $${qLabourRate} = $${qLabourTotal.toFixed(2)}`,
+            ...qOther.filter(o=>o.name).map(o=>`${o.name} — $${o.amount.toFixed(2)}`),
+            qShopFee>0?`Workshop fee — $${qShopFee.toFixed(2)}`:'',
+            qDiscount>0?`Discount: -$${qDiscount.toFixed(2)}`:'',
+            qNotes.trim()?`\nNotes: ${qNotes.trim()}`:''
+          ].filter(Boolean).join('\n');
+          const settle = () => { clearTimeout(qDraftTimer.current); qBaselineRef.current = qSnapshot; };
+          const goToQuotes = () => { setQuoteJob(null); setActiveTab('quotes'); };
+          const persistNow = async () => {
+            settle();
+            const d = await mpost('/api/mechanic/save-quote', { bookingId: quoteJob.id, total: qTotal, note, items });
+            if (d.row) upsertRow(d.row); else applyQuoteResult(quoteJob.id, d.quoteItems, qTotal);
+            return d;
+          };
+          // Save only — no email. Walk-ins without email, or handing over a printed copy.
+          const saveOnly = async (thenDownload: boolean) => {
+            setQSending(true);
+            try {
+              await persistNow();
+              if (thenDownload) downloadBase64Pdf(await buildQuotePdf(quoteJob), `Torqued-Quote-${String(quoteJob.id).toUpperCase()}.pdf`);
+              goToQuotes();
+            } catch (e: any) { alert(e?.message || 'Could not save the quote. Check your connection and try again.'); }
+            finally { setQSending(false); }
+          };
+          const emailQuote = async () => {
+            setQSending(true);
+            try {
+              settle();
+              const pdfBase64 = await buildQuotePdf(quoteJob);
+              const r = await fetch('/api/mechanic/send-quote-pdf', {
+                method: 'POST', headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ bookingId: quoteJob.id, total: qTotal, note, customerName: quoteJob.customerName, pdfBase64, items }),
+              });
+              const d = await r.json().catch(() => ({}));
+              if (!r.ok) { alert(d.error || 'Could not save the quote.'); return; }
+              applyQuoteResult(quoteJob.id, d.quoteItems, qTotal);
+              if (d.emailed) {
+                if (!isJob) {
+                  fetch('/api/mechanic/update-job-status', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ bookingId: quoteJob.id, status: 'quoted' }) }).catch(() => {});
+                  patchRow(quoteJob.id, { status: 'quoted' });
+                }
+                goToQuotes();
+              } else {
+                alert(`Quote saved, but it was NOT emailed.\n\n${d.reason || ''}\n\nIt's under Quotes, where you can download the PDF or try emailing again.`);
+                goToQuotes();
+              }
+            } catch { alert('Could not generate the quote. Check your connection and try again.'); }
+            finally { setQSending(false); }
+          };
+          const saveSettings = async (patch: Record<string, any>) => {
+            if (!row) return;
+            try { const d = await mpost('/api/mechanic/quote-settings', { bookingId: row.id, ...patch }); if (d.row) upsertRow(d.row); }
+            catch (e: any) { alert(e?.message || 'Could not save that setting.'); }
+          };
+          const addToCalendar = async () => {
+            if (!row || !qSchedule) return;
+            setQSending(true);
+            try { const d = await mpost('/api/mechanic/schedule-quote', { bookingId: row.id, date: qSchedule }); if (d.row) upsertRow(d.row); }
+            catch (e: any) { alert(e?.message || 'Could not add it to the calendar.'); }
+            finally { setQSending(false); }
+          };
+          const invoiceNow = async () => {
+            if (!row) return;
+            setQSending(true);
+            let saved: any = null;
+            try { saved = await persistNow(); } catch (e: any) { alert(e?.message || 'Could not save the quote.'); setQSending(false); return; }
+            setQSending(false);
+            await invoiceWithTorqued(saved?.row || { ...row, quoted_price: qTotal });
+          };
+          const fmtWhen = (d: any) => d ? new Date(d).toLocaleString('en-NZ', { weekday: 'short', day: 'numeric', month: 'short', hour: 'numeric', minute: '2-digit' }) : '';
+          const cust = row ? customerForRow(row) : null;
+          const custRows = cust ? rowsForCustomer(cust) : [];
+          const custTx = transactionsFor(custRows);
+          const custPaid = custTx.filter((t: any) => !t.voided).reduce((t2: number, x: any) => t2 + (Number(x.amount) || 0), 0);
+          const draftText = qDraftState.status === 'saving' ? 'Saving draft…'
+            : qDraftState.status === 'saved' ? `Draft saved ${qDraftState.at ? new Date(qDraftState.at).toLocaleTimeString('en-NZ', { hour: 'numeric', minute: '2-digit' }) : ''}`
+            : qDraftState.status === 'error' ? 'Autosave failed — your changes are still here'
+            : 'Autosaves as you type';
+          const sumRow = (label: string, val: string, cls = 'text-muted') => (
+            <div className={cn('flex justify-between gap-3 text-sm', cls)}><span>{label}</span><span className="tabular-nums">{val}</span></div>
+          );
+          return (
+            <motion.div key="quote-workspace" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
+              className="fixed inset-0 z-[120] flex bg-black/70 backdrop-blur-sm p-0 sm:p-4 lg:p-6">
+              <motion.div initial={{ y: 16, opacity: 0 }} animate={{ y: 0, opacity: 1 }} exit={{ y: 16, opacity: 0 }}
+                role="dialog" aria-modal="true" aria-label="Quote"
+                className="font-raleway w-full max-w-[1440px] mx-auto bg-background border border-border sm:rounded-3xl shadow-2xl flex flex-col overflow-hidden">
+                {/* Header */}
+                <div className="flex items-center gap-3 px-4 sm:px-6 py-4 border-b border-border">
+                  <div className="min-w-0 flex-1">
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <h3 className="text-xl sm:text-2xl tracking-tight">Quote</h3>
+                      {quoteJob.reg && <span className="torqued-badge text-[10px]">{quoteJob.reg}</span>}
+                      <span className="inline-flex items-center gap-1 text-xs font-semibold text-muted"><span className={cn('w-2 h-2 rounded-full', CHANNEL_META[ch].dot)} />{CHANNEL_META[ch].label}</span>
+                      {st && <span className={cn('text-[11px] font-semibold px-2 py-0.5 rounded-md border', QUOTE_STATUS_META[st].cls)}>{QUOTE_STATUS_META[st].label}</span>}
                     </div>
-                    {p.name.trim() && (
-                      <div className="flex items-center gap-2 pl-1">
-                        {inStock
-                          ? <span className="text-[9px] font-black uppercase tracking-widest text-emerald-500">✓ In stock ({stk})</span>
-                          : <><span className="text-[9px] font-black uppercase tracking-widest text-amber-500">To order{stk ? ` (only ${stk} in stock)` : ''}</span>
-                              {partsToOrder.some(po => po.name.trim().toLowerCase() === p.name.trim().toLowerCase())
-                                ? <span className="text-[9px] font-black uppercase tracking-widest text-emerald-500 flex items-center gap-0.5"><CheckCircle2 size={11} /> Added to order list</span>
-                                : <button onClick={() => savePartsToOrder([...partsToOrder, { id: Math.random().toString(36).slice(2), name: p.name, qty: needed || 1, forRego: quoteJob?.reg }])} className="text-[9px] font-bold text-torqued-red underline">+ add to order list</button>}</>}
+                    <p className="text-sm text-muted truncate">{[custName, vehicle].filter(Boolean).join(' · ') || quoteJob.model}</p>
+                  </div>
+                  <p className={cn('text-xs hidden sm:block', qDraftState.status === 'error' ? 'text-torqued-red font-semibold' : 'text-muted')} aria-live="polite">{draftText}</p>
+                  <button onClick={closeQuoteEditor} aria-label="Close quote" className="w-10 h-10 rounded-xl hover:bg-card flex items-center justify-center text-muted hover:text-foreground shrink-0"><X size={20} /></button>
+                </div>
+
+                <div className="flex-1 min-h-0 grid grid-cols-1 lg:grid-cols-[minmax(0,1fr)_400px] overflow-y-auto lg:overflow-hidden">
+                  {/* Line items */}
+                  <div className="lg:overflow-y-auto p-4 sm:p-6 space-y-4">
+                    <p className="text-xs text-muted sm:hidden" aria-live="polite">{draftText}</p>
+                    {qDraftState.restored && (
+                      <div className="rounded-xl border border-blue-500/30 bg-blue-500/10 px-4 py-3 text-sm text-foreground">
+                        Restored your unsaved draft from {new Date(qDraftState.restored).toLocaleString('en-NZ', { weekday: 'short', day: 'numeric', month: 'short', hour: 'numeric', minute: '2-digit' })}. Save or email it when it's ready.
                       </div>
                     )}
+                    {row?.description && (
+                      <div className={UI_CARD}>
+                        <p className={UI_LABEL}>Work requested</p>
+                        <p className="text-sm text-foreground">{String(row.description).replace(/^\[EV Quote Request\]\s*/, '')}</p>
+                      </div>
+                    )}
+
+                    <section className={UI_CARD} aria-label="Parts">
+                      <div className="flex items-center justify-between gap-3 flex-wrap">
+                        <h4 className={UI_HEAD}>Parts</h4>
+                        <div className="flex items-center gap-2 flex-wrap">
+                          {parts.length > 0 && (
+                            <select aria-label="Add a part from inventory" onChange={e => {
+                              const inv = parts.find(p => p.id === e.target.value);
+                              if (inv) setQParts([...qParts.filter(p => p.name), { name: inv.name, qty: 1, unitPrice: inv.unitPrice }]);
+                              e.target.value = '';
+                            }} className="bg-background border border-border rounded-xl px-3 h-10 text-sm text-foreground max-w-[280px]">
+                              <option value="">+ From inventory…</option>
+                              {parts.map(p => <option key={p.id} value={p.id}>{p.name} — ${p.unitPrice} ({p.quantity} in stock)</option>)}
+                            </select>
+                          )}
+                          <button onClick={() => setQParts([...qParts, { name: '', qty: 1, unitPrice: 0 }])} className="h-10 px-3 rounded-xl border border-border text-sm font-semibold text-torqued-red hover:bg-torqued-red/5 inline-flex items-center gap-1"><Plus size={15} /> Add part</button>
+                        </div>
+                      </div>
+                      <div className="hidden sm:grid grid-cols-[minmax(0,1fr)_76px_120px_110px_84px] gap-2 px-1 text-xs font-semibold uppercase tracking-wide text-muted">
+                        <span>Part</span><span>Qty</span><span>Unit price</span><span className="text-right">Line total</span><span />
+                      </div>
+                      {qParts.length === 0 && <p className="text-sm text-muted">No parts yet.</p>}
+                      {qParts.map((p, i) => {
+                        const stk = stockFor(p.name);
+                        const needed = p.qty || 0;
+                        const inStock = stk != null && stk >= needed && needed > 0;
+                        return (
+                          <div key={i} className="space-y-1">
+                            <div className="grid grid-cols-[minmax(0,1fr)_64px_96px_auto] sm:grid-cols-[minmax(0,1fr)_76px_120px_110px_84px] gap-2 items-center">
+                              <input aria-label={`Part ${i + 1} name`} value={p.name} onChange={e => { const n=[...qParts]; n[i]={...p,name:e.target.value}; setQParts(n); }} placeholder="Part name" className={UI_INPUT} />
+                              <input aria-label={`Part ${i + 1} quantity`} type="number" min={0} value={p.qty||''} onChange={e => { const n=[...qParts]; n[i]={...p,qty:parseInt(e.target.value)||0}; setQParts(n); }} placeholder="Qty" className={UI_INPUT} />
+                              <input aria-label={`Part ${i + 1} unit price`} type="number" min={0} step="0.01" value={p.unitPrice||''} onChange={e => { const n=[...qParts]; n[i]={...p,unitPrice:parseFloat(e.target.value)||0}; setQParts(n); }} placeholder="$ each" className={UI_INPUT} />
+                              <span className="hidden sm:block text-right text-sm font-semibold tabular-nums">{formatCurrency((p.qty || 0) * (p.unitPrice || 0))}</span>
+                              <div className="flex items-center justify-end gap-1">
+                                <button onClick={() => aiLookupPart(i)} disabled={partLookupBusy===i} title="Look up price (NZ suppliers)" aria-label="Look up price with AI" className="h-10 px-2.5 rounded-lg text-xs font-bold text-torqued-red hover:bg-torqued-red/5">{partLookupBusy===i?'…':'AI'}</button>
+                                <button onClick={() => setQParts(qParts.filter((_,j)=>j!==i))} aria-label="Remove part" className="h-10 w-10 rounded-lg flex items-center justify-center text-muted hover:text-torqued-red hover:bg-torqued-red/5"><Trash2 size={16} /></button>
+                              </div>
+                            </div>
+                            {p.name.trim() && (
+                              <div className="flex items-center gap-2 pl-1 text-xs">
+                                {inStock
+                                  ? <span className="font-semibold text-emerald-600">✓ In stock ({stk})</span>
+                                  : <><span className="font-semibold text-amber-600">To order{stk ? ` (only ${stk} in stock)` : ''}</span>
+                                      {partsToOrder.some(po => po.name.trim().toLowerCase() === p.name.trim().toLowerCase())
+                                        ? <span className="font-semibold text-emerald-600 inline-flex items-center gap-1"><CheckCircle2 size={12} /> On the order list</span>
+                                        : <button onClick={() => savePartsToOrder([...partsToOrder, { id: Math.random().toString(36).slice(2), name: p.name, qty: needed || 1, forRego: quoteJob?.reg }])} className="font-semibold text-torqued-red underline underline-offset-2">+ add to order list</button>}</>}
+                              </div>
+                            )}
+                          </div>
+                        );
+                      })}
+                    </section>
+
+                    <section className={UI_CARD} aria-label="Labour">
+                      <h4 className={UI_HEAD}>Labour</h4>
+                      <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
+                        <div><label htmlFor="q-hours" className={UI_LABEL}>Hours</label><input id="q-hours" type="number" min={0} step="0.25" value={qLabourHours||''} onChange={e=>setQLabourHours(parseFloat(e.target.value)||0)} className={UI_INPUT} /></div>
+                        <div><label htmlFor="q-rate" className={UI_LABEL}>Rate ($/hr)</label><input id="q-rate" type="number" min={0} value={qLabourRate||''} onChange={e=>setQLabourRate(parseFloat(e.target.value)||0)} className={UI_INPUT} /></div>
+                        <div className="col-span-2 sm:col-span-1"><p className={UI_LABEL}>Labour total</p><p className="h-11 flex items-center text-base font-bold tabular-nums">{formatCurrency(qLabourTotal)}</p></div>
+                      </div>
+                    </section>
+
+                    <section className={UI_CARD} aria-label="Other costs">
+                      <div className="flex items-center justify-between gap-3">
+                        <h4 className={UI_HEAD}>Other costs</h4>
+                        <button onClick={() => setQOther([...qOther, { name: '', amount: 0 }])} className="h-10 px-3 rounded-xl border border-border text-sm font-semibold text-torqued-red hover:bg-torqued-red/5 inline-flex items-center gap-1"><Plus size={15} /> Add cost</button>
+                      </div>
+                      {qOther.length === 0 && <p className="text-sm text-muted">Disposal fees, sublet work, freight — anything else.</p>}
+                      {qOther.map((o, i) => (
+                        <div key={i} className="grid grid-cols-[minmax(0,1fr)_120px_40px] gap-2 items-center">
+                          <input aria-label={`Cost ${i + 1} description`} value={o.name} onChange={e => { const n=[...qOther]; n[i]={...o,name:e.target.value}; setQOther(n); }} placeholder="e.g. Disposal fee" className={UI_INPUT} />
+                          <input aria-label={`Cost ${i + 1} amount`} type="number" min={0} step="0.01" value={o.amount||''} onChange={e => { const n=[...qOther]; n[i]={...o,amount:parseFloat(e.target.value)||0}; setQOther(n); }} placeholder="$" className={UI_INPUT} />
+                          <button onClick={() => setQOther(qOther.filter((_,j)=>j!==i))} aria-label="Remove cost" className="h-10 w-10 rounded-lg flex items-center justify-center text-muted hover:text-torqued-red hover:bg-torqued-red/5"><Trash2 size={16} /></button>
+                        </div>
+                      ))}
+                    </section>
+
+                    <section className={UI_CARD} aria-label="Fees, discount and timing">
+                      <h4 className={UI_HEAD}>Fees, discount & timing</h4>
+                      <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                        <div><label htmlFor="q-fee" className={UI_LABEL}>Workshop fee ($)</label><input id="q-fee" type="number" min={0} step="0.01" value={qShopFee||''} onChange={e=>setQShopFee(parseFloat(e.target.value)||0)} className={UI_INPUT} /><p className="text-xs text-muted mt-1">Freight, sundries & consumables</p></div>
+                        <div><label htmlFor="q-discount" className={UI_LABEL}>Discount ($)</label><input id="q-discount" type="number" min={0} step="0.01" value={qDiscount||''} onChange={e=>setQDiscount(parseFloat(e.target.value)||0)} className={UI_INPUT} /></div>
+                        <div><label htmlFor="q-lead" className={UI_LABEL}>Parts lead time (business days)</label><input id="q-lead" type="number" min={0} max={30} value={qLeadTimeDays||''} onChange={e=>setQLeadTimeDays(Math.max(0,parseInt(e.target.value)||0))} placeholder="0" className={UI_INPUT} />
+                          {qLeadTimeDays > 0 && <p className="text-xs text-amber-600 mt-1">Earliest drop-off: {qLeadTimeDays} business day{qLeadTimeDays!==1?'s':''} from now</p>}</div>
+                      </div>
+                    </section>
+
+                    <section className={UI_CARD} aria-label="Notes for the customer">
+                      <label htmlFor="q-notes" className={UI_HEAD}>Notes for the customer</label>
+                      <textarea id="q-notes" value={qNotes} onChange={e=>setQNotes(e.target.value)} rows={5} placeholder="E.g. Found worn front pads; recommend replacing rear discs within 6 months." className="w-full bg-background border border-border rounded-xl px-3 py-2.5 text-sm text-foreground resize-y focus:outline-none focus:border-torqued-red" />
+                    </section>
                   </div>
-                  );
-                })}
-              </div>
 
-              {/* Labour */}
-              <div className="grid grid-cols-2 gap-3">
-                <div className="space-y-1">
-                  <label className="text-[10px] font-black uppercase tracking-widest text-muted">Labour hours</label>
-                  <input type="number" step="0.25" value={qLabourHours||''} onChange={e=>setQLabourHours(parseFloat(e.target.value)||0)} className="w-full bg-background border border-border rounded-lg px-3 h-10 text-sm text-foreground" />
-                </div>
-                <div className="space-y-1">
-                  <label className="text-[10px] font-black uppercase tracking-widest text-muted">Rate ($/hr)</label>
-                  <input type="number" value={qLabourRate||''} onChange={e=>setQLabourRate(parseFloat(e.target.value)||0)} className="w-full bg-background border border-border rounded-lg px-3 h-10 text-sm text-foreground" />
-                </div>
-              </div>
+                  {/* Summary, actions, booking, payment, customer */}
+                  <aside className="lg:overflow-y-auto border-t lg:border-t-0 lg:border-l border-border bg-card/40 p-4 sm:p-6 space-y-4">
+                    <section className={UI_CARD} aria-label="Summary">
+                      <h4 className={UI_HEAD}>Summary</h4>
+                      {sumRow('Parts', formatCurrency(qPartsTotal))}
+                      {sumRow(`Labour (${qLabourHours}h × ${formatCurrency(qLabourRate)})`, formatCurrency(qLabourTotal))}
+                      {qOtherTotal > 0 && sumRow('Other costs', formatCurrency(qOtherTotal))}
+                      {qShopFee > 0 && sumRow('Workshop fee', formatCurrency(qShopFee))}
+                      {qDiscount > 0 && sumRow('Discount', `−${formatCurrency(qDiscount)}`, 'text-emerald-600')}
+                      <div className="flex justify-between items-baseline gap-3 pt-3 border-t border-border">
+                        <span className="text-base font-bold">Total <span className="text-xs font-semibold text-muted">GST incl.</span></span>
+                        <span className="text-2xl font-bold text-torqued-red tabular-nums">{formatCurrency(qTotal)}</span>
+                      </div>
+                      {pay && !pay.online && pay.paid > 0 && (<>
+                        {sumRow('Paid to date', formatCurrency(pay.paid), 'text-emerald-600')}
+                        {sumRow('Balance', formatCurrency(pay.balance), pay.balance > 0 ? 'text-foreground font-semibold' : 'text-emerald-600')}
+                      </>)}
+                    </section>
 
-              {/* Other costs */}
-              <div className="space-y-2">
-                <div className="flex justify-between items-center">
-                  <label className="text-[10px] font-black uppercase tracking-widest text-muted">Other costs</label>
-                  <button onClick={() => setQOther([...qOther, { name: '', amount: 0 }])} className="text-[10px] font-bold text-torqued-red flex items-center gap-1"><Plus size={12}/> Add cost</button>
-                </div>
-                {qOther.map((o, i) => (
-                  <div key={i} className="flex gap-2 items-center">
-                    <input value={o.name} onChange={e => { const n=[...qOther]; n[i]={...o,name:e.target.value}; setQOther(n); }} placeholder="e.g. Disposal fee, freight" className="flex-1 bg-background border border-border rounded-lg px-3 h-9 text-xs text-foreground" />
-                    <input type="number" value={o.amount||''} onChange={e => { const n=[...qOther]; n[i]={...o,amount:parseFloat(e.target.value)||0}; setQOther(n); }} placeholder="$" className="w-20 bg-background border border-border rounded-lg px-2 h-9 text-xs text-foreground" />
-                    <button onClick={() => setQOther(qOther.filter((_,j)=>j!==i))} className="text-muted hover:text-torqued-red"><Trash2 size={14} /></button>
-                  </div>
-                ))}
-              </div>
-
-              {/* Shop Fee */}
-              <div className="space-y-1">
-                <label className="text-[10px] font-black uppercase tracking-widest text-muted">Workshop Fee ($) <span className="font-normal normal-case tracking-normal text-muted/60">— freight, sundries &amp; consumables</span></label>
-                <input type="number" value={qShopFee||''} onChange={e=>setQShopFee(parseFloat(e.target.value)||0)} className="w-full bg-background border border-border rounded-lg px-3 h-10 text-sm text-foreground" />
-              </div>
-
-              {/* Parts Lead Time */}
-              <div className="space-y-1">
-                <label className="text-[10px] font-black uppercase tracking-widest text-muted">Parts Lead Time <span className="font-normal normal-case tracking-normal text-muted/60">— business days until parts arrive (0 = no wait)</span></label>
-                <div className="flex items-center gap-3">
-                  <input type="number" min={0} max={30} value={qLeadTimeDays||''} onChange={e=>setQLeadTimeDays(Math.max(0,parseInt(e.target.value)||0))} placeholder="0" className="w-24 bg-background border border-border rounded-lg px-3 h-10 text-sm text-foreground" />
-                  {qLeadTimeDays > 0 && (
-                    <p className="text-xs text-amber-400">Customer's earliest drop-off will be {qLeadTimeDays} business day{qLeadTimeDays!==1?'s':''} from now</p>
-                  )}
-                </div>
-              </div>
-
-              {/* Discount */}
-              <div className="space-y-1">
-                <label className="text-[10px] font-black uppercase tracking-widest text-muted">Discount ($)</label>
-                <input type="number" value={qDiscount||''} onChange={e=>setQDiscount(parseFloat(e.target.value)||0)} className="w-full bg-background border border-border rounded-lg px-3 h-10 text-sm text-foreground" />
-              </div>
-
-              {/* Notes (free text for the customer) */}
-              <div className="space-y-1">
-                <label className="text-[10px] font-black uppercase tracking-widest text-muted">Notes for the customer</label>
-                <textarea value={qNotes} onChange={e=>setQNotes(e.target.value)} rows={3} placeholder="E.g. Found worn front pads; recommend replacing rear discs within 6 months." className="w-full bg-background border border-border rounded-lg px-3 py-2 text-sm text-foreground resize-none" />
-              </div>
-
-              {/* Totals */}
-              <div className="bg-background/60 border border-border rounded-2xl p-4 space-y-1.5 text-sm">
-                <div className="flex justify-between text-muted"><span>Parts</span><span>${qPartsTotal.toFixed(2)}</span></div>
-                <div className="flex justify-between text-muted"><span>Labour ({qLabourHours}h × ${qLabourRate})</span><span>${qLabourTotal.toFixed(2)}</span></div>
-                {qOtherTotal>0 && <div className="flex justify-between text-muted"><span>Other</span><span>${qOtherTotal.toFixed(2)}</span></div>}
-                {qShopFee>0 && <div className="flex justify-between text-muted"><span>Workshop fee</span><span>${qShopFee.toFixed(2)}</span></div>}
-                {qDiscount>0 && <div className="flex justify-between text-emerald-500"><span>Discount</span><span>-${qDiscount.toFixed(2)}</span></div>}
-                <div className="flex justify-between font-black text-foreground text-lg pt-1.5 border-t border-border"><span>Total (GST incl.)</span><span className="text-torqued-red">${qTotal.toFixed(2)}</span></div>
-              </div>
-
-              {(() => {
-                const quoteEmail = quoteJob.email || quoteJob.customerEmail || '';
-                const items = { parts: qParts, labourHours: qLabourHours, labourRate: qLabourRate, shopFee: qShopFee, other: qOther, discount: qDiscount, notes: qNotes, leadTimeDays: qLeadTimeDays || 0 };
-                const note = [
-                  ...qParts.filter(p=>p.name).map(p=>`${p.name} x${p.qty} — $${(p.qty*p.unitPrice).toFixed(2)}`),
-                  `Labour: ${qLabourHours}h × $${qLabourRate} = $${qLabourTotal.toFixed(2)}`,
-                  ...qOther.filter(o=>o.name).map(o=>`${o.name} — $${o.amount.toFixed(2)}`),
-                  qShopFee>0?`Workshop fee — $${qShopFee.toFixed(2)}`:'',
-                  qDiscount>0?`Discount: -$${qDiscount.toFixed(2)}`:'',
-                  qNotes.trim()?`\nNotes: ${qNotes.trim()}`:''
-                ].filter(Boolean).join('\n');
-                const goToQuotes = () => { setQuoteJob(null); setActiveTab('jobs'); setJobsSubtab('cold'); };
-                // Save only — no email. Walk-ins without email, or handing over a printed copy.
-                const saveOnly = async (thenDownload: boolean) => {
-                  setQSending(true);
-                  try {
-                    const r = await fetch('/api/mechanic/save-quote', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ bookingId: quoteJob.id, total: qTotal, note, items }) });
-                    const d = await r.json().catch(() => ({}));
-                    if (!r.ok) { alert(d.error || 'Could not save the quote.'); return; }
-                    applyQuoteResult(quoteJob.id, d.quoteItems, qTotal);
-                    if (thenDownload) downloadBase64Pdf(await buildQuotePdf(quoteJob), `Torqued-Quote-${String(quoteJob.id).toUpperCase()}.pdf`);
-                    goToQuotes();
-                  } catch { alert('Could not save the quote. Check your connection and try again.'); }
-                  finally { setQSending(false); }
-                };
-                const emailQuote = async () => {
-                  setQSending(true);
-                  try {
-                    const pdfBase64 = await buildQuotePdf(quoteJob);
-                    const r = await fetch('/api/mechanic/send-quote-pdf', {
-                      method: 'POST', headers: { 'Content-Type': 'application/json' },
-                      body: JSON.stringify({ bookingId: quoteJob.id, total: qTotal, note, customerName: quoteJob.customerName, pdfBase64, items }),
-                    });
-                    const d = await r.json().catch(() => ({}));
-                    if (!r.ok) { alert(d.error || 'Could not save the quote.'); return; }
-                    applyQuoteResult(quoteJob.id, d.quoteItems, qTotal);
-                    if (d.emailed) {
-                      fetch('/api/mechanic/update-job-status', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ bookingId: quoteJob.id, status: 'quoted' }) }).catch(() => {});
-                      setManualQuoteFilter('sent');
-                      setActiveTab('manual-quotes');
-                      setQuoteJob(null);
-                    } else {
-                      alert(`Quote saved, but it was NOT emailed.\n\n${d.reason || ''}\n\nIt's under Jobs → Quotes, where you can download the PDF or try emailing again.`);
-                      goToQuotes();
-                    }
-                  } catch { alert('Could not generate the quote. Check your connection and try again.'); }
-                  finally { setQSending(false); }
-                };
-                return (
-                  <div className="space-y-2">
-                    <Button fullWidth disabled={qSending || !quoteEmail} className="bg-torqued-red text-white" onClick={emailQuote}>
-                      {qSending ? 'Working…' : quoteEmail ? `Email Quote PDF — $${qTotal.toFixed(2)}` : 'No email on file — save or download instead'}
-                    </Button>
-                    <div className="grid grid-cols-2 gap-2">
-                      <Button variant="outline" disabled={qSending} className="border-border text-foreground" onClick={() => saveOnly(false)}>Save quote</Button>
-                      <Button variant="outline" disabled={qSending} className="border-border text-foreground" onClick={() => saveOnly(true)}>Save & download PDF</Button>
+                    <div className="space-y-2">
+                      <Button fullWidth disabled={qSending || !quoteEmail} className="bg-torqued-red text-white" onClick={emailQuote}>
+                        {qSending ? 'Working…' : quoteEmail ? `Email quote PDF — ${formatCurrency(qTotal)}` : 'No email on file — save or download'}
+                      </Button>
+                      <div className="grid grid-cols-2 gap-2">
+                        <Button variant="outline" disabled={qSending} className="border-border text-foreground px-3" onClick={() => saveOnly(false)}>Save quote</Button>
+                        <Button variant="outline" disabled={qSending} className="border-border text-foreground px-3" onClick={() => saveOnly(true)}>Save & PDF</Button>
+                      </div>
+                      <p className="text-xs text-muted text-center">Drafts autosave. Every quote is kept under Quotes, even if the email fails.</p>
                     </div>
-                    <p className="text-[10px] text-muted text-center">Every quote is saved under Jobs → Quotes, even if the email fails.</p>
-                  </div>
-                );
-              })()}
+
+                    {isManual && row && (
+                      <section className={UI_CARD} aria-label="Book it in">
+                        <h4 className={UI_HEAD}>Book it in</h4>
+                        <p className="text-sm text-muted">{isJob
+                          ? <>Booked for <strong className="text-foreground">{fmtWhen(row.date)}</strong>{row.quote_items?.meta?.bookedBy === 'customer' ? ' by the customer' : ''} — it's in My Jobs and the diary.</>
+                          : "When the customer says yes, add it to the calendar — it moves to My Jobs and the diary."}</p>
+                        <div><label htmlFor="q-when" className={UI_LABEL}>Drop-off date & time</label><input id="q-when" type="datetime-local" value={qSchedule} onChange={e => setQSchedule(e.target.value)} className={UI_INPUT} /></div>
+                        <Button fullWidth variant="outline" disabled={qSending || !qSchedule} className="border-border text-foreground" onClick={addToCalendar}>{isJob ? 'Update booking time' : 'Add to calendar'}</Button>
+                        {!isJob && pay && pay.depositOutstanding > 0 && <p className="text-xs font-semibold text-amber-600">No deposit yet — it'll be flagged in My Jobs until it's paid.</p>}
+                      </section>
+                    )}
+
+                    {isManual && row && pay && (
+                      <section className={UI_CARD} aria-label="Payment">
+                        <h4 className={UI_HEAD}>Payment</h4>
+                        <div>
+                          <label htmlFor="q-terms" className={UI_LABEL}>Before work starts</label>
+                          <select id="q-terms" value={qTerms.require} onChange={e => { const t = { ...qTerms, require: e.target.value }; setQTerms(t); saveSettings({ paymentTerms: t }); }} className={UI_INPUT}>
+                            {Object.entries(PAY_REQ_LABEL).map(([v, l]) => <option key={v} value={v}>{l}</option>)}
+                          </select>
+                        </div>
+                        {qTerms.require === 'deposit' && (
+                          <div>
+                            <label htmlFor="q-deposit" className={UI_LABEL}>Minimum deposit ($)</label>
+                            <div className="flex gap-2">
+                              <input id="q-deposit" type="number" min={0} step="0.01" value={qTerms.depositAmount || ''} onChange={e => setQTerms(t => ({ ...t, depositAmount: parseFloat(e.target.value) || 0 }))} onBlur={() => saveSettings({ paymentTerms: qTerms })} className={UI_INPUT} />
+                              {[25, 50].map(pct => (
+                                <button key={pct} type="button" disabled={!(qTotal > 0)} onClick={() => { const t = { ...qTerms, depositAmount: r2(qTotal * pct / 100) }; setQTerms(t); saveSettings({ paymentTerms: t }); }}
+                                  className="h-11 px-3 rounded-xl border border-border text-sm font-semibold hover:bg-background shrink-0 disabled:opacity-40">{pct}%</button>
+                              ))}
+                            </div>
+                          </div>
+                        )}
+                        <div>
+                          <p className={UI_LABEL}>How they'll pay</p>
+                          <div className="grid grid-cols-2 gap-2" role="radiogroup" aria-label="How the customer will pay">
+                            {([['torqued', 'Invoice with Torqued', 'Pay link · card, Afterpay, Klarna'], ['manual', 'Manual payment', 'Cash, EFTPOS or internal']] as const).map(([v, l, sub]) => (
+                              <button key={v} type="button" role="radio" aria-checked={qBilling === v} onClick={() => { setQBilling(v); saveSettings({ billing: v }); }}
+                                className={cn('text-left rounded-xl border p-3 transition-colors', qBilling === v ? 'border-torqued-red bg-torqued-red/5' : 'border-border hover:bg-background')}>
+                                <span className="block text-sm font-bold">{l}</span><span className="block text-xs text-muted mt-0.5">{sub}</span>
+                              </button>
+                            ))}
+                          </div>
+                        </div>
+                        <label className="flex items-start gap-3 text-sm cursor-pointer">
+                          <input type="checkbox" checked={qAllowOnline} onChange={e => { setQAllowOnline(e.target.checked); saveSettings({ allowOnlineBooking: e.target.checked }); }} className="mt-0.5 w-4 h-4 accent-[#FF1800] shrink-0" />
+                          <span>Let the customer pick a date and book from their quote link
+                            <span className="block text-xs text-muted">Their chosen time goes straight into your diary and My Jobs.{qTerms.require === 'deposit' ? ' They pay the deposit to confirm.' : qTerms.require === 'full_before' ? ' They pay in full to confirm.' : ''}</span></span>
+                        </label>
+                        <div className="rounded-xl bg-background border border-border p-3 space-y-1.5">
+                          {sumRow('Paid to date', formatCurrency(pay.paid))}
+                          {sumRow('Balance', formatCurrency(pay.balance), pay.balance > 0 ? 'text-foreground font-semibold' : 'text-emerald-600')}
+                          {pay.depositOutstanding > 0 && <p className="text-xs font-semibold text-amber-600">Deposit of {formatCurrency(pay.depositOutstanding)} still to collect before work starts.</p>}
+                          {pay.ledger.length > 0 && <ul className="divide-y divide-border border-t border-border mt-2">{pay.ledger.map((x: any) => renderLedgerItem(row, x))}</ul>}
+                        </div>
+                        <div className="grid grid-cols-2 gap-2">
+                          <Button size="sm" variant="outline" className="border-border text-foreground px-2" onClick={() => openPayModal({ ...row, quoted_price: qTotal > 0 ? qTotal : row.quoted_price }, pay.depositOutstanding > 0 ? 'deposit' : 'credit')}>+ Deposit / credit</Button>
+                          <Button size="sm" variant="outline" className="border-border text-foreground px-2" disabled={qSending || !(qTotal > 0) || !(pay.balance > 0)} onClick={invoiceNow}>Invoice via Torqued</Button>
+                        </div>
+                      </section>
+                    )}
+
+                    {!isManual && row && (
+                      <section className={UI_CARD} aria-label="Payment">
+                        <h4 className={UI_HEAD}>Payment</h4>
+                        <p className="text-sm text-muted">{row.payment_status === 'confirmed' ? `Paid online via Torqued — ${formatCurrency(parseFloat(row.total_price) || 0)}.` : 'The customer pays online through Torqued when they accept the quote.'}</p>
+                      </section>
+                    )}
+
+                    {cust && (
+                      <section className={UI_CARD} aria-label="Customer">
+                        <h4 className={UI_HEAD}>Customer</h4>
+                        <div className="text-sm space-y-0.5">
+                          <p className="font-bold text-foreground">{cust.name || '—'}</p>
+                          {cust.phone && <p><a href={`tel:${cust.phone}`} className="text-muted hover:text-foreground">{cust.phone}</a></p>}
+                          {cust.email && <p className="text-muted truncate">{cust.email}</p>}
+                        </div>
+                        <p className="text-xs text-muted">{custRows.length} quote{custRows.length === 1 ? '' : 's'} & job{custRows.length === 1 ? '' : 's'} with you · {formatCurrency(custPaid)} paid to date</p>
+                        {custTx.length > 0 && <ul className="divide-y divide-border">{custTx.slice(0, 3).map((x: any) => renderLedgerItem(x.row, x))}</ul>}
+                        <Button size="sm" variant="outline" fullWidth className="border-border text-foreground" onClick={() => setCustPanel(cust)}>Transactions & credit</Button>
+                      </section>
+                    )}
+                  </aside>
+                </div>
+              </motion.div>
             </motion.div>
-          </div>
-        )}
+          );
+        })()}
       </AnimatePresence>
+
+      {/* Customer profile — transaction history, deposits & credit */}
+      {custPanel && (() => {
+        const c = custPanel;
+        const rows = rowsForCustomer(c).sort((x: any, y: any) => new Date(y.created_at || 0).getTime() - new Date(x.created_at || 0).getTime());
+        const tx = transactionsFor(rows);
+        const paidTotal = tx.filter((t: any) => !t.voided).reduce((t2: number, x: any) => t2 + (Number(x.amount) || 0), 0);
+        const owing = rows.filter(isJobRow).reduce((t: number, r: any) => t + paySummary(r).balance, 0);
+        const held = rows.filter((r: any) => r.is_cold_quote && !isJobRow(r)).reduce((t: number, r: any) => t + paySummary(r).paid, 0);
+        // Credit sits against a phone/walk-in quote or job that still has something to pay (or no price yet).
+        const creditable = rows.filter((r: any) => {
+          if (!r.is_cold_quote || ['cancelled', 'declined'].includes(r.status)) return false;
+          const ps = paySummary(r);
+          return ps.balance > 0 || !(ps.total > 0);
+        });
+        const stat = (label: string, val: string, cls = 'text-foreground') => (
+          <div className="rounded-2xl border border-border bg-card p-4"><p className="text-xs font-semibold uppercase tracking-wide text-muted">{label}</p><p className={cn('text-2xl font-bold mt-1 tabular-nums', cls)}>{val}</p></div>
+        );
+        return (
+          <div className="fixed inset-0 z-[150] flex bg-black/70 backdrop-blur-sm p-0 sm:p-4 lg:p-8" onClick={() => setCustPanel(null)}>
+            <div role="dialog" aria-modal="true" aria-label="Customer transactions" onClick={e => e.stopPropagation()}
+              className="font-raleway w-full max-w-5xl mx-auto bg-background border border-border sm:rounded-3xl shadow-2xl flex flex-col overflow-hidden">
+              <div className="flex items-start gap-3 px-4 sm:px-6 py-4 border-b border-border">
+                <div className="min-w-0 flex-1">
+                  <h3 className="text-xl sm:text-2xl tracking-tight">{c.name || c.email || c.phone || 'Customer'}</h3>
+                  <p className="text-sm text-muted truncate">{[c.phone, c.email, ...(c.regos || [])].filter(Boolean).join(' · ')}</p>
+                </div>
+                <div className="flex gap-2 shrink-0 flex-wrap justify-end">
+                  <Button size="sm" variant="outline" className="border-border text-foreground" onClick={() => { setCustPanel(null); setColdForm({ customerName: c.name || '', email: c.email || '', phone: c.phone || '', rego: c.regos?.[0] || '', make: '', model: '', description: '', date: '', channel: 'phone' }); setShowColdQuote(true); }}>New quote</Button>
+                  <Button size="sm" className="bg-torqued-red text-white" disabled={creditable.length === 0} title={creditable.length === 0 ? 'Create a quote first — credit is held against a quote or job' : undefined}
+                    onClick={() => openPayModal(creditable[0], 'credit', creditable.map((r: any) => r.id))}>Add credit / deposit</Button>
+                  <button onClick={() => setCustPanel(null)} aria-label="Close" className="w-9 h-9 rounded-xl hover:bg-card flex items-center justify-center text-muted hover:text-foreground"><X size={20} /></button>
+                </div>
+              </div>
+              <div className="flex-1 min-h-0 overflow-y-auto p-4 sm:p-6 space-y-6">
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                  {stat('Paid to date', formatCurrency(paidTotal), 'text-emerald-600')}
+                  {stat('Owing on jobs', formatCurrency(owing), owing > 0 ? 'text-torqued-red' : 'text-foreground')}
+                  {stat('Deposits held on open quotes', formatCurrency(held))}
+                </div>
+                <section className="space-y-2">
+                  <h4 className={UI_HEAD}>Quotes & jobs</h4>
+                  {rows.length === 0 && <p className="text-sm text-muted">No quotes or jobs yet.</p>}
+                  {rows.map((r: any) => {
+                    const ps = paySummary(r); const job = isJobRow(r); const st = quoteStatusOf(r);
+                    return (
+                      <div key={r.id} className="rounded-2xl border border-border bg-card p-3 sm:p-4 flex flex-wrap items-center gap-x-4 gap-y-2">
+                        <div className="min-w-0 flex-1">
+                          <div className="flex items-center gap-2 flex-wrap text-xs">
+                            {r.vehicle_rego && <span className="torqued-badge text-[10px]">{r.vehicle_rego}</span>}
+                            <span className="inline-flex items-center gap-1 font-semibold text-muted"><span className={cn('w-2 h-2 rounded-full', CHANNEL_META[channelOf(r)].dot)} />{CHANNEL_META[channelOf(r)].label}</span>
+                            <span className={cn('font-semibold px-2 py-0.5 rounded-md border', job ? (r.status === 'completed' ? 'bg-foreground/5 text-muted border-border' : 'bg-violet-500/15 text-violet-600 border-violet-500/30') : QUOTE_STATUS_META[st].cls)}>{job ? (r.status === 'completed' ? 'Job · done' : 'Job') : QUOTE_STATUS_META[st].label}</span>
+                          </div>
+                          <p className="text-sm text-foreground mt-1">{r.vehicle_label || r.vehicle_rego || 'Vehicle'} · Ref {String(r.id).toUpperCase()}{r.date ? ` · ${new Date(r.date).toLocaleDateString('en-NZ', { day: 'numeric', month: 'short', year: 'numeric' })}` : ''}</p>
+                        </div>
+                        <div className="text-sm tabular-nums text-right">
+                          <p className="font-bold">{ps.total > 0 ? formatCurrency(ps.total) : '—'}</p>
+                          <p className="text-xs text-muted">Paid {formatCurrency(ps.paid)}{ps.balance > 0 && ps.total > 0 ? ` · owes ${formatCurrency(ps.balance)}` : ''}</p>
+                        </div>
+                        <div className="flex gap-2">
+                          {r.is_cold_quote && ps.balance > 0 && <Button size="sm" variant="outline" className="border-border text-foreground" onClick={() => openPayModal(r)}>Add payment</Button>}
+                          <Button size="sm" variant="outline" className="border-border text-foreground" onClick={() => { setCustPanel(null); openQuoteEditor(rowToJobShape(r), r); }}>Open</Button>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </section>
+                <section className="space-y-2">
+                  <h4 className={UI_HEAD}>Transaction history</h4>
+                  {tx.length === 0 ? <p className="text-sm text-muted">No payments yet.</p> : (
+                    <ul className="rounded-2xl border border-border bg-card px-4 divide-y divide-border">
+                      {tx.map((x: any) => (
+                        <li key={x.id} className="py-2.5">
+                          <p className="text-[11px] text-muted">{x.row?.vehicle_rego || ''} · Ref {String(x.row?.id || '').toUpperCase()}</p>
+                          <ul>{renderLedgerItem(x.row, x)}</ul>
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                </section>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
+
+      {/* Record a payment / deposit / credit taken outside Torqued */}
+      {payModal && (() => {
+        const row = allJobRows.find((r: any) => r.id === payModal.rowId);
+        if (!row) return null;
+        const ps = paySummary(row);
+        const choices = (payModal.choices || []).map(id => allJobRows.find((r: any) => r.id === id)).filter(Boolean) as any[];
+        const amountNum = parseFloat(payForm.amount) || 0;
+        return (
+          <div className="fixed inset-0 z-[260] flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm" onClick={() => !payBusy && setPayModal(null)}>
+            <div role="dialog" aria-modal="true" aria-label="Record a payment" onClick={e => e.stopPropagation()}
+              className="font-raleway w-full max-w-lg max-h-[92vh] overflow-y-auto bg-background border border-border rounded-3xl p-6 sm:p-7 space-y-5 shadow-2xl">
+              <div className="flex items-start justify-between gap-3">
+                <div>
+                  <h3 className="text-xl tracking-tight">Record payment</h3>
+                  <p className="text-sm text-muted">{row.customer_name || 'Customer'} · {row.vehicle_label || row.vehicle_rego || ''}</p>
+                </div>
+                <button onClick={() => setPayModal(null)} aria-label="Close" className="w-9 h-9 rounded-xl hover:bg-card flex items-center justify-center text-muted hover:text-foreground"><X size={20} /></button>
+              </div>
+              {choices.length > 1 && (
+                <div>
+                  <label htmlFor="pay-target" className={UI_LABEL}>Apply to</label>
+                  <select id="pay-target" value={row.id} onChange={e => setPayModal({ ...payModal, rowId: e.target.value })} className={UI_INPUT}>
+                    {choices.map((r: any) => <option key={r.id} value={r.id}>{(r.vehicle_rego || 'Vehicle')} · Ref {String(r.id).toUpperCase()} · {isJobRow(r) ? 'Job' : 'Quote'}{paySummary(r).total > 0 ? ` · ${formatCurrency(paySummary(r).total)}` : ' · no price yet'}</option>)}
+                  </select>
+                </div>
+              )}
+              <div className="rounded-xl bg-card border border-border p-3 grid grid-cols-3 gap-2 text-center">
+                <div><p className="text-xs text-muted">Total</p><p className="font-bold tabular-nums">{ps.total > 0 ? formatCurrency(ps.total) : '—'}</p></div>
+                <div><p className="text-xs text-muted">Paid</p><p className="font-bold tabular-nums text-emerald-600">{formatCurrency(ps.paid)}</p></div>
+                <div><p className="text-xs text-muted">Balance</p><p className="font-bold tabular-nums">{ps.total > 0 ? formatCurrency(ps.balance) : '—'}</p></div>
+              </div>
+              {ps.depositOutstanding > 0 && <p className="text-sm font-semibold text-amber-600 -mt-2">Deposit of {formatCurrency(ps.depositOutstanding)} required before work starts.</p>}
+              <div>
+                <p className={UI_LABEL}>Type</p>
+                <div className="grid grid-cols-3 gap-2" role="radiogroup" aria-label="Payment type">
+                  {([['deposit', 'Deposit'], ['payment', 'Payment'], ['credit', 'Credit']] as const).map(([v, l]) => (
+                    <button key={v} type="button" role="radio" aria-checked={payForm.kind === v} onClick={() => setPayForm(f => ({ ...f, kind: v, amount: v === 'deposit' && ps.depositOutstanding > 0 ? ps.depositOutstanding.toFixed(2) : v === 'payment' && ps.balance > 0 ? ps.balance.toFixed(2) : f.amount }))}
+                      className={cn('h-11 rounded-xl border text-sm font-semibold transition-colors', payForm.kind === v ? 'border-torqued-red bg-torqued-red/5 text-foreground' : 'border-border text-muted hover:text-foreground')}>{l}</button>
+                  ))}
+                </div>
+              </div>
+              <div>
+                <label htmlFor="pay-amount" className={UI_LABEL}>Amount ($)</label>
+                <div className="flex gap-2">
+                  <input id="pay-amount" type="number" min={0} step="0.01" inputMode="decimal" value={payForm.amount} onChange={e => setPayForm(f => ({ ...f, amount: e.target.value }))} className={UI_INPUT} />
+                  {ps.balance > 0 && <button type="button" onClick={() => setPayForm(f => ({ ...f, amount: ps.balance.toFixed(2) }))} className="h-11 px-3 rounded-xl border border-border text-sm font-semibold hover:bg-card shrink-0">Full balance</button>}
+                </div>
+              </div>
+              <div>
+                <p className={UI_LABEL}>Paid by</p>
+                <div className="grid grid-cols-2 sm:grid-cols-3 gap-2" role="radiogroup" aria-label="Payment method">
+                  {MANUAL_METHODS.map(m => (
+                    <button key={m} type="button" role="radio" aria-checked={payForm.method === m} onClick={() => setPayForm(f => ({ ...f, method: m }))}
+                      className={cn('h-11 rounded-xl border text-sm font-semibold transition-colors', payForm.method === m ? 'border-torqued-red bg-torqued-red/5 text-foreground' : 'border-border text-muted hover:text-foreground')}>{PAY_METHOD_LABEL[m]}</button>
+                  ))}
+                </div>
+              </div>
+              <div>
+                <label htmlFor="pay-note" className={UI_LABEL}>Note (optional)</label>
+                <input id="pay-note" value={payForm.note} onChange={e => setPayForm(f => ({ ...f, note: e.target.value }))} placeholder="e.g. EFTPOS receipt 004512" className={UI_INPUT} />
+              </div>
+              <div className="flex gap-2">
+                <Button variant="outline" className="flex-1 border-border text-foreground" disabled={payBusy} onClick={() => setPayModal(null)}>Cancel</Button>
+                <Button className="flex-1 bg-torqued-red text-white" disabled={payBusy || !(amountNum > 0)} onClick={submitPayment}>{payBusy ? 'Saving…' : `Record ${amountNum > 0 ? formatCurrency(amountNum) : ''}`}</Button>
+              </div>
+              <p className="text-xs text-muted text-center">For payments taken in the shop or outside Torqued. To let the customer pay by card, Afterpay or Klarna, use Invoice with Torqued.</p>
+            </div>
+          </div>
+        );
+      })()}
 
       {/* Refund Modal */}
       {refundModal && (
@@ -5607,6 +6193,16 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                     className="w-full bg-card border border-border rounded-xl px-3 py-2.5 text-sm text-foreground focus:outline-none focus:border-torqued-red resize-none" />
                 </div>
               </div>
+              {(() => {
+                const row = allJobRows.find((r: any) => r.id === checkoutModal.job.id);
+                const ps = row ? paySummary(row) : null;
+                return row && ps && !ps.online && ps.balance > 0 ? (
+                  <div className="rounded-xl border border-torqued-red/40 bg-torqued-red/5 p-3 flex items-center justify-between gap-3">
+                    <p className="text-sm"><span className="font-bold text-foreground">{formatCurrency(ps.balance)} still to pay.</span> <span className="text-muted">Take payment before the car goes.</span></p>
+                    <Button size="sm" className="bg-torqued-red text-white shrink-0" onClick={() => openPayModal(row)}>Record payment</Button>
+                  </div>
+                ) : null;
+              })()}
               <div className="flex gap-3">
                 <Button variant="outline" className="flex-1 border-border text-foreground" disabled={checkoutBusy} onClick={() => setCheckoutModal(null)}>Cancel</Button>
                 <Button disabled={!checkoutKm.trim() || checkoutBusy} className="flex-1 bg-torqued-red text-white" onClick={confirmCheckout}>{checkoutBusy ? 'Saving…' : 'Mark car ready'}</Button>

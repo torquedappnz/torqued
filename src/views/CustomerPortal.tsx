@@ -1387,6 +1387,8 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
   // QR deep-link → review-and-pay with the mechanic's quote pre-loaded
   const [quoteReview, setQuoteReview] = useState<any | null>(null);
   const [quotePaying, setQuotePaying] = useState(false);
+  const [quoteDate, setQuoteDate] = useState('');
+  const [quoteMsg, setQuoteMsg] = useState<string | null>(null);
   const [quoteOnlyMode, setQuoteOnlyMode] = useState(() => !!new URLSearchParams(window.location.search).get('quote'));
 
   // Direct-booking link (?book=<mechanicId>) — a mechanic's own shareable link.
@@ -1422,8 +1424,10 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
     window.history.replaceState({}, document.title, window.location.pathname);
     fetch(`/api/quote/${encodeURIComponent(qid)}`).then(r => r.json()).then(d => { if (d && d.id) setQuoteReview(d); else setQuoteOnlyMode(false); }).catch(() => setQuoteOnlyMode(false));
   }, []);
-  const payQuote = async () => {
+  const payQuote = async (kind: 'deposit' | 'full' = 'full') => {
     if (!quoteReview) return;
+    setQuoteMsg(null);
+    if (quoteReview.allowBooking && !quoteDate) { setQuoteMsg('Choose a drop-off date and time first.'); return; }
     setQuotePaying(true);
     try {
       // Stripe checkout is a full page navigation away and back — all in-memory
@@ -1435,15 +1439,89 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
         mechanicName: quoteReview.mechanicName, serviceIds: quoteReview.serviceIds,
         note: quoteReview.note, total: quoteReview.total,
       }));
-      const res = await fetch('/api/stripe/create-payment', {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ amount: quoteReview.total, bookingId: quoteReview.id, customerEmail: customerEmail || undefined, description: `Torqued quote ${quoteReview.id}` }),
-      });
+      // Phone/walk-in quotes: the server works out the deposit/balance and records the
+      // customer's chosen date. Online quotes keep the original full-payment checkout.
+      const res = quoteReview.isManual
+        ? await fetch(`/api/quote/${encodeURIComponent(quoteReview.id)}/checkout`, {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ payKind: kind, date: quoteDate || undefined, customerEmail: customerEmail || undefined }),
+          })
+        : await fetch('/api/stripe/create-payment', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ amount: quoteReview.total, bookingId: quoteReview.id, customerEmail: customerEmail || undefined, description: `Torqued quote ${quoteReview.id}` }),
+          });
       const session = await res.json();
+      if (!res.ok) { setQuoteMsg(session?.error || 'Could not start checkout.'); localStorage.removeItem('pending_quote_payment'); setQuotePaying(false); return; }
       if (session?.url) { window.location.href = session.url; return; }
       localStorage.removeItem('pending_quote_payment');
       setQuotePaying(false);
     } catch { localStorage.removeItem('pending_quote_payment'); setQuotePaying(false); }
+  };
+
+  const bookQuote = async () => {
+    if (!quoteReview) return;
+    setQuoteMsg(null);
+    if (!quoteDate) { setQuoteMsg('Choose a drop-off date and time first.'); return; }
+    setQuotePaying(true);
+    try {
+      const r = await fetch(`/api/quote/${encodeURIComponent(quoteReview.id)}/book`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ date: quoteDate }) });
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok) { setQuoteMsg(d.error || 'Could not book.'); return; }
+      setQuoteReview((q: any) => ({ ...q, scheduled: true, allowBooking: false, date: d.date, justBooked: true }));
+    } catch { setQuoteMsg('Could not book — check your connection and try again.'); }
+    finally { setQuotePaying(false); }
+  };
+  const fmtQuoteWhen = (d: any) => d ? new Date(d).toLocaleString('en-NZ', { weekday: 'long', day: 'numeric', month: 'long', hour: 'numeric', minute: '2-digit' }) : '';
+  const renderQuoteActions = () => {
+    const q = quoteReview;
+    if (!q) return null;
+    const money = (n: number) => `$${Number(n || 0).toFixed(2)}`;
+    const paidUp = q.paymentStatus === 'confirmed' || (q.isManual && q.total > 0 && !(q.balance > 0));
+    if (!q.isManual) {
+      return q.paymentStatus === 'confirmed'
+        ? <div className="text-center text-emerald-500 font-bold text-sm py-2">✓ This quote has already been paid.</div>
+        : <Button fullWidth size="lg" className="bg-torqued-red text-white" disabled={quotePaying} onClick={() => payQuote('full')}>{quotePaying ? 'Opening secure checkout…' : 'Review & pay securely'}</Button>;
+    }
+    const req = q.paymentRequirement || 'none';
+    const depositDue = Number(q.depositOutstanding) || 0;
+    const canBookFree = q.allowBooking && (req === 'none' || req === 'on_collection');
+    const minDate = (() => { const d = new Date(); d.setDate(d.getDate() + 1 + Math.ceil((Number(q.leadTimeDays) || 0) * 7 / 5)); d.setHours(8, 0, 0, 0); const pad = (n: number) => String(n).padStart(2, '0'); return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T08:00`; })();
+    return (
+      <div className="space-y-3">
+        {(q.justPaid || q.justBooked) && (
+          <div className="rounded-2xl border border-emerald-500/30 bg-emerald-500/10 p-4 text-center space-y-1">
+            <p className="font-bold text-emerald-600">{q.justPaid ? '✓ Payment received — thank you' : '✓ You\'re booked in'}</p>
+            {q.scheduled && q.date && <p className="text-sm text-foreground">Drop-off: <strong>{fmtQuoteWhen(q.date)}</strong></p>}
+          </div>
+        )}
+        {!q.justPaid && !q.justBooked && q.scheduled && q.date && <p className="text-sm text-center">Booked for <strong>{fmtQuoteWhen(q.date)}</strong>.</p>}
+        {q.paid > 0 && (
+          <div className="rounded-xl border border-border bg-background p-3 space-y-1 text-sm">
+            <div className="flex justify-between"><span className="text-muted">Paid so far</span><span className="font-bold">{money(q.paid)}</span></div>
+            <div className="flex justify-between"><span className="text-muted">Balance</span><span className="font-bold">{money(q.balance)}</span></div>
+          </div>
+        )}
+        {paidUp ? <div className="text-center text-emerald-500 font-bold text-sm py-1">✓ Paid in full.</div> : (<>
+          {q.allowBooking && (
+            <div>
+              <label htmlFor="quote-date" className="block text-xs font-bold uppercase tracking-wide text-muted mb-1.5">Choose your drop-off date & time</label>
+              <input id="quote-date" type="datetime-local" min={minDate} value={quoteDate} onChange={e => setQuoteDate(e.target.value)} className="w-full bg-background border border-border rounded-xl px-3 h-12 text-sm text-foreground" />
+            </div>
+          )}
+          {req === 'deposit' && depositDue > 0 && <p className="text-xs text-muted text-center">The workshop asks for a {money(depositDue)} deposit {q.allowBooking ? 'to confirm your booking' : 'before work starts'}.</p>}
+          {req === 'full_before' && <p className="text-xs text-muted text-center">Payment is needed before work starts.</p>}
+          {req === 'on_collection' && <p className="text-xs text-muted text-center">Pay now, or when you collect your car.</p>}
+          {depositDue > 0 ? (<>
+            <Button fullWidth size="lg" className="bg-torqued-red text-white" disabled={quotePaying} onClick={() => payQuote('deposit')}>{quotePaying ? 'Opening secure checkout…' : `Pay ${money(depositDue)} deposit`}</Button>
+            <Button fullWidth variant="outline" className="border-border text-foreground" disabled={quotePaying} onClick={() => payQuote('full')}>Pay in full — {money(q.balance)}</Button>
+          </>) : (
+            <Button fullWidth size="lg" className="bg-torqued-red text-white" disabled={quotePaying || !(q.balance > 0)} onClick={() => payQuote('full')}>{quotePaying ? 'Opening secure checkout…' : `Pay ${money(q.balance)} securely`}</Button>
+          )}
+          {canBookFree && <Button fullWidth variant="outline" className="border-border text-foreground" disabled={quotePaying} onClick={bookQuote}>Book now, pay at collection</Button>}
+        </>)}
+        {quoteMsg && <p className="text-sm text-torqued-red text-center font-semibold" role="alert">{quoteMsg}</p>}
+      </div>
+    );
   };
 
   // Verify a returning customer with a passkey. Magic link remains the fallback.
@@ -1786,7 +1864,9 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
           try { await fetch(`/api/stripe/verify-session?session_id=${sessionId}`); } catch {}
           localStorage.removeItem('pending_quote_payment');
           window.history.replaceState({}, document.title, window.location.pathname);
-          setQuoteReview({ ...quoteDraft, paymentStatus: 'confirmed' });
+          let fresh: any = null;
+          try { fresh = await fetch(`/api/quote/${encodeURIComponent(bookingId)}`).then(r => r.ok ? r.json() : null); } catch {}
+          setQuoteReview(fresh?.id ? { ...fresh, justPaid: true } : { ...quoteDraft, paymentStatus: 'confirmed' });
           setQuoteOnlyMode(true);
           await loadCustomerBookings();
           return;
@@ -6792,13 +6872,7 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                 </div>
               </div>
 
-              {quoteReview.paymentStatus === 'confirmed' ? (
-                <div className="text-center text-emerald-500 font-bold text-sm py-2">✓ This quote has already been paid.</div>
-              ) : (
-                <Button fullWidth size="lg" className="bg-torqued-red text-white" disabled={quotePaying} onClick={payQuote}>
-                  {quotePaying ? 'Opening secure checkout…' : 'Review & pay securely'}
-                </Button>
-              )}
+              {renderQuoteActions()}
               <p className="text-[11px] text-muted text-center">Flexible payment options (incl. Afterpay, Klarna) at checkout.</p>
             </div>
           )}
@@ -7588,13 +7662,7 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                 </div>
               </div>
 
-              {quoteReview.paymentStatus === 'confirmed' ? (
-                <div className="text-center text-emerald-500 font-bold text-sm">✓ This quote has already been paid.</div>
-              ) : (
-                <Button fullWidth size="lg" className="bg-torqued-red text-white" disabled={quotePaying} onClick={payQuote}>
-                  {quotePaying ? 'Opening secure checkout…' : 'Review & pay securely'}
-                </Button>
-              )}
+              {renderQuoteActions()}
               <p className="text-[11px] text-muted text-center">Flexible payment options (incl. Afterpay, Klarna) at checkout.</p>
               <button onClick={() => setQuoteReview(null)} className="w-full text-xs text-muted hover:text-foreground">Close</button>
             </motion.div>
