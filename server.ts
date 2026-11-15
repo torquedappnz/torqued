@@ -386,7 +386,16 @@ app.get('/api/mechanics', async (_req, res) => {
         .eq('subscription_active', true);
       data = second.data;
     }
-    res.json({ mechanics: data ?? [] });
+    // Promoted placement is a Pro/Max feature. Starter workshops stay listed (a
+    // thin marketplace hurts everyone) but sort after promoted ones. Workshops
+    // with no tier yet (pre-tier accounts) keep promoted placement. Separate
+    // query so a missing subscription_tier column (pre-migration 071) is harmless.
+    const tiers: Record<string, string | null> = {};
+    const tq = await supabase.from('profiles').select('id, subscription_tier').eq('role', 'mechanic').eq('subscription_active', true);
+    if (!tq.error) (tq.data ?? []).forEach((r: any) => { tiers[r.id] = r.subscription_tier ?? null; });
+    const mechanics = (data ?? []).map((m: any) => ({ ...m, promoted: tiers[m.id] !== 'starter' }))
+      .sort((a: any, b: any) => Number(b.promoted) - Number(a.promoted));
+    res.json({ mechanics });
   } catch (err) {
     console.error('[mechanics]', err);
     res.json({ mechanics: [] });
@@ -2448,7 +2457,7 @@ app.post('/api/mechanic/email-trial', async (req, res) => {
 <div style="background:#050100;padding:24px;text-align:center;border-bottom:3px solid #FF1800"><img src="${LOGO_URL}" width="180" style="height:auto"/></div>
 <div style="padding:32px;color:#fff">
 <h2 style="margin:0 0 4px;text-transform:uppercase">Your 30-Day Free Trial</h2>
-<p style="color:rgba(255,255,255,.6);font-size:14px">Skip the $99/month subscription — no credit card required.</p>
+<p style="color:rgba(255,255,255,.6);font-size:14px">Skip the monthly plan fee — no credit card required. Torqued never charges commission.</p>
 <div style="background:rgba(255,24,0,.08);border:1px solid rgba(255,24,0,.3);border-radius:12px;padding:18px;margin:20px 0;text-align:center">
 <p style="margin:0 0 6px;font-size:11px;text-transform:uppercase;letter-spacing:2px;color:rgba(255,255,255,.5)">Trial Code</p>
 <p style="margin:0;font-family:monospace;font-size:28px;font-weight:900;letter-spacing:4px;color:#FF1800">sritorqued</p>
@@ -3190,7 +3199,8 @@ app.get('/api/admin/overview', async (req, res) => {
     const supabase = getSupabaseAdmin();
     if (!supabase) return res.status(500).json({ error: 'Database not configured' });
 
-    const { data: mechs } = await supabase.from('profiles').select('id, subscription_active').eq('role', 'mechanic');
+    // select('*') so this works before and after migration 071 adds subscription_tier
+    const { data: mechs } = await supabase.from('profiles').select('*').eq('role', 'mechanic');
     const { data: bookings } = await supabase.from('bookings').select('total_price, status, payment_status, refunded_amount, created_at');
     const { data: customers } = await supabase.from('profiles').select('id').eq('role', 'customer');
 
@@ -3198,10 +3208,16 @@ app.get('/api/admin/overview', async (req, res) => {
     const all = bookings ?? [];
     const completed = all.filter((b: any) => b.status === 'completed' || b.payment_status === 'confirmed');
     const grossBookingValue = completed.reduce((s: number, b: any) => s + (Number(b.total_price) || 0), 0);
-    const commission = grossBookingValue * 0.04;
-    const subscriptionRevenue = activeSubs * 99;
+    // Subscription-only model: no per-job commission. Revenue = monthly tier fees
+    // (ex GST, list price — launch-offer discounts are not netted off here).
+    // Workshops without a tier yet (pre-tier accounts) are counted at Pro.
+    const tierCounts: Record<PlanTier, number> = { starter: 0, pro: 0, max: 0 };
+    (mechs ?? []).filter((m: any) => m.subscription_active).forEach((m: any) => { tierCounts[normaliseTier(m.subscription_tier)]++; });
+    const subscriptionRevenue = (Object.keys(tierCounts) as PlanTier[]).reduce((sum, t) => sum + tierCounts[t] * PLAN_TIERS[t].exGst, 0);
+    // Customer refunds are paid out of job money passed to the workshop, not
+    // Torqued revenue, so they are reported but no longer netted off.
     const refunds = all.reduce((s: number, b: any) => s + (Number(b.refunded_amount) || 0), 0);
-    const net = commission + subscriptionRevenue - refunds;
+    const net = subscriptionRevenue;
 
     // last 7 days booking trend
     const now = Date.now();
@@ -3215,8 +3231,8 @@ app.get('/api/admin/overview', async (req, res) => {
       completedBookings: completed.length,
       bookingsLast7Days: week,
       grossBookingValue: round2(grossBookingValue),
-      commission: round2(commission),
       subscriptionRevenue: round2(subscriptionRevenue),
+      subscriptionsByTier: tierCounts,
       refunds: round2(refunds),
       netRevenue: round2(net),
     });
@@ -3426,7 +3442,8 @@ app.get('/api/admin/mechanic/:id', async (req, res) => {
     const paid = all.filter((j: any) => j.payment_status === 'confirmed');
     const gross = paid.reduce((s: number, j: any) => s + (parseFloat(j.total_price) || 0), 0);
     const refunded = all.reduce((s: number, j: any) => s + (parseFloat(j.refunded_amount) || 0), 0);
-    const revenue = { jobs: all.length, paid: paid.length, gross: Math.round(gross * 100) / 100, commission: Math.round(gross * 4) / 100, payout: Math.round(gross * 96) / 100, refunded: Math.round(refunded * 100) / 100 };
+    // No commission: the workshop's payout is the full job value.
+    const revenue = { jobs: all.length, paid: paid.length, gross: Math.round(gross * 100) / 100, payout: Math.round(gross * 100) / 100, refunded: Math.round(refunded * 100) / 100 };
 
     // Subscription + Stripe invoices
     let billing: any = { active: !!profile.subscription_active, status: profile.subscription_active ? 'active' : 'inactive', invoices: [] };
@@ -3554,7 +3571,7 @@ app.post('/api/auth/set-password', async (req, res) => {
   }
 });
 
-// GET /api/admin/weekly-report — prior Mon–Sun revenue per mechanic (jobs − 4%)
+// GET /api/admin/weekly-report — prior Mon–Sun job revenue per mechanic (paid out in full, no commission)
 app.get('/api/admin/weekly-report', async (req, res) => {
   if (!adminOk(req)) return res.status(401).json({ error: 'Unauthorized' });
   try {
@@ -3585,7 +3602,7 @@ app.get('/api/admin/weekly-report', async (req, res) => {
     });
     const rows = Object.entries(byMech).map(([id, v]) => ({
       mechanicId: id, name: nameOf(id), jobs: v.jobs,
-      gross: Math.round(v.gross * 100) / 100, commission: Math.round(v.gross * 4) / 100, payout: Math.round(v.gross * 96) / 100,
+      gross: Math.round(v.gross * 100) / 100, payout: Math.round(v.gross * 100) / 100,
     }));
     res.json({ periodStart: start.toISOString(), periodEnd: end.toISOString(), rows });
   } catch (err) {
@@ -3644,7 +3661,7 @@ app.post('/api/admin/approve-mechanic', async (req, res) => {
         </td></tr>`;
       const steps = [
         step(1, 'Activate your subscription',
-          `<p style="margin:0 0 9px;font-family:${EMAIL_BODY_FONT};font-size:13px;color:#555;">$99/mo. This puts your workshop live to receive leads.</p>${stepBtn(billingLink || `${origin}/mechanic`, 'Set up Stripe billing')}`),
+          `<p style="margin:0 0 9px;font-family:${EMAIL_BODY_FONT};font-size:13px;color:#555;">Starter $89, Pro $149 or Max $249 per month + GST — launch offer 50% off months 1-3, 25% off months 4-6. No commission on any job. This puts your workshop live to receive bookings.</p>${stepBtn(billingLink || `${origin}/mechanic`, 'Set up Stripe billing')}`),
         step(2, 'Set your password & log in',
           `<p style="margin:0 0 9px;font-family:${EMAIL_BODY_FONT};font-size:13px;color:#555;">Then start accepting jobs and writing quotes in record time.</p>${stepBtn(setPasswordLink, 'Set my password')}`),
       ];
@@ -3883,8 +3900,9 @@ app.post('/api/admin/onboard-mechanic', async (req, res) => {
   if (!adminOk(req)) return res.status(401).json({ error: 'Unauthorized' });
   try {
     const { email, name, legal_name, address, phone, labour_rate, technicians, parts_lead_days, owner_name, owner_phone, nzbn, years_in_trade, billing_start_date } = req.body;
-    // billing: 'stripe' | 'half3months' (50% off 3 months) | 'trial' | 'comp'
+    // billing: 'stripe' | 'half3months' (launch offer: 50% m1-3, 25% m4-6) | 'trial' | 'comp'
     const billing: string = req.body.billing || 'stripe';
+    const tier = normaliseTier(req.body.tier);
     const trialDays: number = Number(req.body.trialDays) || 0;
     if (!email || !name) return res.status(400).json({ error: 'Workshop name and email are required' });
     const supabase = getSupabaseAdmin();
@@ -3941,12 +3959,13 @@ app.post('/api/admin/onboard-mechanic', async (req, res) => {
       onboarding_complete: true,
       review_status: 'approved',
     }, { onConflict: 'id' });
+    await saveMechanicTier(supabase, userId, { subscription_tier: tier });
 
     // Build the Stripe subscription checkout link (unless comped)
     let billingLink = '';
     if (!compActivate) {
       const effectiveTrialDays = billing === 'trial' ? (trialDays || 30) : 0;
-      const sub = await makeSubscriptionCheckout(email, userId, origin, billing === 'half3months' ? 'half3months' : effectiveTrialDays);
+      const sub = await makeSubscriptionCheckout(email, userId, origin, billing === 'half3months' ? 'half3months' : effectiveTrialDays, tier);
       billingLink = sub.url || '';
     }
 
@@ -3956,9 +3975,12 @@ app.post('/api/admin/onboard-mechanic', async (req, res) => {
     const loginLink = `${origin}/mechanic`;
 
     const transporter = getMailTransporter();
-    const billingLabel = billing === 'half3months' ? '$49.50/mo for 3 months, then $99/mo'
-      : billing === 'trial' ? `free for ${trialDays || 30} days then $99/mo`
-      : '$99/mo';
+    const planEx = PLAN_TIERS[tier].exGst;
+    const planName = `Torqued ${PLAN_TIERS[tier].name}`;
+    const billingLabel = billing === 'half3months'
+      ? `${planName}: $${(planEx * 0.5).toFixed(2)}/mo for months 1-3, $${(planEx * 0.75).toFixed(2)}/mo for months 4-6, then $${planEx}/mo (+ GST)`
+      : billing === 'trial' ? `${planName}: free for ${trialDays || 30} days, then $${planEx}/mo + GST`
+      : `${planName}: $${planEx}/mo + GST`;
     if (transporter) {
       // Numbered onboarding checklist. Steps adapt to billing (comp accounts skip Stripe).
       const stepBtn = (href: string, label: string, dark = false) =>
@@ -4019,7 +4041,7 @@ app.post('/api/mechanic/save-onboarding', async (req, res) => {
     const supabase = getSupabaseAdmin();
     if (!supabase) return res.status(500).json({ error: 'Database not configured' });
 
-    const allowed = ['name','legal_name','nzbn','address','phone','owner_name','owner_phone','years_in_trade','bio','profile_photo_url','bank_account_name','bank_account_number','labour_rate','shop_fee','technicians','parts_lead_days','service_areas','diagnostic_tools','certifications','banner_image','cancellation_notice_hours','cancellation_partial_refund_pct','billing_start_date','agreement_signed_at','agreement_signed_by','offers_ppi','wants_wof'];
+    const allowed = ['name','legal_name','nzbn','address','phone','owner_name','owner_phone','years_in_trade','bio','profile_photo_url','bank_account_name','bank_account_number','labour_rate','shop_fee','technicians','parts_lead_days','service_areas','diagnostic_tools','certifications','banner_image','cancellation_notice_hours','cancellation_partial_refund_pct','billing_start_date','agreement_signed_at','agreement_signed_by','offers_ppi','wants_wof','subscription_tier'];
     const update: Record<string, any> = {};
     // An empty string on a numeric/date column (e.g. years_in_trade left blank by an
     // admin-onboarded account that skips straight to the contract step) fails the
@@ -4041,6 +4063,12 @@ app.post('/api/mechanic/save-onboarding', async (req, res) => {
     if (error && /cancellation_(notice_hours|partial_refund_pct)/.test(error.message || '')) {
       delete update.cancellation_notice_hours;
       delete update.cancellation_partial_refund_pct;
+      ({ error } = await supabase.from('profiles').update(update).eq('id', mechanicId));
+    }
+    if (update.subscription_tier !== undefined && !['starter', 'pro', 'max'].includes(update.subscription_tier)) delete update.subscription_tier;
+    // Pre-migration 071: subscription_tier column may not exist yet — retry without it.
+    if (error && /subscription_tier/.test(error.message || '')) {
+      delete update.subscription_tier;
       ({ error } = await supabase.from('profiles').update(update).eq('id', mechanicId));
     }
     // Pre-migration 034: offers_ppi column may not exist yet — retry without it.
@@ -4769,6 +4797,26 @@ for (const id of [
   'AUDI_A4_B8_20TFSI_QUATTRO_08_15', 'AUDI_A5_8T_20TFSI_QUATTRO_08_16', 'AUDI_Q5_8R_20TFSI_QUATTRO_08_17',
   'AUDI_A4_B9_20TFSI_QUATTRO_15_NOW', 'AUDI_A5_F5_20TFSI_QUATTRO_16_NOW',
 ]) DIFFERENTIAL_SERVICE_BY_VEHICLE[id] = QUATTRO_REAR_SPEC;
+// Migration 070 (NZ-fleet gap fill): part-time/full-time 4WD utes & SUVs have
+// serviceable front AND rear diffs; on-demand AWD SUVs have a rear diff only.
+// Hybrid E-Four AWD (rear e-motor, no mechanical rear diff) deliberately omitted.
+const FOUR_WD_SPEC: DiffSpec = { tier: 'front+rear', capacityL: 2.2, fluidLow: 16, fluidHigh: 30, labourHrs: 1.5, shopFee: 25 };
+const AWD_REAR_SPEC: DiffSpec = { tier: 'rear only', capacityL: 0.85, fluidLow: 16, fluidHigh: 30, labourHrs: 1.5, shopFee: 25 };
+for (const id of [
+  'TOY_LC200_VDJ200_07_21', 'TOY_LC300_FJA300_21_NOW', 'TOY_LC70_VDJ7X_07_23', 'TOY_LC70_GDJ7X_28_23_NOW',
+  'FORD_RANGER_PJ_25_06_11', 'MAZ_BT50_UN_25_06_11', 'FORD_EVEREST_UB_20_22_NOW',
+  'VW_AMAROK_2H_20TDI_10_20', 'VW_AMAROK_2H_30V6_17_20', 'VW_AMAROK_NG_20BIT_23_NOW',
+  'HOL_COLORADO_RC_30_08_12', 'HOL_COLORADO_RG_28_12_20',
+  'JEEP_GRANDCHEROKEE_WK2_36_11_21', 'JEEP_WRANGLER_JK_36_12_18', 'JEEP_WRANGLER_JL_36_18_NOW',
+  'RAM_1500_DS_57_19_NOW', 'CHEV_SILVERADO_T1_62_19_NOW',
+]) DIFFERENTIAL_SERVICE_BY_VEHICLE[id] = FOUR_WD_SPEC;
+for (const id of [
+  'NIS_MURANO_Z50_35_04_08', 'NIS_MURANO_Z51_35_08_15', 'MIT_OUTLANDER_ZG_24_06_12', 'HON_CRV_RD5_20_24_01_06',
+  'HYU_TUCSON_JM_20_04_10', 'HYU_TUCSON_LM_20_10_15', 'HYU_TUCSON_LM_20D_10_15',
+  'HYU_SANTAFE_CM_24_06_12', 'HYU_SANTAFE_CM_22D_06_12', 'HYU_SANTAFE_TM_22D_18_NOW', 'HYU_SANTAFE_TM_35_18_NOW',
+  'KIA_SPORTAGE_KM_20_04_10', 'KIA_SORENTO_XM_24_09_15', 'KIA_SORENTO_XM_22D_09_15', 'KIA_SORENTO_MQ4_22D_20_NOW',
+  'FORD_KUGA_TF_16T_13_16', 'FORD_ESCAPE_ZH_20T_20_NOW', 'MAZ_CX30_DM_25_19_NOW', 'SUZ_SX4_15_06_14',
+]) DIFFERENTIAL_SERVICE_BY_VEHICLE[id] = AWD_REAR_SPEC;
 // Touareg 7P: Torsen centre diff + separate front and rear diffs, both serviceable.
 DIFFERENTIAL_SERVICE_BY_VEHICLE['VW_TOUAREG_7P_36FSI_11_18'] = {
   tier: 'front+rear', capacityL: 2.2, fluidLow: 16, fluidHigh: 30, labourHrs: 2.0, shopFee: 25,
@@ -7677,10 +7725,16 @@ app.post('/api/stripe/webhook', async (req, res) => {
       }
 
       if (type === 'subscription' && mechanicId) {
-        const { error } = await supabase.from('profiles').update({
+        const { error } = await saveMechanicTier(supabase, mechanicId, {
           subscription_active: true,
           stripe_subscription_id: (session.subscription as string) ?? null,
-        }).eq('id', mechanicId);
+          subscription_tier: normaliseTier(session.metadata?.tier),
+        });
+        if (session.metadata?.launchOffer && session.subscription) {
+          const stripeW = getStripe();
+          if (stripeW) await applyLaunchOfferSchedule(stripeW, session.subscription as string)
+            .catch((e: any) => console.error('[Webhook] launch schedule failed:', e?.message));
+        }
         if (error) console.error('[Webhook] Failed to activate mechanic subscription:', error.message);
         else console.log(`[Webhook] Mechanic ${mechanicId} subscription activated`);
       }
@@ -7714,28 +7768,76 @@ app.post('/api/stripe/webhook', async (req, res) => {
 
 // REST API Endpoints
 
+// ── Subscription tiers (subscription-only model — no per-job commission) ──────
+// Prices are NZD + GST per month. Stripe charges the GST-inclusive amount.
+// Every tier gets unlimited technicians, jobs and marketplace bookings; tiers
+// differ by features only.
+type PlanTier = 'starter' | 'pro' | 'max';
+const PLAN_TIERS: Record<PlanTier, { name: string; exGst: number; blurb: string }> = {
+  starter: { name: 'Starter', exGst: 89,  blurb: 'Quoting, customer & vehicle history, job cards, invoicing, CSV import' },
+  pro:     { name: 'Pro',     exGst: 149, blurb: 'Starter + online & automated bookings, alerts, in-app quotes & payments, promoted marketplace placement, parts management' },
+  max:     { name: 'Max',     exGst: 249, blurb: 'Pro + AI-assisted quoting & AI across the platform, PPI reports, multi-site, migration & setup done for you, priority support' },
+};
+const NZ_GST_RATE = 0.15;
+const tierInclGstCents = (t: PlanTier) => Math.round(PLAN_TIERS[t].exGst * (1 + NZ_GST_RATE) * 100);
+const normaliseTier = (t: any): PlanTier => (t === 'starter' || t === 'max' ? t : 'pro');
+
+// Launch offer: months 1-3 at 50% off, months 4-6 at 25% off, month 7 on full
+// price. Stripe Checkout takes one discount, so checkout applies the 50% coupon
+// and, once the subscription exists, a subscription schedule adds the 25% phase.
+async function applyLaunchOfferSchedule(stripe: any, subscriptionId: string) {
+  const sub = await stripe.subscriptions.retrieve(subscriptionId);
+  if (sub.schedule) return; // already scheduled (webhook and activate both call this)
+  const priceId = sub.items.data[0]?.price?.id;
+  if (!priceId) return;
+  const quarter = await stripe.coupons.create({ percent_off: 25, duration: 'repeating', duration_in_months: 3, name: 'Torqued launch offer — 25% off months 4-6' });
+  const sched = await stripe.subscriptionSchedules.create({ from_subscription: subscriptionId });
+  const currentCoupon = sub.discount?.coupon?.id;
+  await stripe.subscriptionSchedules.update(sched.id, {
+    end_behavior: 'release',
+    phases: [
+      { items: [{ price: priceId, quantity: 1 }], start_date: sched.phases[0].start_date, iterations: 3, ...(currentCoupon ? { coupon: currentCoupon } : {}) },
+      { items: [{ price: priceId, quantity: 1 }], iterations: 3, coupon: quarter.id },
+      { items: [{ price: priceId, quantity: 1 }] },
+    ],
+  });
+}
+
+// Persist the tier; tolerate the column not existing yet (migration 071).
+async function saveMechanicTier(supabase: any, mechanicId: string, update: Record<string, any>) {
+  const { error } = await supabase.from('profiles').update(update).eq('id', mechanicId);
+  if (error && /subscription_tier/.test(error.message || '')) {
+    const { subscription_tier: _drop, ...rest } = update;
+    return supabase.from('profiles').update(rest).eq('id', mechanicId);
+  }
+  return { error };
+}
+
 // Endpoint 1: Create Stripe Checkout Session for Mechanic Subscription
-// Shared: create a $99/mo subscription checkout session (optionally with a free-trial). Returns {url,...}.
-async function makeSubscriptionCheckout(email: string, mechanicId: string, origin: string, trialDaysOrBillingType?: number | string) {
+// billing: 'launch' (50% m1-3, 25% m4-6, then full) | trial days (number) | standard
+async function makeSubscriptionCheckout(email: string, mechanicId: string, origin: string, trialDaysOrBillingType?: number | string, tierIn?: string) {
+  const tier = normaliseTier(tierIn);
   const stripe = getStripe();
   if (!stripe) {
     return { id: 'mock_sub_session_id', url: `${origin}/mechanic?session_id=mock_sub_session_id&mechanic_id=${mechanicId}`, isMock: true };
   }
   const billingType = typeof trialDaysOrBillingType === 'string' ? trialDaysOrBillingType : null;
   const trialDays = typeof trialDaysOrBillingType === 'number' ? trialDaysOrBillingType : 0;
+  // 'half3months' is the legacy name for the launch offer (admin onboarding).
+  const launch = billingType === 'launch' || billingType === 'half3months';
 
-  // For 50% off first 3 months: create a coupon then apply it
   let discounts: any[] | undefined;
-  if (billingType === 'half3months') {
+  if (launch) {
     const coupon = await stripe.coupons.create({
-      percent_off: 50,
-      duration: 'repeating',
-      duration_in_months: 3,
-      name: 'Torqued Launch - 50% off 3 months',
+      percent_off: 50, duration: 'repeating', duration_in_months: 3,
+      name: 'Torqued launch offer — 50% off months 1-3',
     });
     discounts = [{ coupon: coupon.id }];
   }
 
+  const plan = PLAN_TIERS[tier];
+  const subscriptionData: Record<string, any> = { metadata: { mechanicId, tier } };
+  if (!billingType && trialDays > 0) subscriptionData.trial_period_days = trialDays;
   const session = await stripe.checkout.sessions.create({
     payment_method_types: ['card'],
     mode: 'subscription',
@@ -7744,25 +7846,34 @@ async function makeSubscriptionCheckout(email: string, mechanicId: string, origi
       price_data: {
         currency: 'nzd',
         recurring: { interval: 'month' },
-        product_data: { name: 'Torqued Garage Portal Subscription', description: 'Access to NZ-wide high-value repair marketplace leads' },
-        unit_amount: 9900,
+        product_data: { name: `Torqued ${plan.name}`, description: `${plan.blurb}. $${plan.exGst}/month + GST.` },
+        unit_amount: tierInclGstCents(tier),
       },
       quantity: 1,
     }],
-    ...(!billingType && trialDays > 0 ? { subscription_data: { trial_period_days: trialDays } } : {}),
+    subscription_data: subscriptionData,
     success_url: `${origin}/mechanic?session_id={CHECKOUT_SESSION_ID}&mechanic_id=${mechanicId}`,
     cancel_url: `${origin}/mechanic?canceled=true`,
     customer_email: email,
-    metadata: { mechanicId, type: 'subscription' },
+    metadata: { mechanicId, type: 'subscription', tier, launchOffer: launch ? '1' : '' },
   } as any);
   return { id: session.id, url: session.url };
 }
 
+// GET /api/plans — tier catalogue for pricing UIs (single source of truth)
+app.get('/api/plans', (_req, res) => {
+  res.json({
+    gstRate: NZ_GST_RATE,
+    tiers: (Object.keys(PLAN_TIERS) as PlanTier[]).map(id => ({ id, ...PLAN_TIERS[id], inclGst: tierInclGstCents(id) / 100 })),
+    launchOffer: { months1to3PctOff: 50, months4to6PctOff: 25 },
+  });
+});
+
 app.post('/api/stripe/create-subscription', async (req, res) => {
   try {
-    const { email, mechanicId } = req.body;
+    const { email, mechanicId, tier, billing } = req.body;
     if (!email || !mechanicId) return res.status(400).json({ error: 'Email and mechanicId are required' });
-    const out = await makeSubscriptionCheckout(email, mechanicId, getOrigin(req));
+    const out = await makeSubscriptionCheckout(email, mechanicId, getOrigin(req), billing === 'launch' ? 'launch' : undefined, tier);
     res.json(out);
   } catch (err) {
     console.error('Error creating Stripe subscription session:', err);
@@ -7790,13 +7901,18 @@ app.post('/api/stripe/activate-subscription', async (req, res) => {
     const supabase = getSupabaseAdmin();
     if (!supabase) return res.status(500).json({ error: 'Database not configured' });
 
-    const { error } = await supabase.from('profiles').update({
+    const { error } = await saveMechanicTier(supabase, mechanicId, {
       subscription_active: true,
       stripe_subscription_id: (session.subscription as string) || null,
-    }).eq('id', mechanicId);
+      subscription_tier: normaliseTier(session.metadata?.tier),
+    });
 
     if (error) return res.status(500).json({ error: error.message });
-    res.json({ activated: true });
+    if (session.metadata?.launchOffer && session.subscription) {
+      try { await applyLaunchOfferSchedule(stripe, session.subscription as string); }
+      catch (e) { console.error('[activate-subscription] launch schedule failed:', (e as Error).message); }
+    }
+    res.json({ activated: true, tier: normaliseTier(session.metadata?.tier) });
   } catch (err) {
     console.error('[activate-subscription]', err);
     res.status(500).json({ error: 'Activation failed' });
@@ -9335,8 +9451,7 @@ function buildMechanicDataExportPdf(mechanicEmail: string, data: Awaited<ReturnT
   const refunded = jobs.reduce((s: number, j: any) => s + (Number(j.refunded_amount) || 0), 0);
   sectionTitle('Revenue Summary');
   row(['Gross revenue (paid jobs)', `$${gross.toFixed(2)}`], [70, 120], true);
-  row(['Platform commission (4%)', `$${(gross * 0.04).toFixed(2)}`], [70, 120]);
-  row(['Net payout', `$${(gross * 0.96).toFixed(2)}`], [70, 120]);
+  row(['Net payout (no commission)', `$${gross.toFixed(2)}`], [70, 120]);
   row(['Refunded to customers', `$${refunded.toFixed(2)}`], [70, 120]);
   y += 4;
 

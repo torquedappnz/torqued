@@ -1,5 +1,6 @@
 import React, { useState, useMemo, useRef } from 'react';
 import { jsPDF } from 'jspdf';
+import { PLANS, LAUNCH_OFFER, planById, PlanTier } from '../plans';
 import { motion, AnimatePresence } from 'motion/react';
 import {
   LayoutDashboard,
@@ -221,13 +222,13 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
     owner_name: string; owner_phone: string; years_in_trade: string; bio: string;
     bank_account_name: string; bank_account_number: string; labour_rate: number;
     technicians: number; parts_lead_days: number; billing_start_date: string;
-    signer_title: string; gst_number: string; wants_wof: boolean;
+    signer_title: string; gst_number: string; wants_wof: boolean; subscription_tier: PlanTier;
   }>({
     name: '', legal_name: '', nzbn: '', address: '', phone: '', owner_name: '', owner_phone: '',
     years_in_trade: '', bio: '',
     bank_account_name: '', bank_account_number: '', labour_rate: 145, technicians: 1, parts_lead_days: 1,
     billing_start_date: (() => { const d = new Date(); d.setDate(d.getDate() + 1); return d.toISOString().slice(0, 10); })(),
-    signer_title: '', gst_number: '', wants_wof: false,
+    signer_title: '', gst_number: '', wants_wof: false, subscription_tier: 'pro',
   });
   // OTP email verification (step 0)
   const [obEmail, setObEmail] = useState('');
@@ -464,7 +465,7 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
     return { start, end };
   };
 
-  // Download the weekly revenue report (prior Mon–Sun, jobs − 4% commission)
+  // Download the weekly revenue report (prior Mon–Sun — paid out in full, no commission)
   const downloadWeeklyReport = async () => {
     const { start, end } = priorWeekRange();
     const jobs = pastJobs.filter((j: any) => {
@@ -473,7 +474,7 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
       return t >= start.getTime() && t <= end.getTime();
     });
     const gross = jobs.reduce((s: number, j: any) => s + (parseFloat(j.total_price) || 0), 0);
-    const commission = gross * 0.04, payout = gross - commission;
+    const payout = gross; // subscription-only model: no per-job commission
     const doc = new jsPDF({ unit: 'mm', format: 'a4' });
     const logo = await fetchDataUrl('/torqued-logo.png');
     if (logo) doc.addImage(logo, 'PNG', 15, 8, 52, 17.4);
@@ -489,9 +490,9 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
     jobs.forEach((j: any) => row(new Date(j.completed_at || j.created_at).toLocaleDateString('en-NZ'), (j.vehicle_rego || '—').slice(0, 18), (j.customer_name || '—').slice(0, 18), `$${(parseFloat(j.total_price) || 0).toFixed(2)}`));
     y += 4; doc.line(15, y, 195, y); y += 8; doc.setFontSize(10);
     row('', '', 'Gross (jobs)', `$${gross.toFixed(2)}`);
-    row('', '', 'Torqued commission (4%)', `-$${commission.toFixed(2)}`);
+    row('', '', 'Torqued commission', '$0.00');
     doc.setTextColor(255, 24, 0); row('', '', 'YOUR PAYOUT', `$${payout.toFixed(2)}`, true);
-    doc.setTextColor(120, 120, 120); doc.setFontSize(8); doc.text('Your $99/month subscription is billed separately to your card and is not deducted here.', 15, y + 4);
+    doc.setTextColor(120, 120, 120); doc.setFontSize(8); doc.text('Torqued charges no commission. Your monthly plan is billed separately to your card and is not deducted here.', 15, y + 4);
     doc.save(`Torqued-Weekly-Report-${start.toISOString().slice(0, 10)}.pdf`);
   };
 
@@ -852,10 +853,10 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
       .then(r => r.json())
       .then(({ jobs: rows }) => {
         const all = rows || [];
-        // Real revenue this week = paid jobs in the last 7 days (net of 4% Torqued commission)
+        // Real revenue this week = paid jobs in the last 7 days (no commission — paid out in full)
         const weekAgo = Date.now() - 7 * 864e5;
         const paidThisWeek = all.filter((r: any) => r.payment_status === 'confirmed' && new Date(r.completed_at || r.created_at).getTime() >= weekAgo);
-        setWeekRevenue(Math.round(paidThisWeek.reduce((s: number, r: any) => s + (parseFloat(r.total_price) || 0) * 0.96, 0)));
+        setWeekRevenue(Math.round(paidThisWeek.reduce((s: number, r: any) => s + (parseFloat(r.total_price) || 0), 0)));
         // Job History = accepted/in-progress/completed jobs + all cold quotes (mechanic-created)
         setPastJobs(all.filter((r: any) => ['completed', 'in_progress', 'accepted'].includes(r.status) || r.is_cold_quote));
         // Incoming queue = real customer jobs still needing action + quoted jobs (show in SENT filter)
@@ -3663,45 +3664,63 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
   const renderPayments = () => {
     const paidJobs = pastJobs.filter((j: any) => j.payment_status === 'confirmed');
     const grossAll = paidJobs.reduce((s: number, j: any) => s + (parseFloat(j.total_price) || 0), 0);
-    const payoutAll = grossAll * 0.96;
+    const payoutAll = grossAll; // no commission
     const sub = billing || {};
+    const currentPlan = planById((userProfile as any)?.subscription_tier);
+    const startPlan = async (tier: PlanTier) => {
+      const r = await fetch('/api/stripe/create-subscription', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ email: user!.email, mechanicId: user!.id, tier, billing: 'launch' }) });
+      const d = await r.json(); if (d.url) window.location.href = d.url; else alert(d.error || 'Could not start checkout.');
+    };
     return (
       <div className="space-y-5 pb-12 max-w-3xl">
         <div>
-          <p className="text-sm text-muted">Your $99/month subscription is billed to your card. Job payouts are paid out less Torqued's 4% commission.</p>
+          <p className="text-sm text-muted">
+            {currentPlan ? <>You're on <span className="font-bold text-foreground">Torqued {currentPlan.name}</span> (${currentPlan.exGst}/month + GST), billed to your card. </> : 'Your monthly plan is billed to your card. '}
+            Torqued takes no commission — job payments are paid out to you in full.
+          </p>
         </div>
 
         <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
           <Card className="p-4 bg-card border-border">
-            <p className="text-[10px] font-black uppercase tracking-widest text-muted">Subscription</p>
+            <p className="text-[10px] font-black uppercase tracking-widest text-muted">{currentPlan ? `Plan · ${currentPlan.name}` : 'Subscription'}</p>
             <p className={`text-lg font-black mt-1 ${sub.active ? 'text-emerald-500' : 'text-torqued-red'}`}>{(sub.status || (sub.active ? 'active' : 'inactive')).toUpperCase()}</p>
             {sub.nextBilling && <p className="text-[11px] text-muted">Next bill {new Date(sub.nextBilling).toLocaleDateString('en-NZ')}</p>}
           </Card>
           <Card className="p-4 bg-card border-border">
-            <p className="text-[10px] font-black uppercase tracking-widest text-muted">Paid jobs (net 4%)</p>
+            <p className="text-[10px] font-black uppercase tracking-widest text-muted">Paid jobs</p>
             <p className="text-lg font-black mt-1 text-foreground">{formatCurrency(payoutAll)}</p>
             <p className="text-[11px] text-muted">{paidJobs.length} paid job{paidJobs.length === 1 ? '' : 's'}</p>
           </Card>
           <Card className="p-4 bg-card border-border">
-            <p className="text-[10px] font-black uppercase tracking-widest text-muted">This week (net)</p>
+            <p className="text-[10px] font-black uppercase tracking-widest text-muted">This week</p>
             <p className="text-lg font-black mt-1 text-foreground">{formatCurrency(weekRevenue)}</p>
           </Card>
         </div>
 
         {!sub.active && (
-          <Card className="p-4 bg-torqued-red/5 border-torqued-red/20 flex items-center justify-between gap-4">
-            <p className="text-sm font-bold">Subscription not active — activate to start receiving leads.</p>
-            <Button size="sm" className="bg-torqued-red text-white shrink-0" onClick={async () => {
-              const r = await fetch('/api/stripe/create-subscription', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ email: user!.email, mechanicId: user!.id }) });
-              const d = await r.json(); if (d.url) window.location.href = d.url;
-            }}>Activate $99/mo</Button>
+          <Card className="p-5 bg-torqued-red/5 border-torqued-red/20 space-y-4">
+            <div>
+              <p className="text-sm font-bold">Choose a plan to start receiving bookings</p>
+              <p className="text-xs text-muted mt-0.5">Launch offer: {LAUNCH_OFFER.months1to3PctOff}% off months 1–3, {LAUNCH_OFFER.months4to6PctOff}% off months 4–6. Unlimited technicians, jobs and marketplace bookings on every plan — no commission.</p>
+            </div>
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+              {PLANS.map(plan => (
+                <div key={plan.id} className={cn('rounded-xl border p-4 flex flex-col gap-2 bg-card', plan.id === ((userProfile as any)?.subscription_tier || 'pro') ? 'border-torqued-red' : 'border-border')}>
+                  <p className="text-sm font-black">{plan.name}</p>
+                  <p className="text-xl font-black">${plan.exGst}<span className="text-[11px] font-bold text-muted"> /mo + GST</span></p>
+                  <p className="text-[11px] text-muted">First 3 months ${(plan.exGst * (100 - LAUNCH_OFFER.months1to3PctOff) / 100).toFixed(2)}/mo</p>
+                  <ul className="text-[11px] text-muted space-y-0.5 flex-1">{plan.features.map(f => <li key={f}>· {f}</li>)}</ul>
+                  <Button size="sm" className="bg-torqued-red text-white" onClick={() => startPlan(plan.id)}>Choose {plan.name}</Button>
+                </div>
+              ))}
+            </div>
           </Card>
         )}
 
         <Card className="p-4 bg-card border-border flex items-center justify-between gap-4">
           <div>
             <p className="text-sm font-bold text-foreground">Weekly revenue report</p>
-            <p className="text-xs text-muted">Last completed week (Mon–Sun): your jobs less Torqued's 4% commission.</p>
+            <p className="text-xs text-muted">Last completed week (Mon–Sun): your paid jobs, paid out in full.</p>
           </div>
           <Button size="sm" className="bg-torqued-red text-white shrink-0" onClick={downloadWeeklyReport}>Download PDF</Button>
         </Card>
@@ -3889,22 +3908,23 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
     writePara(`1.2 "Services" means the automotive repair, maintenance, and diagnostic services offered by the Workshop through the Platform.`);
     writePara(`1.3 "Customer" means any individual or entity that books Services through the Platform.`);
     writePara(`1.4 "Booking" means a confirmed appointment made by a Customer for Services through the Platform.`);
-    writePara(`1.5 "Commission" means the fee payable to Torqued as a percentage of each completed Booking's total invoiced value.`);
-    writePara(`1.6 "Subscription Fee" means the recurring monthly fee payable by the Workshop to access the Platform.`);
-    writePara(`1.7 "Payout" means the net payment made to the Workshop after deducting Commission and applicable fees.`);
+    writePara(`1.5 "Subscription Fee" means the recurring monthly fee for the Workshop's chosen Plan (Starter, Pro or Max), which is the only fee Torqued charges for use of the Platform.`);
+    writePara(`1.6 "Payout" means the payment to the Workshop of Customer payments collected through the Platform, less card processing fees only.`);
+    writePara(`1.7 "Workshop Data" means customer, vehicle, job, quote and invoice records entered into or imported into the Platform by or for the Workshop.`);
 
     writeSection('2. PLATFORM ACCESS & SUBSCRIPTION');
-    writePara(`2.1 Subscription Fee: The Workshop agrees to pay Torqued a subscription fee of NZD $99.00 per month (inclusive of GST) for access to the Platform, billed monthly in advance via the Workshop's nominated payment method through Stripe.`);
+    const planForContract = planById(ob.subscription_tier) || planById('pro')!;
+    writePara(`2.1 Subscription Fee: The Workshop has chosen the Torqued ${planForContract.name} Plan and agrees to pay NZD $${planForContract.exGst}.00 + GST per month, billed monthly in advance via the Workshop's nominated payment method through Stripe. Plans: Starter $89, Pro $149, Max $249 per month + GST. Every Plan includes unlimited technicians, jobs and marketplace bookings; Plans differ by features only.`);
     writePara(`2.2 Billing Start Date: Billing shall commence on the date agreed during onboarding (the "Billing Start Date"). The Workshop may configure its profile and add services before the Billing Start Date, but listing visibility and the ability to accept Bookings will only activate from the Billing Start Date.`);
     writePara(`2.3 Trial Periods: Where Torqued grants a trial period, no subscription fee is charged during that period. On expiry of the trial period, the standard subscription fee applies automatically unless the Workshop cancels before the trial ends.`);
-    writePara(`2.4 Promotional Pricing: Where Torqued offers promotional pricing (e.g. 50% discount for the first three months), such pricing is as described at the time of signup and is subject to Torqued's discretion to modify or withdraw.`);
+    writePara(`2.4 Launch Offer: Where the Workshop signs up under the launch offer, the Subscription Fee is discounted 50% for months 1 to 3 and 25% for months 4 to 6, with the full Subscription Fee applying from month 7.`);
     writePara(`2.5 Cancellation: Either Party may cancel this Agreement by providing 30 days' written notice. Subscription fees are non-refundable for the current billing period on cancellation.`);
 
-    writeSection('3. COMMISSION & PAYOUTS');
-    writePara(`3.1 Commission Rate: Torqued charges a commission of 4% (plus GST) on the total invoiced value of each completed Booking facilitated through the Platform.`);
+    writeSection('3. NO COMMISSION; PAYMENTS & PAYOUTS');
+    writePara(`3.1 No Commission: Torqued charges no commission or per-job fee on any Booking, whether the Customer books online, by phone or as a walk-in. The Subscription Fee is Torqued's only charge.`);
     writePara(`3.2 Payout Schedule: Torqued will process Payouts to the Workshop's nominated NZ bank account on a weekly basis (each Monday for the prior week's completed Bookings), subject to all funds having been received from Customers.`);
-    writePara(`3.3 Payment Processing: Customer payments are processed through Stripe. Torqued acts as the merchant of record for Customer-facing transactions. Payouts to the Workshop will be net of Commission and any Stripe processing fees.`);
-    writePara(`3.4 GST: All fees and commissions stated are exclusive of GST unless otherwise specified. Where the Workshop is GST-registered, GST will be added to commissions and subscription fees as applicable.`);
+    writePara(`3.3 Payment Processing: Customer payments taken online are processed through Stripe. Torqued acts as the merchant of record for Customer-facing transactions. Payouts to the Workshop are the full amount paid by the Customer, less Stripe card processing fees only.`);
+    writePara(`3.4 GST: The Subscription Fee is stated exclusive of GST; GST is added at the prevailing rate.`);
     writePara(`3.5 Disputes: In the event of a disputed payment, Torqued reserves the right to withhold Payout pending resolution, not to exceed 30 days.`);
 
     writeSection('4. WORKSHOP OBLIGATIONS');
@@ -3914,7 +3934,8 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
 
     writeSection('5. TORQUED OBLIGATIONS');
     writePara(`5.1 Torqued agrees to: (a) provide the Workshop with access to the Platform in accordance with this Agreement; (b) process Customer payments in a timely manner and make Payouts in accordance with clause 3.2; (c) provide reasonable technical support for Platform-related issues; (d) maintain reasonable security standards for data processed through the Platform; (e) notify the Workshop of any material changes to Platform fees or terms with at least 30 days' notice.`);
-    writePara(`5.2 Platform Availability: Torqued does not guarantee uninterrupted access to the Platform and may perform maintenance that temporarily affects availability. Torqued will endeavour to provide advance notice of planned outages.`);
+    writePara(`5.2 Availability: Torqued will use commercially reasonable efforts to keep the Platform available 99.5% of the time each calendar month, excluding planned maintenance notified at least 48 hours in advance and scheduled outside 7:00am-6:00pm NZ time on business days. Torqued keeps daily backups of Workshop Data.`);
+    writePara(`5.3 Support: Torqued will respond to support requests within one business day, and to a request reporting that the Workshop cannot quote, book or invoice within 4 business hours. Max Plan workshops receive priority support.`);
 
     writeSection('6. CANCELLATIONS & REFUNDS');
     writePara(`6.1 Cancellation Policy: The Workshop's cancellation policy (as configured on the Platform) applies to Customer Bookings. The Workshop is responsible for honouring its stated policy.`);
@@ -3930,6 +3951,8 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
     writePara(`8.1 Data Handling: Torqued collects and handles personal information in accordance with its Privacy Policy at torqued.site/privacy and the Privacy Act 2020.`);
     writePara(`8.2 Customer Data: The Workshop acknowledges that Customer personal information accessed through the Platform may only be used for the purpose of providing Services under a confirmed Booking and must not be used for unsolicited marketing, sold to third parties, or retained beyond what is necessary under applicable law.`);
     writePara(`8.3 Data Breach: Each Party must promptly notify the other of any actual or reasonably suspected data breach affecting the other's data.`);
+    writePara(`8.4 Ownership of Workshop Data: The Workshop owns its Workshop Data, including data imported from other software. Torqued holds and processes Workshop Data on the Workshop's behalf as its agent under section 11 of the Privacy Act 2020 and uses it only to provide the Platform.`);
+    writePara(`8.5 Export on Cancellation: On request at any time, and for 30 days after termination, Torqued will provide the Workshop with an export of its Workshop Data in a standard format (CSV). After that period Torqued will delete Workshop Data except where retention is required by law.`);
 
     writeSection('9. LIABILITY & INDEMNITY');
     writePara(`9.1 Limitation of Liability: To the maximum extent permitted by New Zealand law, Torqued's total liability to the Workshop under or in connection with this Agreement is limited to the total subscription fees paid by the Workshop in the 3 months immediately preceding the event giving rise to the claim.`);
@@ -3941,7 +3964,7 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
     writePara(`10.1 Term: This Agreement commences on the date it is signed and continues until terminated in accordance with this clause.`);
     writePara(`10.2 Termination by Notice: Either Party may terminate this Agreement on 30 days' written notice to the other Party at legal@torquedapp.nz.`);
     writePara(`10.3 Immediate Termination: Torqued may terminate this Agreement immediately and without notice if the Workshop: (a) breaches any material provision of this Agreement and fails to remedy the breach within 7 days of notice; (b) becomes insolvent or enters liquidation or receivership; (c) engages in fraudulent, illegal, or seriously harmful conduct; or (d) receives repeated Customer complaints that Torqued reasonably considers to reflect a systemic failure in service quality.`);
-    writePara(`10.4 Effect of Termination: On termination: (a) all outstanding Payouts owed to the Workshop will be paid within 14 days, net of any amounts owed to Torqued; (b) the Workshop's access to the Platform will be suspended; and (c) clauses 7, 8, 9, and 11 survive termination.`);
+    writePara(`10.4 Effect of Termination: On termination: (a) all outstanding Payouts owed to the Workshop will be paid within 14 days, net of any amounts owed to Torqued; (b) the Workshop's access to the Platform will be suspended, subject to the data export right in clause 8.5; and (c) clauses 7, 8, 9, and 11 survive termination.`);
 
     writeSection('11. GOVERNING LAW & DISPUTES');
     writePara(`11.1 Governing Law: This Agreement is governed by the laws of New Zealand.`);
@@ -4295,7 +4318,20 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
 
           {obStep === 3 && (
             <div className="space-y-4">
-              <div><h2 className="text-2xl font-black tracking-tight">Rates & Subscription</h2><p className="text-sm text-muted">Set your pricing and select your start date.</p></div>
+              <div><h2 className="text-2xl font-black tracking-tight">Rates & Subscription</h2><p className="text-sm text-muted">Set your pricing, choose your plan and select your start date.</p></div>
+              <div>
+                <label className={obLabel}>Plan <span className="text-torqued-red">*</span></label>
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-2" role="radiogroup" aria-label="Plan">
+                  {PLANS.map(plan => (
+                    <button key={plan.id} type="button" role="radio" aria-checked={ob.subscription_tier === plan.id} onClick={() => setOb({ ...ob, subscription_tier: plan.id })}
+                      className={cn('text-left rounded-xl border p-3 transition-all', ob.subscription_tier === plan.id ? 'border-torqued-red bg-torqued-red/5' : 'border-border bg-card hover:border-torqued-red/40')}>
+                      <p className="text-sm font-black">{plan.name} · ${plan.exGst}<span className="text-[10px] font-bold text-muted">/mo + GST</span></p>
+                      <p className="text-[10px] text-muted mt-0.5">{plan.audience}</p>
+                    </button>
+                  ))}
+                </div>
+                <p className="text-[10px] text-muted mt-1">No commission on any job. Launch offer: 50% off months 1–3, 25% off months 4–6.</p>
+              </div>
               <div className="grid grid-cols-3 gap-3">
                 <div><label className={obLabel}>Labour $/hr</label><input type="number" className={obInput} value={ob.labour_rate||''} onChange={e=>setOb({...ob,labour_rate:parseFloat(e.target.value)||0})} /></div>
                 <div><label className={obLabel}>Technicians</label><input type="number" className={obInput} value={ob.technicians||''} onChange={e=>setOb({...ob,technicians:parseInt(e.target.value)||1})} /></div>
@@ -4321,15 +4357,15 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
               <div className="bg-card border border-border rounded-xl p-4 space-y-3 max-h-48 overflow-y-auto text-xs text-foreground/60 leading-relaxed">
                 <p className="font-bold text-foreground/80 text-sm">Mechanic Platform Agreement</p>
                 <p className="text-muted">Effective Date: {new Date().toLocaleDateString('en-NZ', { day: 'numeric', month: 'long', year: 'numeric' })}</p>
-                <p className="text-muted font-bold">Key Terms: NZD $99.00/month subscription (incl. GST) · 4% commission per completed job · Weekly Monday payouts · NZ law governs</p>
+                <p className="text-muted font-bold">Key Terms: Torqued {(planById(ob.subscription_tier) || planById('pro')!).name} plan, NZD ${(planById(ob.subscription_tier) || planById('pro')!).exGst}/month + GST · No commission on any job · Weekly Monday payouts · You own your data · NZ law governs</p>
                 <p><span className="font-bold text-foreground/80">1. Parties</span><br />Torqued NZ, Dunedin, New Zealand, NZBN: 9429053747006 ("Torqued")<br />AND {ob.legal_name || ob.name || '[Workshop Legal Name]'} trading as {ob.name || '[Trading Name]'}, {ob.address || '[Address]'}, NZBN: {ob.nzbn || '[NZBN]'} ("Mechanic Partner")</p>
                 <p><span className="font-bold text-foreground/80">2. Platform Access</span><br />Torqued grants a non-exclusive licence to list services and receive bookings, subject to ongoing subscription payment. The Partner must hold valid NZ business registration, appropriate qualifications, and public liability insurance.</p>
                 <p><span className="font-bold text-foreground/80">3. Obligations</span><br />The Partner must perform all services with reasonable care and skill, maintain accurate listings and pricing, communicate professionally, and comply with all applicable NZ laws and trade standards.</p>
-                <p><span className="font-bold text-foreground/80">4. Fees & Payment</span><br />Subscription: NZD $99.00 + GST/month via Stripe.<br />Commission: 4% of Job Value (incl. GST) per Completed Job, deducted from Weekly Payout.<br />Weekly Payout = Total Job Value – 4% Commission, disbursed every Monday via Stripe Connect.</p>
+                <p><span className="font-bold text-foreground/80">4. Fees & Payment</span><br />Subscription: NZD ${(planById(ob.subscription_tier) || planById('pro')!).exGst}.00 + GST/month via Stripe (launch offer: 50% off months 1–3, 25% off months 4–6).<br />No commission: Torqued takes nothing from any job, however it was booked.<br />Weekly Payout = everything customers paid online, less card processing fees only, disbursed every Monday.</p>
                 <p><span className="font-bold text-foreground/80">5. Consumer Guarantees</span><br />The Partner is the supplier under the Consumer Guarantees Act 1993 and is solely responsible for service quality, defects, and customer claims. Torqued operates as a marketplace only.</p>
                 <p><span className="font-bold text-foreground/80">6. Liability & Indemnity</span><br />The Partner indemnifies Torqued against all losses arising from services performed, breach of this Agreement, or negligence. Torqued's liability is limited to 3 months' subscription fees paid.</p>
                 <p><span className="font-bold text-foreground/80">7. Intellectual Property</span><br />All Platform IP is owned by Torqued. The Partner grants Torqued a licence to use their business name and listings to operate the Platform.</p>
-                <p><span className="font-bold text-foreground/80">8. Privacy & Confidentiality</span><br />Both parties must comply with the Privacy Act 2020. Confidential information must not be disclosed for 2 years post-termination.</p>
+                <p><span className="font-bold text-foreground/80">8. Privacy, Data & Confidentiality</span><br />Both parties must comply with the Privacy Act 2020. You own your customer and vehicle data (including imported data); Torqued holds it on your behalf and will export it to you on request and for 30 days after you cancel. Torqued targets 99.5% monthly uptime with daily backups. Confidential information must not be disclosed for 2 years post-termination.</p>
                 <p><span className="font-bold text-foreground/80">9. Term & Termination</span><br />Rolling monthly. Either party may terminate: Partner by cancelling subscription (access continues to end of billing cycle); Torqued on 30 days' notice or immediately for material breach, insolvency, or safety risk.</p>
                 <p><span className="font-bold text-foreground/80">10. Dispute Resolution</span><br />Good faith negotiation (14 days) → AMINZ mediation → NZ courts.</p>
                 <p><span className="font-bold text-foreground/80">11. General</span><br />Governed by New Zealand law. Independent contractor relationship. Torqued may amend on 30 days' notice.</p>
@@ -4880,7 +4916,7 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
           <div className="w-full max-w-md bg-card border border-border rounded-3xl p-6 space-y-4 max-h-[90vh] overflow-y-auto">
             <div>
               <h3 className="text-xl font-black tracking-tight text-foreground">New quote</h3>
-              <p className="text-xs text-muted">Search an existing customer, or add a new one. We email them the quote; if they pay online, Torqued takes its 4%.</p>
+              <p className="text-xs text-muted">Search an existing customer, or add a new one. We email them the quote; if they pay online, you receive the full amount — Torqued takes no commission.</p>
             </div>
 
             {/* Search existing customers (name / phone / rego) */}

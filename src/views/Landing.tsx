@@ -1,6 +1,7 @@
 import React from 'react';
 import { Logo } from '../components/Logo';
 import { Button } from '../components/Button';
+import { PLANS, LAUNCH_OFFER } from '../plans';
 import { Wrench, CreditCard, ShieldCheck, ChevronRight, X, BookOpen, Sun, Moon, Monitor } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { useTheme } from '../context/ThemeContext';
@@ -412,15 +413,34 @@ export const Landing: React.FC<LandingProps> = ({ onGetQuote, onMechanicPortal }
         </div>
       </section>
 
-      {/* Workshop promo */}
-      <section className="bg-background py-16 px-4 border-t border-border">
-        <div className="max-w-4xl mx-auto bg-torqued-red/5 border border-torqued-red/20 rounded-3xl p-8 md:p-10 flex flex-col md:flex-row items-center justify-between gap-6 text-center md:text-left">
-          <div className="space-y-1.5">
+      {/* Workshop pricing — subscription-only, no commission */}
+      <section className="bg-background py-16 px-4 border-t border-border" aria-labelledby="workshop-pricing-heading">
+        <div className="max-w-5xl mx-auto space-y-8">
+          <div className="text-center space-y-2">
             <span className="text-[10px] font-black uppercase tracking-widest text-torqued-red bg-torqued-red/10 px-2 py-1 rounded-full">Workshops</span>
-            <h3 className="text-2xl font-black tracking-tight text-foreground">50% off your first 3 months</h3>
-            <p className="text-muted text-sm">New Torqued workshops get half-price access to the platform for their first three months.</p>
+            <h3 id="workshop-pricing-heading" className="text-3xl font-black tracking-tight text-foreground">One system for your whole workshop. No commission.</h3>
+            <p className="text-muted text-sm max-w-2xl mx-auto">Online bookings, phone bookings and walk-ins in one tool — plus a marketplace that sends you new customers. Unlimited technicians, jobs and bookings on every plan.</p>
+            <p className="text-sm font-bold text-torqued-red">Launch offer: {LAUNCH_OFFER.months1to3PctOff}% off months 1–3, {LAUNCH_OFFER.months4to6PctOff}% off months 4–6.</p>
           </div>
-          <Button size="lg" className="bg-torqued-red text-white shrink-0" onClick={onMechanicPortal}>Torqued for Workshops</Button>
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+            {PLANS.map(plan => (
+              <div key={plan.id} className={`rounded-3xl border p-6 flex flex-col gap-3 bg-card ${plan.id === 'pro' ? 'border-torqued-red shadow-xl shadow-torqued-red/10' : 'border-border'}`}>
+                <div className="flex items-center justify-between">
+                  <p className="text-lg font-black text-foreground">{plan.name}</p>
+                  {plan.id === 'pro' && <span className="text-[9px] font-black uppercase tracking-widest text-white bg-torqued-red px-2 py-1 rounded-full">Most popular</span>}
+                </div>
+                <p className="text-xs text-muted">{plan.audience}</p>
+                <p className="text-3xl font-black text-foreground">${plan.exGst}<span className="text-sm font-bold text-muted"> /month + GST</span></p>
+                <ul className="text-sm text-muted space-y-1.5 flex-1">
+                  {plan.features.map(f => <li key={f} className="flex gap-2"><span className="text-torqued-red font-black" aria-hidden="true">✓</span><span>{f}</span></li>)}
+                </ul>
+              </div>
+            ))}
+          </div>
+          <div className="text-center">
+            <Button size="lg" className="bg-torqued-red text-white" onClick={onMechanicPortal}>Torqued for Workshops</Button>
+            <p className="text-[11px] text-muted mt-2">Switching from MechanicDesk or Workshop Software? We move your customer, vehicle and invoice history for you.</p>
+          </div>
         </div>
       </section>
 

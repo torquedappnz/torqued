@@ -627,7 +627,8 @@ function mapMechanicRecord(m: any): Mechanic {
     reviews: m.review_count || 0,
     labourRate: m.labour_rate || undefined,
     nextAvailable: 'Tomorrow, 8am',
-    isFeatured: true,
+    // Pro/Max workshops get promoted placement (server sets promoted=false for Starter)
+    isFeatured: m.promoted !== false,
     estimatedPrice: 0,
     technicians: m.technicians || 1,
     partsLeadDays: m.parts_lead_days ?? 1,
@@ -1153,7 +1154,8 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
       .map(m => (m.latitude != null && m.longitude != null && m.latitude !== 0 && m.longitude !== 0)
         ? { ...m, distance: haversineKm(customerCoords, { lat: m.latitude, lng: m.longitude }) }
         : m)
-      .sort((a, b) => a.distance - b.distance);
+      // Promoted (Pro/Max) workshops first, then nearest — Starter stays listed
+      .sort((a, b) => (Number(!!b.isFeatured) - Number(!!a.isFeatured)) || (a.distance - b.distance));
   }, [realMechanics, customerCoords]);
 
   // Per-mechanic estimated price for the mechanic-list step. Each workshop has its

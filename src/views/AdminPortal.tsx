@@ -4,6 +4,7 @@ import { Button } from '../components/Button';
 import { authPasskey, registerPasskey, passkeysSupported, hasPasskey } from '../lib/passkey';
 import { LayoutDashboard, Search, Wrench, BookOpen, Shield, Rocket, ChevronRight, Download } from 'lucide-react';
 import { jsPDF } from 'jspdf';
+import { PLANS, planById } from '../plans';
 
 export const AdminPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) => {
   const [key, setKey] = useState('');
@@ -31,7 +32,7 @@ export const AdminPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) => {
   const [edit, setEdit] = useState<{ kind: 'booking' | 'profile'; row: any } | null>(null);
 
   const [onb, setOnb] = useState<{ name: string; legal_name: string; email: string; address: string; phone: string; owner_name: string; owner_phone: string; nzbn: string; years_in_trade: string; labour_rate: string; technicians: string; parts_lead_days: string; billing: string; trialDays: string; billing_start_date: string }>(
-    { name: '', legal_name: '', email: '', address: '', phone: '', owner_name: '', owner_phone: '', nzbn: '', years_in_trade: '', labour_rate: '', technicians: '1', parts_lead_days: '1', billing: 'stripe', trialDays: '30', billing_start_date: new Date().toISOString().slice(0,10) });
+    { name: '', legal_name: '', email: '', address: '', phone: '', owner_name: '', owner_phone: '', nzbn: '', years_in_trade: '', labour_rate: '', technicians: '1', parts_lead_days: '1', billing: 'half3months', tier: 'pro', trialDays: '30', billing_start_date: new Date().toISOString().slice(0,10) });
   const [onbBusy, setOnbBusy] = useState(false);
   const [onbMsg, setOnbMsg] = useState<string | null>(null);
   const onboardMechanic = async () => {
@@ -46,7 +47,7 @@ export const AdminPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) => {
       setOnbMsg(d.activated
         ? `✓ ${onb.name} onboarded with complimentary access — live now. Login link emailed.`
         : `✓ ${onb.name} onboarded. Subscription activation link emailed${onb.billing === 'trial' ? ` (${onb.trialDays}-day free trial)` : ''} — they go live once payment is set up.`);
-      setOnb({ name: '', legal_name: '', email: '', address: '', phone: '', owner_name: '', owner_phone: '', nzbn: '', years_in_trade: '', labour_rate: '', technicians: '1', parts_lead_days: '1', billing: 'stripe', trialDays: '30', billing_start_date: new Date().toISOString().slice(0,10) });
+      setOnb({ name: '', legal_name: '', email: '', address: '', phone: '', owner_name: '', owner_phone: '', nzbn: '', years_in_trade: '', labour_rate: '', technicians: '1', parts_lead_days: '1', billing: 'half3months', tier: 'pro', trialDays: '30', billing_start_date: new Date().toISOString().slice(0,10) });
       await loadAll(key);
     } catch {
       setOnbMsg('Could not connect.');
@@ -374,18 +375,19 @@ export const AdminPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) => {
     writePara(`Platform Provider: Torqued NZ Limited ("Torqued"), a New Zealand company operating the Torqued mechanic marketplace platform.`);
     writePara(`Workshop: ${workshopName}, trading as ${p.name || workshopName}, located at ${address}${p.nzbn ? `, NZBN: ${p.nzbn}` : ''} ("Workshop").`);
 
-    writeSection('SERVICES & COMMISSION');
+    writeSection('SERVICES & FEES');
     writePara(`1.1 Torqued provides an online platform connecting vehicle owners with independent automotive workshops for the purpose of quoting, booking, and managing vehicle repair and maintenance services.`);
     writePara(`1.2 The Workshop agrees to use the Torqued platform to receive job requests, submit quotes, and communicate with customers. Torqued will facilitate payments and handle customer-facing communications on behalf of the Workshop.`);
-    writePara(`1.3 Commission: Torqued retains a 4% commission on the value of each completed job (excluding GST) as a platform facilitation fee. Remaining funds are disbursed to the Workshop's nominated bank account within 2 business days of job completion and customer payment confirmation.`);
+    writePara(`1.3 No Commission: Torqued charges no commission or per-job fee on any job, however it was booked (online, phone or walk-in). Customer payments collected through the platform are disbursed in full, less card processing fees only, to the Workshop's nominated bank account within 2 business days of job completion and customer payment confirmation.`);
 
     writeSection('SUBSCRIPTION');
-    writePara(`2.1 Workshop access to the Torqued platform is conditional on maintaining an active subscription. The current subscription plan is $99/month + GST, billed monthly.`);
+    const contractPlan = planById(p.subscription_tier) || planById('pro')!;
+    writePara(`2.1 Workshop access to the Torqued platform is conditional on maintaining an active subscription. The Workshop is on the ${contractPlan.name} plan at $${contractPlan.exGst}/month + GST, billed monthly (plans: Starter $89, Pro $149, Max $249 per month + GST; unlimited technicians, jobs and marketplace bookings on every plan). Under the launch offer the fee is discounted 50% for months 1-3 and 25% for months 4-6.`);
     writePara(`2.2 Torqued reserves the right to adjust subscription pricing with 30 days' written notice. Continued use of the platform after the notice period constitutes acceptance of the new pricing.`);
 
     writeSection('WORKSHOP OBLIGATIONS');
     writePara(`3.1 The Workshop agrees to: (a) maintain all applicable trade qualifications, certifications, and licences required to perform automotive services in New Zealand; (b) hold current public liability insurance of no less than $1,000,000 NZD; (c) respond to quote requests within 24 business hours; (d) perform all services to the standard of a competent automotive professional; (e) honour all quotes accepted by customers within the agreed timeframe.`);
-    writePara(`3.2 The Workshop must not solicit customers sourced through the Torqued platform for direct bookings that circumvent the Torqued commission structure for a period of 12 months following the last Torqued-facilitated interaction.`);
+    writePara(`3.2 Data ownership: The Workshop owns its customer, vehicle, job and invoice data, including data imported from other software. Torqued holds it on the Workshop's behalf under section 11 of the Privacy Act 2020, will export it in CSV on request and for 30 days after cancellation, and targets 99.5% monthly uptime with daily backups.`);
 
     writeSection('PLATFORM RULES');
     writePara(`4.1 The Workshop must not misrepresent their qualifications, capacity, or service offerings on the platform.`);
@@ -605,10 +607,10 @@ export const AdminPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) => {
           <>
             <h2 className="text-2xl font-black uppercase tracking-tight text-foreground">Revenue</h2>
             <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-              <Stat label="Subscription income" value={`$${overview.subscriptionRevenue?.toFixed(2)}`} accent />
-              <Stat label="Commission (4%)" value={`$${overview.commission?.toFixed(2)}`} accent />
-              <Stat label="Refunds" value={`-$${overview.refunds?.toFixed(2)}`} />
-              <Stat label="Net revenue" value={`$${overview.netRevenue?.toFixed(2)}`} accent />
+              <Stat label="Monthly subscriptions (ex GST)" value={`$${overview.subscriptionRevenue?.toFixed(2)}`} accent />
+              <Stat label="Starter · Pro · Max" value={overview.subscriptionsByTier ? `${overview.subscriptionsByTier.starter} · ${overview.subscriptionsByTier.pro} · ${overview.subscriptionsByTier.max}` : '—'} />
+              <Stat label="Customer refunds (workshop-funded)" value={`$${overview.refunds?.toFixed(2)}`} />
+              <Stat label="Net revenue (subscriptions only)" value={`$${overview.netRevenue?.toFixed(2)}`} accent />
             </div>
             <h2 className="text-2xl font-black uppercase tracking-tight text-foreground pt-2">Platform</h2>
             <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
@@ -651,7 +653,7 @@ export const AdminPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) => {
               <div key={p.id} className="bg-card border border-border rounded-2xl p-4 flex items-center justify-between gap-4 text-sm">
                 <div className="flex-1 min-w-0">
                   <p className="font-bold text-foreground">{p.name} <span className="text-[10px] uppercase bg-muted/10 px-1.5 py-0.5 rounded ml-1 text-muted">{p.role}</span></p>
-                  <p className="text-xs text-muted">{p.email} {p.phone ? `· ${p.phone}` : ''}{p.role === 'mechanic' ? ` · ${p.subscription_active ? 'active' : 'suspended'}` : ''}</p>
+                  <p className="text-xs text-muted">{p.email} {p.phone ? `· ${p.phone}` : ''}{p.role === 'mechanic' ? ` · ${p.subscription_active ? 'active' : 'suspended'}${planById(p.subscription_tier) ? ` · ${planById(p.subscription_tier)!.name}` : ''}` : ''}</p>
                 </div>
                 <div className="flex gap-2 shrink-0">
                   {p.role === 'mechanic' && <Button size="sm" className="bg-torqued-red text-white text-[10px]" onClick={() => viewMechanic(p.id)}>View / Edit</Button>}
@@ -738,12 +740,19 @@ export const AdminPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) => {
               </div>
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5 pt-1">
                 <div>
-                  <label className="text-[10px] font-black uppercase tracking-widest text-muted">Billing Plan</label>
+                  <label className="text-[10px] font-black uppercase tracking-widest text-muted">Plan</label>
+                  <select value={onb.tier} onChange={e => setOnb(o => ({ ...o, tier: e.target.value }))}
+                    className="w-full bg-background border border-border rounded-xl px-3 h-11 text-sm text-foreground focus:outline-none focus:border-torqued-red">
+                    {PLANS.map(pl => <option key={pl.id} value={pl.id}>{pl.name} — ${pl.exGst}/mo + GST</option>)}
+                  </select>
+                </div>
+                <div>
+                  <label className="text-[10px] font-black uppercase tracking-widest text-muted">Billing</label>
                   <select value={onb.billing} onChange={e => setOnb(o => ({ ...o, billing: e.target.value }))}
                     className="w-full bg-background border border-border rounded-xl px-3 h-11 text-sm text-foreground focus:outline-none focus:border-torqued-red">
-                    <option value="stripe">$99/mo — email Stripe activation link</option>
-                    <option value="half3months">50% off first 3 months ($49.50/mo) — Stripe link</option>
-                    <option value="trial">Free trial then $99/mo — Stripe link</option>
+                    <option value="half3months">Launch offer — 50% off m1–3, 25% off m4–6 (Stripe link)</option>
+                    <option value="stripe">Full price — email Stripe activation link</option>
+                    <option value="trial">Free trial then full price — Stripe link</option>
                     <option value="comp">Complimentary (free, live now)</option>
                   </select>
                 </div>
@@ -816,10 +825,11 @@ export const AdminPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) => {
                 const r = await fetch(`/api/admin/weekly-report?key=${encodeURIComponent(key)}`);
                 const d = await r.json();
                 const rows = d.rows || [];
-                const header = 'Mechanic,Jobs,Gross,Commission (4%),Payout\n';
-                const body = rows.map((x: any) => `"${(x.name || '').replace(/"/g, '""')}",${x.jobs},${x.gross},${x.commission},${x.payout}`).join('\n');
-                const totals = rows.reduce((a: any, x: any) => ({ jobs: a.jobs + x.jobs, gross: a.gross + x.gross, commission: a.commission + x.commission, payout: a.payout + x.payout }), { jobs: 0, gross: 0, commission: 0, payout: 0 });
-                const csv = header + body + `\n"TOTAL",${totals.jobs},${totals.gross.toFixed(2)},${totals.commission.toFixed(2)},${totals.payout.toFixed(2)}`;
+                // No commission: payout = gross (subscription-only model)
+                const header = 'Mechanic,Jobs,Gross,Payout\n';
+                const body = rows.map((x: any) => `"${(x.name || '').replace(/"/g, '""')}",${x.jobs},${x.gross},${x.payout}`).join('\n');
+                const totals = rows.reduce((a: any, x: any) => ({ jobs: a.jobs + x.jobs, gross: a.gross + x.gross, payout: a.payout + x.payout }), { jobs: 0, gross: 0, payout: 0 });
+                const csv = header + body + `\n"TOTAL",${totals.jobs},${totals.gross.toFixed(2)},${totals.payout.toFixed(2)}`;
                 const blob = new Blob([csv], { type: 'text/csv' });
                 const url = URL.createObjectURL(blob);
                 const a = document.createElement('a'); a.href = url;
@@ -1167,7 +1177,7 @@ export const AdminPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) => {
                   <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 text-center">
                     <div className="bg-background rounded-xl p-3 border border-border"><p className="text-[9px] uppercase font-black text-muted">Jobs</p><p className="text-lg font-black text-foreground">{rev.jobs}</p></div>
                     <div className="bg-background rounded-xl p-3 border border-border"><p className="text-[9px] uppercase font-black text-muted">Gross</p><p className="text-lg font-black text-foreground">${rev.gross}</p></div>
-                    <div className="bg-background rounded-xl p-3 border border-border"><p className="text-[9px] uppercase font-black text-muted">Commission</p><p className="text-lg font-black text-torqued-red">${rev.commission}</p></div>
+                    <div className="bg-background rounded-xl p-3 border border-border"><p className="text-[9px] uppercase font-black text-muted">Plan</p><p className="text-lg font-black text-torqued-red">{planById(mechDetail?.profile?.subscription_tier)?.name || '—'}</p></div>
                     <div className="bg-background rounded-xl p-3 border border-border"><p className="text-[9px] uppercase font-black text-muted">Payout</p><p className="text-lg font-black text-emerald-600">${rev.payout}</p></div>
                   </div>
 
