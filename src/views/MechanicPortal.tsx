@@ -743,13 +743,15 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
   };
   // Quotes = every phone/walk-in quote, plus online requests that need or have a quote.
   const isQuoteRow = (r: any) => {
+    if (r?.is_cold_quote && r.status === 'cancelled' && r.quote_items?.meta?.cancelledBy === 'customer') return true;   // keep for the record / refund
     if (!r || ['cancelled', 'declined', 'pending_payment'].includes(r.status)) return false;
     if (r.is_cold_quote) return true;
     if (isJobRow(r)) return quoteHasPrices(r) || !!r.quote_items?.meta?.quoteStatus;
     return r.status === 'quoted' || isDiagRow(r) || quoteHasPrices(r) || !!r.quote_items?.draft;
   };
-  type QuoteStatus = 'needs_quote' | 'draft' | 'saved' | 'not_sent' | 'sent' | 'booked' | 'paid';
+  type QuoteStatus = 'needs_quote' | 'draft' | 'saved' | 'not_sent' | 'sent' | 'booked' | 'paid' | 'cancelled';
   const quoteStatusOf = (row: any): QuoteStatus => {
+    if (row?.status === 'cancelled') return 'cancelled';
     if (row?.payment_status === 'confirmed' && (row?.is_cold_quote || isJobRow(row))) return 'paid';
     if (isJobRow(row)) return 'booked';
     const st = row?.quote_items?.meta?.quoteStatus;
@@ -766,6 +768,7 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
     sent:        { label: 'Emailed',           cls: 'bg-blue-500/15 text-blue-600 border-blue-500/30' },
     booked:      { label: 'Booked · in My Jobs', cls: 'bg-violet-500/15 text-violet-600 border-violet-500/30' },
     paid:        { label: 'Paid · in My Jobs', cls: 'bg-emerald-500/15 text-emerald-600 border-emerald-500/30' },
+    cancelled:   { label: 'Cancelled by customer', cls: 'bg-torqued-red/10 text-torqued-red border-torqued-red/30' },
   };
   // ── Payments (phone/walk-in ledger; online bookings are prepaid via Torqued) ──
   const PAY_METHOD_LABEL: Record<string, string> = { cash: 'Cash', eftpos: 'EFTPOS', bank_transfer: 'Bank transfer', internal: 'Internal / account', other: 'Other', torqued_online: 'Online via Torqued' };
@@ -3902,8 +3905,9 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
   const [quotesFilter, setQuotesFilter] = useState<'open' | 'needs' | 'draft' | 'not_sent' | 'sent' | 'booked' | 'all'>('open');
   const [quotesChannel, setQuotesChannel] = useState<'all' | 'online' | 'phone' | 'walk_in'>('all');
   const [quoteRowBusy, setQuoteRowBusy] = useState<string | null>(null);
-  const quoteFilterMatch = (f: typeof quotesFilter, st: QuoteStatus) =>
+  const quoteFilterMatch = (f: typeof quotesFilter, st: QuoteStatus, r?: any) =>
     f === 'all' ? true
+    : st === 'cancelled' ? f === 'open' && !!r?.quote_items?.meta?.refundOwed   // cancelled with money to refund stays in Open
     : f === 'open' ? st !== 'booked' && st !== 'paid'
     : f === 'needs' ? st === 'needs_quote'
     : f === 'draft' ? st === 'draft' || st === 'saved'
@@ -3915,9 +3919,9 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
   const renderQuotes = () => {
     const rows = allJobRows.filter(isQuoteRow).sort((a: any, b: any) => new Date(b.created_at || 0).getTime() - new Date(a.created_at || 0).getTime());
     const inChannel = rows.filter((r: any) => channelMatch(quotesChannel, r));
-    const filtered = inChannel.filter((r: any) => quoteFilterMatch(quotesFilter, quoteStatusOf(r)));
-    const count = (f: typeof quotesFilter) => inChannel.filter((r: any) => quoteFilterMatch(f, quoteStatusOf(r))).length;
-    const chCount = (c: typeof quotesChannel) => rows.filter((r: any) => channelMatch(c, r) && quoteFilterMatch(quotesFilter, quoteStatusOf(r))).length;
+    const filtered = inChannel.filter((r: any) => quoteFilterMatch(quotesFilter, quoteStatusOf(r), r));
+    const count = (f: typeof quotesFilter) => inChannel.filter((r: any) => quoteFilterMatch(f, quoteStatusOf(r), r)).length;
+    const chCount = (c: typeof quotesChannel) => rows.filter((r: any) => channelMatch(c, r) && quoteFilterMatch(quotesFilter, quoteStatusOf(r), r)).length;
     const itemsOf = (r: any) => {
       const { meta: _m, draft: _d, ...live } = r.quote_items || {};
       return hasLiveItems(live) ? live : (r.quote_items?.draft?.items || live);
@@ -3997,6 +4001,8 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                   </p>
                   {r.description && <p className="text-xs text-muted italic line-clamp-2">&ldquo;{String(r.description).replace(/^\[EV Quote Request\]\s*/, '')}&rdquo;</p>}
                   {st === 'not_sent' && meta.sendError && <p className="text-xs font-semibold text-amber-600">{meta.sendError}</p>}
+                  {st === 'cancelled' && <p className="text-xs font-semibold text-torqued-red">Cancelled by the customer {meta.cancelledAt ? new Date(meta.cancelledAt).toLocaleDateString('en-NZ') : ''}{meta.cancelledDate ? ` (was booked ${when(meta.cancelledDate)})` : ''}{meta.refundOwed ? ` — ${formatCurrency(meta.refundOwed)} paid; arrange a refund` : ''}.</p>}
+                  {meta.rescheduledBy === 'customer' && st !== 'cancelled' && <p className="text-xs font-semibold text-blue-600">Customer moved their drop-off{meta.previousDate ? ` (was ${when(meta.previousDate)})` : ''}.</p>}
                   {r.is_cold_quote && (ps.paid > 0 || ps.terms.require === 'deposit') && (
                     <p className="text-xs"><span className="font-semibold text-emerald-600">{ps.paid > 0 ? `${formatCurrency(ps.paid)} paid` : 'No deposit yet'}</span>
                       <span className="text-muted">{ps.depositOutstanding > 0 ? ` · deposit ${formatCurrency(ps.depositOutstanding)} to collect` : ''}{ps.paid > 0 && ps.balance > 0 ? ` · balance ${formatCurrency(ps.balance)}` : ''}</span></p>
@@ -4010,8 +4016,8 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
               <div className="flex flex-wrap gap-2">
                 <Button size="sm" disabled={busy} className="bg-torqued-red text-white" onClick={() => openQuoteEditor(rowToJobShape(r), r)}>{st === 'needs_quote' ? 'Write quote' : st === 'draft' ? 'Continue draft' : 'Open quote'}</Button>
                 <Button size="sm" variant="outline" disabled={busy || !(total > 0)} className="text-foreground border-border hover:bg-background" onClick={() => downloadRow(r)}>{busy ? 'Working…' : 'Download PDF'}</Button>
-                {!booked && <Button size="sm" variant="outline" disabled={busy || !email || !(total > 0)} title={!email ? 'No email address on file' : undefined} className="text-foreground border-border hover:bg-background" onClick={() => emailRow(r)}>{st === 'sent' ? 'Re-send email' : 'Email quote'}</Button>}
-                {r.is_cold_quote && st !== 'paid' && <Button size="sm" variant="outline" disabled={busy} className="text-foreground border-border hover:bg-background" onClick={() => openPayModal(r, ps.depositOutstanding > 0 ? 'deposit' : 'credit')}>+ Deposit / credit</Button>}
+                {!booked && st !== 'cancelled' && <Button size="sm" variant="outline" disabled={busy || !email || !(total > 0)} title={!email ? 'No email address on file' : undefined} className="text-foreground border-border hover:bg-background" onClick={() => emailRow(r)}>{st === 'sent' ? 'Re-send email' : 'Email quote'}</Button>}
+                {r.is_cold_quote && st !== 'paid' && st !== 'cancelled' && <Button size="sm" variant="outline" disabled={busy} className="text-foreground border-border hover:bg-background" onClick={() => openPayModal(r, ps.depositOutstanding > 0 ? 'deposit' : 'credit')}>+ Deposit / credit</Button>}
                 {!r.is_cold_quote && isDiagRow(r) && incomingJobs.some(j => j.id === r.id) && <Button size="sm" variant="outline" className="text-foreground border-border hover:bg-background" onClick={() => setSelectedJobId(r.id)}>Diagnostic report</Button>}
                 {booked && <Button size="sm" variant="outline" className="text-foreground border-border hover:bg-background" onClick={() => { setActiveTab('jobs'); setJobsSubtab(r.status === 'completed' ? 'history' : paymentFlag(r) ? 'payments' : 'upcoming'); }}>View in My Jobs</Button>}
               </div>

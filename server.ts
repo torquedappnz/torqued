@@ -772,9 +772,11 @@ app.get('/api/quote/:bookingId', async (req, res) => {
     const { data: b } = await supabase.from('bookings').select('*').eq('id', req.params.bookingId).single();
     if (!b) return res.status(404).json({ error: 'Quote not found' });
     const ctx = await getBookingContext(b.id);
+    const { data: shop } = b.mechanic_id ? await supabase.from('profiles').select('address, phone').eq('id', b.mechanic_id).maybeSingle() : { data: null };
     res.json({
       id: b.id, rego: b.vehicle_rego, vehicleLabel: ctx.vehicleLabel, customerName: ctx.custName,
-      mechanicName: ctx.mechanicName, serviceIds: b.service_ids || [],
+      mechanicName: ctx.mechanicName, mechanicAddress: shop?.address || '', mechanicPhone: shop?.phone || '',
+      serviceIds: b.service_ids || [],
       quotedPrice: b.quoted_price != null ? Number(b.quoted_price) : null,
       total: b.quoted_price != null ? Number(b.quoted_price) : (Number(b.total_price) || 0),
       note: b.quote_note || '', status: b.status, paymentStatus: b.payment_status, date: b.date,
@@ -3031,6 +3033,7 @@ app.post('/api/mechanic/schedule-quote', async (req, res) => {
     let estimatedReady: string | null = null;
     try { const { hoursOn } = await workshopCalendar(supabase, row.mechanic_id); estimatedReady = estimateReady(String(date).slice(0, 16), Number(row.quote_items?.labourHours) || 0, hoursOn); } catch {}
     await mergeQuoteMeta(supabase, row.id, { scheduledAt: new Date().toISOString(), bookedBy: 'mechanic', estimatedReady });
+    await emailsWithin(6000, sendQuoteBookedEmail(supabase, row.id, !!row.quote_items?.meta?.scheduledAt));
     const { data: fresh } = await supabase.from('bookings').select('*').eq('id', row.id).maybeSingle();
     res.json({ success: true, row: fresh });
   } catch (err) {
@@ -3126,6 +3129,7 @@ async function applyQuoteCheckout(supabase: any, session: any) {
   if (session.customer_details?.phone && !row.customer_phone) update.customer_phone = session.customer_details.phone;
   await supabase.from('bookings').update(update).eq('id', bookingId);
   await mergeQuoteMeta(supabase, bookingId, patch);
+  if (patch.scheduledAt) await sendQuoteBookedEmail(supabase, bookingId);
   if (row.is_cold_quote) await syncPaymentColumns(supabase, bookingId);
   else await supabase.from('bookings').update({ payment_status: 'confirmed' }).eq('id', bookingId);
 }
@@ -3225,6 +3229,108 @@ app.get('/api/quote/:bookingId/slots', async (req, res) => {
   }
 });
 
+// Booking confirmation for a quote booked in (by the customer or the workshop), with
+// Reschedule / Cancel buttons back to the quote link. Best-effort: never throws.
+function quoteBookedEmailHtml(o: { custName: string; vehicleLabel: string; mechanicName: string; address: string; phone: string; bookingId: string; date: string; ready: string | null; rescheduled?: boolean }) {
+  const fmtDay = (iso: string) => new Date(`${iso.slice(0, 10)}T00:00:00Z`).toLocaleDateString('en-NZ', { timeZone: 'UTC', weekday: 'long', day: 'numeric', month: 'long' });
+  const fmtTime = (iso: string) => { const [h, m] = iso.slice(11, 16).split(':').map(Number); return `${((h + 11) % 12) + 1}:${String(m).padStart(2, '0')} ${h < 12 ? 'am' : 'pm'}`; };
+  const readyTxt = o.ready ? (o.ready.slice(0, 10) === o.date.slice(0, 10) ? fmtTime(o.ready) : `${fmtTime(o.ready)}, ${fmtDay(o.ready)}`) : '';
+  const base = `https://torqued.site/customer?quote=${encodeURIComponent(o.bookingId)}`;
+  const btn = (href: string, label: string, primary: boolean) => `<a href="${href}" style="display:inline-block;margin:0 8px 8px 0;background:${primary ? EMAIL_RED : '#ffffff'};color:${primary ? '#ffffff' : EMAIL_DARK};border:2px solid ${primary ? EMAIL_RED : '#e2e0dc'};font-family:${EMAIL_TITLE_FONT};font-weight:900;text-transform:uppercase;font-size:12px;letter-spacing:1px;text-decoration:none;padding:12px 22px;border-radius:12px;">${label}</a>`;
+  const row = (k: string, v: string) => v ? `<tr><td style="padding:6px 0;font-family:${EMAIL_BODY_FONT};font-size:13px;color:${EMAIL_MUTED};width:120px;vertical-align:top;">${k}</td><td style="padding:6px 0;font-family:${EMAIL_BODY_FONT};font-size:14px;color:${EMAIL_DARK};font-weight:600;">${v}</td></tr>` : '';
+  return emailWrap(`<tr><td style="padding:36px 32px;">
+${emailTitle(o.rescheduled ? 'Your booking has moved' : "You're booked in")}
+${emailGreeting(o.custName)}
+${emailPara(`${o.rescheduled ? 'Your new drop-off' : 'Your drop-off'} for your <strong>${o.vehicleLabel || 'vehicle'}</strong>${o.mechanicName ? ` with ${o.mechanicName}` : ''} is confirmed.`)}
+<table cellpadding="0" cellspacing="0" style="width:100%;margin:0 0 20px;padding:14px 16px;background:#f7f7f9;border-radius:12px;">
+${row('Drop-off', `${fmtDay(o.date)} at ${fmtTime(o.date)}`)}
+${row('Estimated ready', readyTxt)}
+${row('Workshop', o.mechanicName)}
+${row('Address', o.address)}
+${row('Phone', o.phone ? `<a href="tel:${o.phone.replace(/[^\d+]/g, '')}" style="color:${EMAIL_DARK};">${o.phone}</a>` : '')}
+</table>
+${emailPara('Need a different time, or can\'t make it?')}
+<div style="margin:0 0 16px;">${btn(`${base}&manage=reschedule`, 'Reschedule', true)}${btn(`${base}&manage=cancel`, 'Cancel booking', false)}</div>
+${emailPara(`<span style="color:#999;">Kind regards,<br/>The Torqued team</span>`)}
+</td></tr>`);
+}
+async function sendQuoteBookedEmail(supabase: any, bookingId: string, rescheduled = false) {
+  try {
+    const { data: row } = await supabase.from('bookings').select('date, mechanic_id, quote_items').eq('id', bookingId).maybeSingle();
+    if (!row?.date) return;
+    const ctx = await getBookingContext(bookingId);
+    const transporter = getMailTransporter();
+    if (!ctx.email || !transporter) return;
+    const { data: shop } = await supabase.from('profiles').select('address, phone').eq('id', row.mechanic_id).maybeSingle();
+    const html = quoteBookedEmailHtml({
+      custName: ctx.custName, vehicleLabel: ctx.vehicleLabel, mechanicName: ctx.mechanicName, address: shop?.address || '', phone: shop?.phone || '',
+      bookingId, date: String(row.date).slice(0, 16), ready: row.quote_items?.meta?.estimatedReady || null, rescheduled,
+    });
+    await transporter.sendMail({
+      from: process.env.SMTP_FROM || '"Torqued" <torquedapp.nz@gmail.com>', to: ctx.email,
+      subject: rescheduled ? `New drop-off time for your ${ctx.vehicleLabel || 'vehicle'}` : `You're booked in — ${ctx.vehicleLabel || 'your vehicle'}`,
+      html,
+    });
+  } catch (e: any) { console.warn('[quote-booked-email]', e?.message); }
+}
+// Emails must never hold up the customer's booking: run them together, give up after a few seconds.
+const emailsWithin = (ms: number, ...jobs: Promise<any>[]) => Promise.race([Promise.allSettled(jobs), new Promise(r => setTimeout(r, ms))]);
+// Let the workshop know when a customer moves or cancels.
+async function notifyWorkshopOfChange(supabase: any, bookingId: string, what: string) {
+  try {
+    const ctx = await getBookingContext(bookingId);
+    const transporter = getMailTransporter();
+    if (!ctx.mechanicEmail || !transporter) return;
+    await transporter.sendMail({
+      from: process.env.SMTP_FROM || '"Torqued" <torquedapp.nz@gmail.com>', to: ctx.mechanicEmail,
+      subject: `${ctx.custName || 'A customer'} ${what} — ${ctx.vehicleLabel || bookingId}`,
+      html: emailWrap(`<tr><td style="padding:36px 32px;">${emailTitle('Booking change')}${emailPara(`<strong>${ctx.custName || 'Your customer'}</strong> ${what} for their <strong>${ctx.vehicleLabel || 'vehicle'}</strong> (ref ${bookingId}). It's updated in your diary and My Jobs.`)}</td></tr>`),
+    });
+  } catch (e: any) { console.warn('[workshop-change-email]', e?.message); }
+}
+
+// POST /api/quote/:bookingId/reschedule — the customer moves their drop-off (from the email or quote link).
+app.post('/api/quote/:bookingId/reschedule', async (req, res) => {
+  try {
+    const supabase = getSupabaseAdmin();
+    if (!supabase) return res.status(500).json({ error: 'Database not configured' });
+    const { data: row } = await supabase.from('bookings').select('*').eq('id', req.params.bookingId).maybeSingle();
+    if (!row) return res.status(404).json({ error: 'Booking not found' });
+    if (!quoteCustomerTerms(row).canManage) return res.status(400).json({ error: 'This booking can no longer be changed online — please call the workshop.' });
+    const d = String(req.body.date || '').slice(0, 16);
+    const { hoursOn } = await workshopCalendar(supabase, row.mechanic_id);
+    if (!validDropoff(d, hoursOn)) return res.status(400).json({ error: 'Choose one of the available drop-off times.' });
+    const estimatedReady = estimateReady(d, Number(row.quote_items?.labourHours) || 0, hoursOn);
+    await supabase.from('bookings').update({ date: d }).eq('id', row.id);
+    await mergeQuoteMeta(supabase, row.id, { estimatedReady, rescheduledAt: new Date().toISOString(), rescheduledBy: 'customer', previousDate: row.date });
+    await emailsWithin(6000, sendQuoteBookedEmail(supabase, row.id, true), notifyWorkshopOfChange(supabase, row.id, `moved their drop-off to ${d.replace('T', ' ')}`));
+    res.json({ success: true, date: d, estimatedReady });
+  } catch (err) {
+    console.error('[quote/reschedule]', err);
+    res.status(500).json({ error: 'Could not reschedule' });
+  }
+});
+
+// POST /api/quote/:bookingId/cancel — the customer cancels their booked drop-off. Any
+// deposit isn't auto-refunded: it's flagged for the workshop to settle with them.
+app.post('/api/quote/:bookingId/cancel', async (req, res) => {
+  try {
+    const supabase = getSupabaseAdmin();
+    if (!supabase) return res.status(500).json({ error: 'Database not configured' });
+    const { data: row } = await supabase.from('bookings').select('*').eq('id', req.params.bookingId).maybeSingle();
+    if (!row) return res.status(404).json({ error: 'Booking not found' });
+    if (!quoteCustomerTerms(row).canManage) return res.status(400).json({ error: 'This booking can no longer be cancelled online — please call the workshop.' });
+    const paid = paymentSummary(row).paid;
+    await supabase.from('bookings').update({ status: 'cancelled' }).eq('id', row.id);
+    await mergeQuoteMeta(supabase, row.id, { cancelledAt: new Date().toISOString(), cancelledBy: 'customer', cancelledDate: row.date, refundOwed: paid > 0 ? paid : null });
+    await emailsWithin(6000, notifyWorkshopOfChange(supabase, row.id, `cancelled their booking${paid > 0 ? ` ($${paid.toFixed(2)} already paid — please arrange a refund)` : ''}`));
+    res.json({ success: true, paid });
+  } catch (err) {
+    console.error('[quote/cancel]', err);
+    res.status(500).json({ error: 'Could not cancel' });
+  }
+});
+
 // Itemised lines for the customer's quote page.
 function quoteLinesOf(qi: any) {
   if (!qi || typeof qi !== 'object') return [];
@@ -3243,9 +3349,14 @@ function quoteLinesOf(qi: any) {
 function quoteCustomerTerms(row: any) {
   const meta = row?.quote_items?.meta || {};
   const s = paymentSummary(row);
-  const scheduled = !!meta.scheduledAt || ['accepted', 'in_progress', 'completed'].includes(row?.status);
-  const allowBooking = !!row?.is_cold_quote && !!meta.allowOnlineBooking && !scheduled && s.total > 0;
+  const cancelled = row?.status === 'cancelled';
+  const scheduled = !cancelled && (!!meta.scheduledAt || ['accepted', 'in_progress', 'completed'].includes(row?.status));
+  const allowBooking = !cancelled && !!row?.is_cold_quote && !!meta.allowOnlineBooking && !scheduled && s.total > 0;
+  // The customer can move or cancel a booked drop-off until work starts (and not on the day).
+  const canManage = scheduled && !!row?.is_cold_quote && !['in_progress', 'completed'].includes(row?.status)
+    && !!row?.date && String(row.date).slice(0, 10) > nzTodayIso();
   return {
+    cancelled, canManage,
     isManual: !!row?.is_cold_quote, paymentRequirement: s.terms.require || 'none',
     depositRequired: s.depositRequired, depositOutstanding: Math.min(s.depositOutstanding, s.balance),
     paid: s.paid, balance: s.balance, allowBooking, scheduled,
@@ -3323,6 +3434,7 @@ app.post('/api/quote/:bookingId/book', async (req, res) => {
     const estimatedReady = estimateReady(d, Number(row.quote_items?.labourHours) || 0, hoursOn);
     await supabase.from('bookings').update({ date: d, status: 'accepted' }).eq('id', row.id);
     await mergeQuoteMeta(supabase, row.id, { scheduledAt: new Date().toISOString(), bookedBy: 'customer', estimatedReady });
+    await emailsWithin(6000, sendQuoteBookedEmail(supabase, row.id));
     res.json({ success: true, date: d, estimatedReady });
   } catch (err) {
     console.error('[quote/book]', err);

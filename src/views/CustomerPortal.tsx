@@ -1392,14 +1392,19 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
   const [quoteSlots, setQuoteSlots] = useState<{ days: { date: string; open: string; close: string; times: string[] }[]; ready: Record<string, string | null>; labourHours: number } | null>(null);
   const [quoteSlotsErr, setQuoteSlotsErr] = useState(false);
   const [quoteDay, setQuoteDay] = useState('');
+  const [quoteManage, setQuoteManage] = useState<'' | 'reschedule' | 'cancel'>(() => {
+    const m = new URLSearchParams(window.location.search).get('manage');
+    return m === 'reschedule' || m === 'cancel' ? m : '';
+  });
   // Drop-off days/times for quotes the customer can book themselves.
   useEffect(() => {
-    if (!quoteReview?.id || !quoteReview.allowBooking) return;
+    if (!quoteReview?.id || !(quoteReview.allowBooking || (quoteReview.canManage && quoteManage === 'reschedule'))) return;
+    if (quoteSlots) return;
     setQuoteSlotsErr(false);
     fetch(`/api/quote/${encodeURIComponent(quoteReview.id)}/slots`).then(r => r.ok ? r.json() : Promise.reject())
       .then(d => { setQuoteSlots(d); if (d.days?.[0]) setQuoteDay(cur => cur || d.days[0].date); })
       .catch(() => setQuoteSlotsErr(true));
-  }, [quoteReview?.id, quoteReview?.allowBooking]);
+  }, [quoteReview?.id, quoteReview?.allowBooking, quoteReview?.canManage, quoteManage]);
   const [quoteOnlyMode, setQuoteOnlyMode] = useState(() => !!new URLSearchParams(window.location.search).get('quote'));
 
   // Direct-booking link (?book=<mechanicId>) — a mechanic's own shareable link.
@@ -1494,7 +1499,7 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
   };
   const renderDropoffPicker = () => {
     const q = quoteReview;
-    if (!q?.allowBooking) return null;
+    if (!q?.allowBooking && !(q?.canManage && quoteManage === 'reschedule')) return null;
     if (quoteSlotsErr) return <p className="text-sm text-muted text-center">Couldn't load drop-off times — please refresh, or call the workshop to book.</p>;
     if (!quoteSlots) return <p className="text-sm text-muted text-center">Loading available times…</p>;
     if (!quoteSlots.days.length) return <p className="text-sm text-muted text-center">No online times are open right now — please call the workshop to book.</p>;
@@ -1512,7 +1517,7 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
     return (
       <div className="space-y-5">
         <div className="space-y-2">
-          <p className="text-sm font-bold text-foreground">1. Pick a drop-off day</p>
+          <p className="text-sm font-bold text-foreground">1. Pick a {q.allowBooking ? '' : 'new '}drop-off day</p>
           <div className="flex gap-2 overflow-x-auto pb-1 -mx-1 px-1 snap-x" role="radiogroup" aria-label="Drop-off day">
             {quoteSlots.days.map(d => {
               const dp = dayParts(d.date); const on = d.date === day.date;
@@ -1536,7 +1541,7 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
           </div>
         </div>
         {quoteDate && (
-          <div className="rounded-2xl border border-emerald-500/30 bg-emerald-500/10 p-4 space-y-3" aria-live="polite">
+          <div className="rounded-2xl border border-emerald-500/30 bg-emerald-500/10 p-4" aria-live="polite">
             <div className="grid grid-cols-2 gap-3">
               <div>
                 <p className="text-[11px] font-semibold uppercase tracking-wide text-muted">Drop off</p>
@@ -1551,7 +1556,6 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                 </>) : <p className="text-sm text-muted">—</p>}
               </div>
             </div>
-            <p className="text-xs text-muted">Based on {quoteSlots.labourHours > 0 ? `${quoteSlots.labourHours} hr${quoteSlots.labourHours === 1 ? '' : 's'} of work` : 'the work quoted'} plus time to test and tidy up. The workshop will let you know if anything changes.</p>
           </div>
         )}
       </div>
@@ -1568,8 +1572,15 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
       <div className="font-raleway space-y-6">
         <div className="space-y-2">
           <span className="torqued-badge text-[10px]">YOUR QUOTE IS READY</span>
+          {q.customerName && <p className="text-lg font-bold text-foreground pt-1">Kia Ora {String(q.customerName).trim().split(/\s+/)[0]},</p>}
           <h2 className="text-2xl sm:text-[28px] leading-tight font-bold tracking-tight normal-case">Let's get your {vehicle} sorted</h2>
-          {q.mechanicName && <p className="text-sm text-muted">Quote from {q.mechanicName}</p>}
+          {q.mechanicName && (
+            <div className="text-sm text-muted space-y-0.5">
+              <p>Quote from <span className="font-semibold text-foreground">{q.mechanicName}</span></p>
+              {q.mechanicAddress && <p>{q.mechanicAddress}</p>}
+              {q.mechanicPhone && <p><a href={`tel:${String(q.mechanicPhone).replace(/[^\d+]/g, '')}`} className="underline underline-offset-2 hover:text-foreground">{q.mechanicPhone}</a></p>}
+            </div>
+          )}
         </div>
 
         <div className="rounded-2xl border border-border bg-background p-4 space-y-2.5">
@@ -1596,16 +1607,94 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
           </div>
         </div>
 
-        {renderDropoffPicker()}
+        {q.allowBooking && renderDropoffPicker()}
+        {renderQuoteManage()}
         {renderQuoteActions()}
         <p className="text-xs text-muted text-center">Flexible payment options (incl. Afterpay, Klarna) at checkout.</p>
+      </div>
+    );
+  };
+  const [quoteManageBusy, setQuoteManageBusy] = useState(false);
+  const rescheduleQuote = async () => {
+    if (!quoteReview || !quoteDate) { setQuoteMsg('Pick a new drop-off day and time first.'); return; }
+    setQuoteManageBusy(true); setQuoteMsg(null);
+    try {
+      const r = await fetch(`/api/quote/${encodeURIComponent(quoteReview.id)}/reschedule`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ date: quoteDate }) });
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok) { setQuoteMsg(d.error || 'Could not reschedule.'); return; }
+      setQuoteReview((q: any) => ({ ...q, date: d.date, estimatedReady: d.estimatedReady || null, justBooked: false, justPaid: false, justMoved: true }));
+      setQuoteManage(''); setQuoteDate('');
+    } catch { setQuoteMsg('Could not reschedule — check your connection and try again.'); }
+    finally { setQuoteManageBusy(false); }
+  };
+  const cancelQuoteBooking = async () => {
+    if (!quoteReview) return;
+    setQuoteManageBusy(true); setQuoteMsg(null);
+    try {
+      const r = await fetch(`/api/quote/${encodeURIComponent(quoteReview.id)}/cancel`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok) { setQuoteMsg(d.error || 'Could not cancel.'); return; }
+      setQuoteReview((q: any) => ({ ...q, cancelled: true, scheduled: false, canManage: false, allowBooking: false, justBooked: false, justPaid: false, justMoved: false }));
+      setQuoteManage('');
+    } catch { setQuoteMsg('Could not cancel — check your connection and try again.'); }
+    finally { setQuoteManageBusy(false); }
+  };
+  // Booked drop-off: change it or cancel it (also where the email's buttons land).
+  const renderQuoteManage = () => {
+    const q = quoteReview;
+    if (!q) return null;
+    if (q.cancelled) return (
+      <div className="rounded-2xl border border-border bg-background p-4 text-center space-y-1">
+        <p className="font-bold text-foreground">This booking has been cancelled.</p>
+        <p className="text-sm text-muted">{q.paid > 0 ? `The workshop will be in touch about the $${Number(q.paid).toFixed(2)} you've paid.` : 'Changed your mind? Call the workshop to book again.'}</p>
+      </div>
+    );
+    if (!q.scheduled || !q.date) return null;
+    const card = (
+      <div className={cn('rounded-2xl border p-4 space-y-1', q.justBooked || q.justPaid || q.justMoved ? 'border-emerald-500/30 bg-emerald-500/10' : 'border-border bg-background')}>
+        {(q.justBooked || q.justPaid || q.justMoved) && <p className="font-bold text-emerald-600">{q.justPaid ? '✓ Payment received — thank you' : q.justMoved ? '✓ Your booking has moved' : "✓ You're booked in"}</p>}
+        <p className="text-sm text-foreground">Drop-off: <strong>{fmtQuoteWhen(q.date)}</strong></p>
+        {q.estimatedReady && <p className="text-sm text-foreground">Estimated ready: <strong>{fmtReady(q.estimatedReady, q.date)}</strong></p>}
+      </div>
+    );
+    if (!q.canManage) return card;
+    if (quoteManage === 'cancel') return (
+      <div className="space-y-3">
+        {card}
+        <div className="rounded-2xl border border-torqued-red/40 bg-torqued-red/5 p-4 space-y-3">
+          <p className="text-sm text-foreground font-semibold">Cancel this booking?</p>
+          {q.paid > 0 && <p className="text-sm text-muted">You've paid ${Number(q.paid).toFixed(2)}. The workshop will be in touch about it.</p>}
+          <div className="grid grid-cols-2 gap-2">
+            <Button variant="outline" className="border-border text-foreground" disabled={quoteManageBusy} onClick={() => setQuoteManage('')}>Keep booking</Button>
+            <Button className="bg-torqued-red text-white" disabled={quoteManageBusy} onClick={cancelQuoteBooking}>{quoteManageBusy ? 'Cancelling…' : 'Yes, cancel'}</Button>
+          </div>
+        </div>
+      </div>
+    );
+    if (quoteManage === 'reschedule') return (
+      <div className="space-y-4">
+        {card}
+        {renderDropoffPicker()}
+        <div className="grid grid-cols-2 gap-2">
+          <Button variant="outline" className="border-border text-foreground" disabled={quoteManageBusy} onClick={() => { setQuoteManage(''); setQuoteDate(''); setQuoteMsg(null); }}>Keep current time</Button>
+          <Button className="bg-torqued-red text-white" disabled={quoteManageBusy || !quoteDate} onClick={rescheduleQuote}>{quoteManageBusy ? 'Saving…' : 'Confirm new time'}</Button>
+        </div>
+      </div>
+    );
+    return (
+      <div className="space-y-2">
+        {card}
+        <div className="grid grid-cols-2 gap-2">
+          <Button variant="outline" className="border-border text-foreground" onClick={() => { setQuoteManage('reschedule'); setQuoteDate(''); setQuoteMsg(null); }}>Reschedule</Button>
+          <Button variant="outline" className="border-border text-foreground" onClick={() => { setQuoteManage('cancel'); setQuoteMsg(null); }}>Cancel booking</Button>
+        </div>
       </div>
     );
   };
   const fmtQuoteWhen = (d: any) => d ? new Date(d).toLocaleString('en-NZ', { weekday: 'long', day: 'numeric', month: 'long', hour: 'numeric', minute: '2-digit' }) : '';
   const renderQuoteActions = () => {
     const q = quoteReview;
-    if (!q) return null;
+    if (!q || q.cancelled || quoteManage) return quoteMsg ? <p className="text-sm text-torqued-red text-center font-semibold" role="alert">{quoteMsg}</p> : null;
     const money = (n: number) => `$${Number(n || 0).toFixed(2)}`;
     const paidUp = q.paymentStatus === 'confirmed' || (q.isManual && q.total > 0 && !(q.balance > 0));
     if (!q.isManual) {
@@ -1618,14 +1707,6 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
     const canBookFree = q.allowBooking && (req === 'none' || req === 'on_collection');
     return (
       <div className="space-y-3">
-        {(q.justPaid || q.justBooked) && (
-          <div className="rounded-2xl border border-emerald-500/30 bg-emerald-500/10 p-4 text-center space-y-1">
-            <p className="font-bold text-emerald-600">{q.justPaid ? '✓ Payment received — thank you' : '✓ You\'re booked in'}</p>
-            {q.scheduled && q.date && <p className="text-sm text-foreground">Drop-off: <strong>{fmtQuoteWhen(q.date)}</strong></p>}
-            {q.scheduled && q.estimatedReady && <p className="text-sm text-foreground">Estimated ready: <strong>{fmtReady(q.estimatedReady, q.date)}</strong></p>}
-          </div>
-        )}
-        {!q.justPaid && !q.justBooked && q.scheduled && q.date && <p className="text-sm text-center">Booked for <strong>{fmtQuoteWhen(q.date)}</strong>{q.estimatedReady ? <> — ready by <strong>{fmtReady(q.estimatedReady, q.date)}</strong></> : null}.</p>}
         {q.paid > 0 && (
           <div className="rounded-xl border border-border bg-background p-3 space-y-1 text-sm">
             <div className="flex justify-between"><span className="text-muted">Paid so far</span><span className="font-bold">{money(q.paid)}</span></div>
