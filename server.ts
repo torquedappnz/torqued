@@ -778,6 +778,9 @@ app.get('/api/quote/:bookingId', async (req, res) => {
       quotedPrice: b.quoted_price != null ? Number(b.quoted_price) : null,
       total: b.quoted_price != null ? Number(b.quoted_price) : (Number(b.total_price) || 0),
       note: b.quote_note || '', status: b.status, paymentStatus: b.payment_status, date: b.date,
+      lines: quoteLinesOf(b.quote_items), notes: b.quote_items?.notes || '',
+      labourHours: Number(b.quote_items?.labourHours) || 0,
+      estimatedReady: b.quote_items?.meta?.estimatedReady || null,
       ...quoteCustomerTerms(b),
     });
   } catch (err) {
@@ -3025,7 +3028,9 @@ app.post('/api/mechanic/schedule-quote', async (req, res) => {
     const update: Record<string, any> = { date: String(date) };
     if (!['in_progress', 'completed'].includes(row.status)) update.status = 'accepted';
     await supabase.from('bookings').update(update).eq('id', row.id);
-    await mergeQuoteMeta(supabase, row.id, { scheduledAt: new Date().toISOString(), bookedBy: 'mechanic' });
+    let estimatedReady: string | null = null;
+    try { const { hoursOn } = await workshopCalendar(supabase, row.mechanic_id); estimatedReady = estimateReady(String(date).slice(0, 16), Number(row.quote_items?.labourHours) || 0, hoursOn); } catch {}
+    await mergeQuoteMeta(supabase, row.id, { scheduledAt: new Date().toISOString(), bookedBy: 'mechanic', estimatedReady });
     const { data: fresh } = await supabase.from('bookings').select('*').eq('id', row.id).maybeSingle();
     res.json({ success: true, row: fresh });
   } catch (err) {
@@ -3112,7 +3117,10 @@ async function applyQuoteCheckout(supabase: any, session: any) {
   }
   const patch: Record<string, any> = { payments, billing: meta.billing || 'torqued' };
   const update: Record<string, any> = { stripe_session_id: session.id };
-  if (md.quoteDate && !meta.scheduledAt) { update.date = md.quoteDate; patch.scheduledAt = nowIso; patch.bookedBy = 'customer'; }
+  if (md.quoteDate && !meta.scheduledAt) {
+    update.date = md.quoteDate; patch.scheduledAt = nowIso; patch.bookedBy = 'customer';
+    try { const { hoursOn } = await workshopCalendar(supabase, row.mechanic_id); patch.estimatedReady = estimateReady(md.quoteDate, Number(row.quote_items?.labourHours) || 0, hoursOn); } catch {}
+  }
   if (!['in_progress', 'completed'].includes(row.status)) update.status = 'accepted';   // paid/booked quote → a job
   if (session.customer_details?.email && !row.email) update.email = session.customer_details.email;
   if (session.customer_details?.phone && !row.customer_phone) update.customer_phone = session.customer_details.phone;
@@ -3120,6 +3128,115 @@ async function applyQuoteCheckout(supabase: any, session: any) {
   await mergeQuoteMeta(supabase, bookingId, patch);
   if (row.is_cold_quote) await syncPaymentColumns(supabase, bookingId);
   else await supabase.from('bookings').update({ payment_status: 'confirmed' }).eq('id', bookingId);
+}
+
+// ── Drop-off slots & estimated pickup for quote links ──────────────────────
+// All times are NZ wall-clock strings ('YYYY-MM-DDTHH:mm'), the same format bookings store.
+type DayHours = { open: number; close: number };   // minutes from midnight
+const DEFAULT_DAY_HOURS: DayHours = { open: 8 * 60, close: 17 * 60 };
+const hhmmToMin = (t: any) => { const m = String(t || '').match(/^(\d{1,2}):(\d{2})/); return m ? Number(m[1]) * 60 + Number(m[2]) : null; };
+const minToHhmm = (n: number) => `${String(Math.floor(n / 60)).padStart(2, '0')}:${String(n % 60).padStart(2, '0')}`;
+const monZeroDow = (iso: string) => (new Date(`${iso}T00:00:00Z`).getUTCDay() + 6) % 7;   // 0=Mon … 6=Sun
+const isoAddDays = (iso: string, n: number) => { const d = new Date(`${iso}T00:00:00Z`); d.setUTCDate(d.getUTCDate() + n); return d.toISOString().slice(0, 10); };
+function nzTodayIso() {
+  const parts = new Intl.DateTimeFormat('en-CA', { timeZone: 'Pacific/Auckland', year: 'numeric', month: '2-digit', day: '2-digit' }).formatToParts(new Date());
+  const g = (t: string) => parts.find(p => p.type === t)!.value;
+  return `${g('year')}-${g('month')}-${g('day')}`;
+}
+
+// Opening hours per weekday (from the workshop's operating hours; Mon–Fri 8–5 if unset) + closed periods.
+async function workshopCalendar(supabase: any, mechanicId: string) {
+  const [slotsRes, periodsRes] = await Promise.all([
+    supabase.from('mechanic_availability').select('day_of_week, start_time, end_time').eq('mechanic_id', mechanicId),
+    supabase.from('mechanic_closed_periods').select('start_date, end_date').eq('mechanic_id', mechanicId),
+  ]);
+  const hours = new Map<number, DayHours>();
+  for (const r of (slotsRes.data ?? [])) {
+    const o = hhmmToMin(r.start_time), c = hhmmToMin(r.end_time);
+    if (o == null || c == null || c <= o) continue;
+    const prev = hours.get(Number(r.day_of_week));
+    hours.set(Number(r.day_of_week), prev ? { open: Math.min(prev.open, o), close: Math.max(prev.close, c) } : { open: o, close: c });
+  }
+  if (hours.size === 0) for (let d = 0; d < 5; d++) hours.set(d, DEFAULT_DAY_HOURS);
+  const closed = (periodsRes.data ?? []).map((p: any) => ({ start: p.start_date, end: p.end_date }));
+  const hoursOn = (iso: string): DayHours | null => closed.some((c: any) => iso >= c.start && iso <= c.end) ? null : (hours.get(monZeroDow(iso)) || null);
+  return { hoursOn };
+}
+
+// Estimated pickup: drop-off + the quoted labour + 2 hours, but no later than closing
+// (5pm by default). Labour that runs past closing carries over into the next open day.
+// e.g. drop off 9am, 1h job → ready by 12pm; drop off 3pm, 1h job → ready by 5pm.
+function estimateReady(dropoff: string, labourHours: number, hoursOn: (iso: string) => DayHours | null) {
+  const m = String(dropoff).match(/^(\d{4}-\d{2}-\d{2})T(\d{2}):(\d{2})/);
+  if (!m) return null;
+  let day = m[1]; let cur = Number(m[2]) * 60 + Number(m[3]);
+  let remaining = Math.max(0, Math.round((Number(labourHours) || 0) * 60));
+  let h = hoursOn(day) || DEFAULT_DAY_HOURS;
+  for (let guard = 0; remaining > 0 && guard < 60; guard++) {
+    const avail = Math.max(0, h.close - cur);
+    if (remaining <= avail) { cur += remaining; remaining = 0; break; }
+    remaining -= avail;
+    do { day = isoAddDays(day, 1); guard++; } while (!hoursOn(day) && guard < 60);
+    h = hoursOn(day) || DEFAULT_DAY_HOURS; cur = h.open;
+  }
+  let ready = Math.min(cur + 120, h.close);
+  ready = Math.min(Math.ceil(ready / 15) * 15, h.close);
+  return `${day}T${minToHhmm(ready)}`;
+}
+
+// Is this a drop-off the workshop can take? (an open day, within hours, not in the past)
+function validDropoff(dropoff: string, hoursOn: (iso: string) => DayHours | null) {
+  const m = String(dropoff).match(/^(\d{4}-\d{2}-\d{2})T(\d{2}):(\d{2})$/);
+  if (!m) return false;
+  if (m[1] <= nzTodayIso()) return false;
+  const h = hoursOn(m[1]); if (!h) return false;
+  const t = Number(m[2]) * 60 + Number(m[3]);
+  return t >= h.open && t < h.close;
+}
+
+// GET /api/quote/:bookingId/slots — open days (after parts lead time) with drop-off times.
+app.get('/api/quote/:bookingId/slots', async (req, res) => {
+  try {
+    const supabase = getSupabaseAdmin();
+    if (!supabase) return res.status(500).json({ error: 'Database not configured' });
+    const { data: row } = await supabase.from('bookings').select('*').eq('id', req.params.bookingId).maybeSingle();
+    if (!row) return res.status(404).json({ error: 'Quote not found' });
+    const { hoursOn } = await workshopCalendar(supabase, row.mechanic_id);
+    const lead = Math.max(0, Number(row.quote_items?.leadTimeDays) || 0);
+    // Earliest: tomorrow (NZ), plus the parts lead time in business days.
+    let start = isoAddDays(nzTodayIso(), 1);
+    for (let added = 0; added < lead; ) { start = isoAddDays(start, 1); const dw = monZeroDow(start); if (dw < 5) added++; }
+    const days: any[] = [];
+    for (let i = 0, d = start; i < 60 && days.length < 14; i++, d = isoAddDays(d, 1)) {
+      const h = hoursOn(d);
+      if (!h) continue;
+      const times: string[] = [];
+      for (let t = h.open; t <= h.close - 60; t += 30) times.push(minToHhmm(t));
+      if (times.length) days.push({ date: d, open: minToHhmm(h.open), close: minToHhmm(h.close), times });
+    }
+    const labourHours = Number(row.quote_items?.labourHours) || 0;
+    // Ready-time for every slot, worked out here so it always matches the booking.
+    const ready: Record<string, string | null> = {};
+    days.forEach(dd => dd.times.forEach((t: string) => { ready[`${dd.date}T${t}`] = estimateReady(`${dd.date}T${t}`, labourHours, hoursOn); }));
+    res.json({ days, labourHours, ready });
+  } catch (err) {
+    console.error('[quote/slots]', err);
+    res.status(500).json({ error: 'Could not load times' });
+  }
+});
+
+// Itemised lines for the customer's quote page.
+function quoteLinesOf(qi: any) {
+  if (!qi || typeof qi !== 'object') return [];
+  const out: { label: string; amount: number }[] = [];
+  (Array.isArray(qi.parts) ? qi.parts : []).filter((p: any) => p?.name).forEach((p: any) =>
+    out.push({ label: `${p.name}${(p.qty || 1) > 1 ? ` ×${p.qty}` : ''}`, amount: round2((Number(p.qty) || 1) * (Number(p.unitPrice) || 0)) }));
+  const lh = Number(qi.labourHours) || 0;
+  if (lh > 0) out.push({ label: `Labour (${lh} hr${lh === 1 ? '' : 's'})`, amount: round2(lh * (Number(qi.labourRate) || 0)) });
+  (Array.isArray(qi.other) ? qi.other : []).filter((o: any) => o?.name).forEach((o: any) => out.push({ label: o.name, amount: round2(Number(o.amount) || 0) }));
+  if (Number(qi.shopFee) > 0) out.push({ label: 'Workshop fee (sundries & consumables)', amount: round2(Number(qi.shopFee)) });
+  if (Number(qi.discount) > 0) out.push({ label: 'Discount', amount: -round2(Number(qi.discount)) });
+  return out;
 }
 
 // Public view of what the customer owes / may do on a quote link.
@@ -3151,9 +3268,10 @@ app.post('/api/quote/:bookingId/checkout', async (req, res) => {
     const amount = payKind === 'deposit' ? t.depositOutstanding : t.balance;
     let quoteDate = '';
     if (t.allowBooking) {
-      const d = String(req.body.date || '');
-      if (!d || isNaN(new Date(d).getTime()) || new Date(d).getTime() < Date.now()) return res.status(400).json({ error: 'Choose a drop-off date and time in the future.' });
-      quoteDate = d.slice(0, 16);
+      const d = String(req.body.date || '').slice(0, 16);
+      const { hoursOn } = await workshopCalendar(supabase, row.mechanic_id);
+      if (!validDropoff(d, hoursOn)) return res.status(400).json({ error: 'Choose one of the available drop-off times.' });
+      quoteDate = d;
     }
     const stripe = getStripe();
     if (!stripe) return res.status(503).json({ error: 'Online payments are not available right now.' });
@@ -3199,11 +3317,13 @@ app.post('/api/quote/:bookingId/book', async (req, res) => {
     if (!t.allowBooking) return res.status(400).json({ error: 'This quote can\'t be booked online.' });
     if (t.paymentRequirement === 'deposit' && t.depositOutstanding > 0) return res.status(400).json({ error: 'A deposit is needed to book.' });
     if (t.paymentRequirement === 'full_before' && t.balance > 0) return res.status(400).json({ error: 'Payment is needed to book.' });
-    const d = String(req.body.date || '');
-    if (!d || isNaN(new Date(d).getTime()) || new Date(d).getTime() < Date.now()) return res.status(400).json({ error: 'Choose a drop-off date and time in the future.' });
-    await supabase.from('bookings').update({ date: d.slice(0, 16), status: 'accepted' }).eq('id', row.id);
-    await mergeQuoteMeta(supabase, row.id, { scheduledAt: new Date().toISOString(), bookedBy: 'customer' });
-    res.json({ success: true, date: d.slice(0, 16) });
+    const d = String(req.body.date || '').slice(0, 16);
+    const { hoursOn } = await workshopCalendar(supabase, row.mechanic_id);
+    if (!validDropoff(d, hoursOn)) return res.status(400).json({ error: 'Choose one of the available drop-off times.' });
+    const estimatedReady = estimateReady(d, Number(row.quote_items?.labourHours) || 0, hoursOn);
+    await supabase.from('bookings').update({ date: d, status: 'accepted' }).eq('id', row.id);
+    await mergeQuoteMeta(supabase, row.id, { scheduledAt: new Date().toISOString(), bookedBy: 'customer', estimatedReady });
+    res.json({ success: true, date: d, estimatedReady });
   } catch (err) {
     console.error('[quote/book]', err);
     res.status(500).json({ error: 'Could not book' });

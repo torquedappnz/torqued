@@ -1389,6 +1389,17 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
   const [quotePaying, setQuotePaying] = useState(false);
   const [quoteDate, setQuoteDate] = useState('');
   const [quoteMsg, setQuoteMsg] = useState<string | null>(null);
+  const [quoteSlots, setQuoteSlots] = useState<{ days: { date: string; open: string; close: string; times: string[] }[]; ready: Record<string, string | null>; labourHours: number } | null>(null);
+  const [quoteSlotsErr, setQuoteSlotsErr] = useState(false);
+  const [quoteDay, setQuoteDay] = useState('');
+  // Drop-off days/times for quotes the customer can book themselves.
+  useEffect(() => {
+    if (!quoteReview?.id || !quoteReview.allowBooking) return;
+    setQuoteSlotsErr(false);
+    fetch(`/api/quote/${encodeURIComponent(quoteReview.id)}/slots`).then(r => r.ok ? r.json() : Promise.reject())
+      .then(d => { setQuoteSlots(d); if (d.days?.[0]) setQuoteDay(cur => cur || d.days[0].date); })
+      .catch(() => setQuoteSlotsErr(true));
+  }, [quoteReview?.id, quoteReview?.allowBooking]);
   const [quoteOnlyMode, setQuoteOnlyMode] = useState(() => !!new URLSearchParams(window.location.search).get('quote'));
 
   // Direct-booking link (?book=<mechanicId>) — a mechanic's own shareable link.
@@ -1467,9 +1478,129 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
       const r = await fetch(`/api/quote/${encodeURIComponent(quoteReview.id)}/book`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ date: quoteDate }) });
       const d = await r.json().catch(() => ({}));
       if (!r.ok) { setQuoteMsg(d.error || 'Could not book.'); return; }
-      setQuoteReview((q: any) => ({ ...q, scheduled: true, allowBooking: false, date: d.date, justBooked: true }));
+      setQuoteReview((q: any) => ({ ...q, scheduled: true, allowBooking: false, date: d.date, estimatedReady: d.estimatedReady || null, justBooked: true }));
     } catch { setQuoteMsg('Could not book — check your connection and try again.'); }
     finally { setQuotePaying(false); }
+  };
+  // 'HH:mm' → '9:00 am'
+  const fmtClock = (t: string) => { const [h, m] = t.split(':').map(Number); return `${((h + 11) % 12) + 1}:${String(m).padStart(2, '0')} ${h < 12 ? 'am' : 'pm'}`; };
+  // 'YYYY-MM-DD' → parts, read as a calendar date (no timezone shift)
+  const dayParts = (iso: string) => { const d = new Date(`${iso}T00:00:00Z`); const f = (o: Intl.DateTimeFormatOptions) => d.toLocaleDateString('en-NZ', { timeZone: 'UTC', ...o }); return { wd: f({ weekday: 'short' }), day: f({ day: 'numeric' }), mon: f({ month: 'short' }), long: f({ weekday: 'long', day: 'numeric', month: 'long' }) }; };
+  // Ready time, with the day only when it isn't the drop-off day
+  const fmtReady = (ready: string, drop?: string) => {
+    const [rd, rt] = String(ready).split('T');
+    const same = drop && String(drop).slice(0, 10) === rd;
+    return same ? fmtClock(rt.slice(0, 5)) : `${fmtClock(rt.slice(0, 5))} ${dayParts(rd).long}`;
+  };
+  const renderDropoffPicker = () => {
+    const q = quoteReview;
+    if (!q?.allowBooking) return null;
+    if (quoteSlotsErr) return <p className="text-sm text-muted text-center">Couldn't load drop-off times — please refresh, or call the workshop to book.</p>;
+    if (!quoteSlots) return <p className="text-sm text-muted text-center">Loading available times…</p>;
+    if (!quoteSlots.days.length) return <p className="text-sm text-muted text-center">No online times are open right now — please call the workshop to book.</p>;
+    const day = quoteSlots.days.find(d => d.date === quoteDay) || quoteSlots.days[0];
+    const ready = quoteDate ? quoteSlots.ready[quoteDate] : null;
+    const am = day.times.filter(t => Number(t.slice(0, 2)) < 12);
+    const pm = day.times.filter(t => Number(t.slice(0, 2)) >= 12);
+    const timeBtn = (t: string) => {
+      const v = `${day.date}T${t}`;
+      return (
+        <button key={t} type="button" role="radio" aria-checked={quoteDate === v} onClick={() => { setQuoteDate(v); setQuoteMsg(null); }}
+          className={cn('h-11 rounded-xl border text-sm font-semibold transition-colors', quoteDate === v ? 'bg-torqued-red border-torqued-red text-white' : 'border-border bg-background text-foreground hover:border-torqued-red/50')}>{fmtClock(t)}</button>
+      );
+    };
+    return (
+      <div className="space-y-5">
+        <div className="space-y-2">
+          <p className="text-sm font-bold text-foreground">1. Pick a drop-off day</p>
+          <div className="flex gap-2 overflow-x-auto pb-1 -mx-1 px-1 snap-x" role="radiogroup" aria-label="Drop-off day">
+            {quoteSlots.days.map(d => {
+              const dp = dayParts(d.date); const on = d.date === day.date;
+              return (
+                <button key={d.date} type="button" role="radio" aria-checked={on} aria-label={dp.long}
+                  onClick={() => { setQuoteDay(d.date); if (!quoteDate.startsWith(d.date)) setQuoteDate(''); }}
+                  className={cn('snap-start shrink-0 w-[4.25rem] rounded-2xl border py-2 text-center transition-colors', on ? 'bg-torqued-red border-torqued-red text-white' : 'border-border bg-background text-foreground hover:border-torqued-red/50')}>
+                  <span className={cn('block text-[11px] font-semibold uppercase', on ? 'text-white/80' : 'text-muted')}>{dp.wd}</span>
+                  <span className="block text-xl font-bold leading-tight">{dp.day}</span>
+                  <span className={cn('block text-[11px]', on ? 'text-white/80' : 'text-muted')}>{dp.mon}</span>
+                </button>
+              );
+            })}
+          </div>
+        </div>
+        <div className="space-y-2">
+          <p className="text-sm font-bold text-foreground">2. Pick a drop-off time <span className="font-normal text-muted">· open {fmtClock(day.open)}–{fmtClock(day.close)}</span></p>
+          <div className="space-y-2" role="radiogroup" aria-label="Drop-off time">
+            {am.length > 0 && <div><p className="text-xs text-muted mb-1">Morning</p><div className="grid grid-cols-3 gap-2">{am.map(timeBtn)}</div></div>}
+            {pm.length > 0 && <div><p className="text-xs text-muted mb-1">Afternoon</p><div className="grid grid-cols-3 gap-2">{pm.map(timeBtn)}</div></div>}
+          </div>
+        </div>
+        {quoteDate && (
+          <div className="rounded-2xl border border-emerald-500/30 bg-emerald-500/10 p-4 space-y-3" aria-live="polite">
+            <div className="grid grid-cols-2 gap-3">
+              <div>
+                <p className="text-[11px] font-semibold uppercase tracking-wide text-muted">Drop off</p>
+                <p className="font-bold text-foreground">{dayParts(quoteDate.slice(0, 10)).wd} {dayParts(quoteDate.slice(0, 10)).day} {dayParts(quoteDate.slice(0, 10)).mon}</p>
+                <p className="font-bold text-foreground">{fmtClock(quoteDate.slice(11, 16))}</p>
+              </div>
+              <div>
+                <p className="text-[11px] font-semibold uppercase tracking-wide text-muted">Estimated ready</p>
+                {ready ? (<>
+                  <p className="font-bold text-emerald-700 dark:text-emerald-400">{fmtClock(ready.slice(11, 16))}</p>
+                  <p className="text-sm text-foreground">{ready.slice(0, 10) === quoteDate.slice(0, 10) ? 'Same day' : `${dayParts(ready.slice(0, 10)).wd} ${dayParts(ready.slice(0, 10)).day} ${dayParts(ready.slice(0, 10)).mon}`}</p>
+                </>) : <p className="text-sm text-muted">—</p>}
+              </div>
+            </div>
+            <p className="text-xs text-muted">Based on {quoteSlots.labourHours > 0 ? `${quoteSlots.labourHours} hr${quoteSlots.labourHours === 1 ? '' : 's'} of work` : 'the work quoted'} plus time to test and tidy up. The workshop will let you know if anything changes.</p>
+          </div>
+        )}
+      </div>
+    );
+  };
+  // The quote card — used by the standalone quote link and the in-portal modal.
+  const renderQuoteCard = () => {
+    const q = quoteReview;
+    if (!q) return null;
+    const label = q.vehicleLabel || q.rego || 'car';
+    const vehicle = q.rego && !String(label).toUpperCase().includes(String(q.rego).toUpperCase()) ? `${label} (${q.rego})` : label;
+    const lines: { label: string; amount: number }[] = Array.isArray(q.lines) ? q.lines : [];
+    return (
+      <div className="font-raleway space-y-6">
+        <div className="space-y-2">
+          <span className="torqued-badge text-[10px]">YOUR QUOTE IS READY</span>
+          <h2 className="text-2xl sm:text-[28px] leading-tight font-bold tracking-tight normal-case">Let's get your {vehicle} sorted</h2>
+          {q.mechanicName && <p className="text-sm text-muted">Quote from {q.mechanicName}</p>}
+        </div>
+
+        <div className="rounded-2xl border border-border bg-background p-4 space-y-2.5">
+          {lines.length > 0 ? lines.map((l, i) => (
+            <div key={i} className="flex justify-between gap-3 text-sm">
+              <span className="text-foreground">{l.label}</span>
+              <span className={cn('tabular-nums shrink-0', l.amount < 0 ? 'text-emerald-600' : 'text-foreground')}>{l.amount < 0 ? '−' : ''}${Math.abs(l.amount).toFixed(2)}</span>
+            </div>
+          )) : (q.serviceIds || []).map((id: string) => (
+            <div key={id} className="flex justify-between text-sm">
+              <span className="text-foreground">{serviceDisplayName(id, SERVICES.find(sv => sv.id === id)?.name || id)}</span>
+              <span className="text-muted text-xs">Included</span>
+            </div>
+          ))}
+          {(q.notes || (!lines.length && q.note)) && (
+            <div className="border-t border-border pt-2.5">
+              <p className="text-xs font-semibold uppercase tracking-wide text-muted mb-1">Notes from the workshop</p>
+              <p className="text-sm text-foreground whitespace-pre-line">{q.notes || q.note}</p>
+            </div>
+          )}
+          <div className="flex justify-between items-baseline border-t border-border pt-3">
+            <span className="text-sm font-bold text-foreground">Total <span className="text-xs font-semibold text-muted">GST incl.</span></span>
+            <span className="text-2xl font-bold text-torqued-red tabular-nums">${Number(q.total).toFixed(2)}</span>
+          </div>
+        </div>
+
+        {renderDropoffPicker()}
+        {renderQuoteActions()}
+        <p className="text-xs text-muted text-center">Flexible payment options (incl. Afterpay, Klarna) at checkout.</p>
+      </div>
+    );
   };
   const fmtQuoteWhen = (d: any) => d ? new Date(d).toLocaleString('en-NZ', { weekday: 'long', day: 'numeric', month: 'long', hour: 'numeric', minute: '2-digit' }) : '';
   const renderQuoteActions = () => {
@@ -1485,16 +1616,16 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
     const req = q.paymentRequirement || 'none';
     const depositDue = Number(q.depositOutstanding) || 0;
     const canBookFree = q.allowBooking && (req === 'none' || req === 'on_collection');
-    const minDate = (() => { const d = new Date(); d.setDate(d.getDate() + 1 + Math.ceil((Number(q.leadTimeDays) || 0) * 7 / 5)); d.setHours(8, 0, 0, 0); const pad = (n: number) => String(n).padStart(2, '0'); return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T08:00`; })();
     return (
       <div className="space-y-3">
         {(q.justPaid || q.justBooked) && (
           <div className="rounded-2xl border border-emerald-500/30 bg-emerald-500/10 p-4 text-center space-y-1">
             <p className="font-bold text-emerald-600">{q.justPaid ? '✓ Payment received — thank you' : '✓ You\'re booked in'}</p>
             {q.scheduled && q.date && <p className="text-sm text-foreground">Drop-off: <strong>{fmtQuoteWhen(q.date)}</strong></p>}
+            {q.scheduled && q.estimatedReady && <p className="text-sm text-foreground">Estimated ready: <strong>{fmtReady(q.estimatedReady, q.date)}</strong></p>}
           </div>
         )}
-        {!q.justPaid && !q.justBooked && q.scheduled && q.date && <p className="text-sm text-center">Booked for <strong>{fmtQuoteWhen(q.date)}</strong>.</p>}
+        {!q.justPaid && !q.justBooked && q.scheduled && q.date && <p className="text-sm text-center">Booked for <strong>{fmtQuoteWhen(q.date)}</strong>{q.estimatedReady ? <> — ready by <strong>{fmtReady(q.estimatedReady, q.date)}</strong></> : null}.</p>}
         {q.paid > 0 && (
           <div className="rounded-xl border border-border bg-background p-3 space-y-1 text-sm">
             <div className="flex justify-between"><span className="text-muted">Paid so far</span><span className="font-bold">{money(q.paid)}</span></div>
@@ -1502,12 +1633,6 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
           </div>
         )}
         {paidUp ? <div className="text-center text-emerald-500 font-bold text-sm py-1">✓ Paid in full.</div> : (<>
-          {q.allowBooking && (
-            <div>
-              <label htmlFor="quote-date" className="block text-xs font-bold uppercase tracking-wide text-muted mb-1.5">Choose your drop-off date & time</label>
-              <input id="quote-date" type="datetime-local" min={minDate} value={quoteDate} onChange={e => setQuoteDate(e.target.value)} className="w-full bg-background border border-border rounded-xl px-3 h-12 text-sm text-foreground" />
-            </div>
-          )}
           {req === 'deposit' && depositDue > 0 && <p className="text-xs text-muted text-center">The workshop asks for a {money(depositDue)} deposit {q.allowBooking ? 'to confirm your booking' : 'before work starts'}.</p>}
           {req === 'full_before' && <p className="text-xs text-muted text-center">Payment is needed before work starts.</p>}
           {req === 'on_collection' && <p className="text-xs text-muted text-center">Pay now, or when you collect your car.</p>}
@@ -6843,7 +6968,7 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
   if (quoteOnlyMode) {
     return (
       <div className="min-h-screen bg-background text-foreground flex flex-col items-center justify-center p-6">
-        <div className="w-full max-w-md space-y-6">
+        <div className="w-full max-w-lg space-y-6">
           <Logo />
           {!quoteReview ? (
             <div className="text-center space-y-3">
@@ -6851,29 +6976,8 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
               <p className="text-sm text-muted font-bold">Loading your quote…</p>
             </div>
           ) : (
-            <div className="bg-card border border-border rounded-3xl p-7 space-y-5 shadow-xl">
-              <div className="space-y-1">
-                <span className="torqued-badge text-[10px]">YOUR QUOTE IS READY</span>
-                <h2 className="text-2xl font-black tracking-tight mt-2">{quoteReview.vehicleLabel || quoteReview.rego}</h2>
-                {quoteReview.mechanicName && <p className="text-sm text-muted">Prepared by {quoteReview.mechanicName}</p>}
-              </div>
-
-              <div className="rounded-2xl border border-border bg-background p-4 space-y-2">
-                {(quoteReview.serviceIds || []).map((id: string) => (
-                  <div key={id} className="flex justify-between text-sm">
-                    <span className="font-medium">{SERVICES.find(s => s.id === id)?.name || id}</span>
-                    <span className="text-muted text-xs uppercase font-bold tracking-widest">Included</span>
-                  </div>
-                ))}
-                {quoteReview.note && <p className="text-xs text-muted border-t border-border pt-2 mt-1">{quoteReview.note}</p>}
-                <div className="flex justify-between items-end border-t border-border pt-3 mt-1">
-                  <span className="text-xs font-black uppercase tracking-widest text-muted">Total (GST incl.)</span>
-                  <span className="text-2xl font-black text-torqued-red">${Number(quoteReview.total).toFixed(2)}</span>
-                </div>
-              </div>
-
-              {renderQuoteActions()}
-              <p className="text-[11px] text-muted text-center">Flexible payment options (incl. Afterpay, Klarna) at checkout.</p>
+            <div className="bg-card border border-border rounded-3xl p-6 sm:p-8 shadow-xl">
+              {renderQuoteCard()}
             </div>
           )}
         </div>
@@ -7640,30 +7744,9 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
           <div className="fixed inset-0 z-[130] flex items-center justify-center p-4 bg-black/70 backdrop-blur-sm">
             <motion.div
               initial={{ opacity: 0, scale: 0.96, y: 20 }} animate={{ opacity: 1, scale: 1, y: 0 }} exit={{ opacity: 0, scale: 0.96, y: 20 }}
-              className="w-full max-w-md bg-card border border-border rounded-3xl p-7 space-y-5 shadow-2xl"
+              className="w-full max-w-lg max-h-[92vh] overflow-y-auto bg-card border border-border rounded-3xl p-6 sm:p-8 space-y-4 shadow-2xl"
             >
-              <div className="text-center space-y-1">
-                <div className="torqued-badge text-[10px] mx-auto">YOUR QUOTE IS READY</div>
-                <h3 className="text-2xl font-black tracking-tight">{quoteReview.vehicleLabel || quoteReview.rego}</h3>
-                {quoteReview.mechanicName && <p className="text-sm text-muted">Prepared by {quoteReview.mechanicName}</p>}
-              </div>
-
-              <div className="rounded-2xl border border-border bg-background p-4 space-y-2">
-                {(quoteReview.serviceIds || []).map((id: string) => (
-                  <div key={id} className="flex justify-between text-sm">
-                    <span className="font-medium">{serviceDisplayName(id, SERVICES.find(s => s.id === id)?.name || id)}</span>
-                    <span className="text-muted text-xs uppercase font-bold tracking-widest">Included</span>
-                  </div>
-                ))}
-                {quoteReview.note && <p className="text-xs text-muted border-t border-border pt-2 mt-1">{quoteReview.note}</p>}
-                <div className="flex justify-between items-end border-t border-border pt-3 mt-1">
-                  <span className="text-xs font-black uppercase tracking-widest text-muted">Total (GST incl.)</span>
-                  <span className="text-2xl font-black text-torqued-red">${Number(quoteReview.total).toFixed(2)}</span>
-                </div>
-              </div>
-
-              {renderQuoteActions()}
-              <p className="text-[11px] text-muted text-center">Flexible payment options (incl. Afterpay, Klarna) at checkout.</p>
+              {renderQuoteCard()}
               <button onClick={() => setQuoteReview(null)} className="w-full text-xs text-muted hover:text-foreground">Close</button>
             </motion.div>
           </div>
