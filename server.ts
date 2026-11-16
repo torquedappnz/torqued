@@ -3198,6 +3198,29 @@ function validDropoff(dropoff: string, hoursOn: (iso: string) => DayHours | null
   return t >= h.open && t < h.close;
 }
 
+// Open days (tomorrow onwards, after any parts lead time) with 30-min drop-off times,
+// plus the estimated ready time for every slot — shared by quote links and online booking.
+async function buildDropoffSlots(supabase: any, mechanicId: string, leadDays: number, labourHours: number) {
+  const { hoursOn } = await workshopCalendar(supabase, mechanicId);
+  const lead = Math.max(0, Math.min(30, Number(leadDays) || 0));
+  // Earliest: tomorrow (NZ), plus the parts lead time in business days.
+  let start = isoAddDays(nzTodayIso(), 1);
+  for (let added = 0; added < lead; ) { start = isoAddDays(start, 1); const dw = monZeroDow(start); if (dw < 5) added++; }
+  const days: any[] = [];
+  for (let i = 0, d = start; i < 60 && days.length < 14; i++, d = isoAddDays(d, 1)) {
+    const h = hoursOn(d);
+    if (!h) continue;
+    const times: string[] = [];
+    for (let t = h.open; t <= h.close - 60; t += 30) times.push(minToHhmm(t));
+    if (times.length) days.push({ date: d, open: minToHhmm(h.open), close: minToHhmm(h.close), times });
+  }
+  const hrs = Math.max(0, Math.min(80, Number(labourHours) || 0));
+  // Ready-time for every slot, worked out here so it always matches the booking.
+  const ready: Record<string, string | null> = {};
+  days.forEach(dd => dd.times.forEach((t: string) => { ready[`${dd.date}T${t}`] = estimateReady(`${dd.date}T${t}`, hrs, hoursOn); }));
+  return { days, labourHours: hrs, ready };
+}
+
 // GET /api/quote/:bookingId/slots — open days (after parts lead time) with drop-off times.
 app.get('/api/quote/:bookingId/slots', async (req, res) => {
   try {
@@ -3205,24 +3228,7 @@ app.get('/api/quote/:bookingId/slots', async (req, res) => {
     if (!supabase) return res.status(500).json({ error: 'Database not configured' });
     const { data: row } = await supabase.from('bookings').select('*').eq('id', req.params.bookingId).maybeSingle();
     if (!row) return res.status(404).json({ error: 'Quote not found' });
-    const { hoursOn } = await workshopCalendar(supabase, row.mechanic_id);
-    const lead = Math.max(0, Number(row.quote_items?.leadTimeDays) || 0);
-    // Earliest: tomorrow (NZ), plus the parts lead time in business days.
-    let start = isoAddDays(nzTodayIso(), 1);
-    for (let added = 0; added < lead; ) { start = isoAddDays(start, 1); const dw = monZeroDow(start); if (dw < 5) added++; }
-    const days: any[] = [];
-    for (let i = 0, d = start; i < 60 && days.length < 14; i++, d = isoAddDays(d, 1)) {
-      const h = hoursOn(d);
-      if (!h) continue;
-      const times: string[] = [];
-      for (let t = h.open; t <= h.close - 60; t += 30) times.push(minToHhmm(t));
-      if (times.length) days.push({ date: d, open: minToHhmm(h.open), close: minToHhmm(h.close), times });
-    }
-    const labourHours = Number(row.quote_items?.labourHours) || 0;
-    // Ready-time for every slot, worked out here so it always matches the booking.
-    const ready: Record<string, string | null> = {};
-    days.forEach(dd => dd.times.forEach((t: string) => { ready[`${dd.date}T${t}`] = estimateReady(`${dd.date}T${t}`, labourHours, hoursOn); }));
-    res.json({ days, labourHours, ready });
+    res.json(await buildDropoffSlots(supabase, row.mechanic_id, Number(row.quote_items?.leadTimeDays) || 0, Number(row.quote_items?.labourHours) || 0));
   } catch (err) {
     console.error('[quote/slots]', err);
     res.status(500).json({ error: 'Could not load times' });
@@ -6923,6 +6929,24 @@ ${emailPara(pdfBase64 ? 'See the attached PDF for the full itemised inspection r
   } catch (err) {
     console.error('[mechanic/ppi]', err);
     res.status(500).json({ error: 'Could not save inspection' });
+  }
+});
+
+// GET /api/mechanic/:mechanicId/dropoff-slots?labourHours=1.5&needsParts=1
+// Same day/time picker data as quote links, for online bookings (Step 5).
+app.get('/api/mechanic/:mechanicId/dropoff-slots', async (req, res) => {
+  try {
+    const supabase = getSupabaseAdmin();
+    if (!supabase) return res.status(500).json({ error: 'Database not configured' });
+    const mechanicId = String(req.params.mechanicId || '');
+    const { data: prof } = await supabase.from('profiles').select('id, parts_lead_days').eq('id', mechanicId).maybeSingle();
+    if (!prof) return res.status(404).json({ error: 'Workshop not found' });
+    const needsParts = req.query.needsParts === '1' || req.query.needsParts === 'true';
+    const lead = needsParts ? Math.max(0, Number(prof.parts_lead_days ?? 1)) : 0;
+    res.json(await buildDropoffSlots(supabase, mechanicId, lead, Number(req.query.labourHours) || 0));
+  } catch (err) {
+    console.error('[mechanic/dropoff-slots]', err);
+    res.status(500).json({ error: 'Could not load times' });
   }
 });
 

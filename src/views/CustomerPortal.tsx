@@ -1497,37 +1497,35 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
     const same = drop && String(drop).slice(0, 10) === rd;
     return same ? fmtClock(rt.slice(0, 5)) : `${fmtClock(rt.slice(0, 5))} ${dayParts(rd).long}`;
   };
-  const renderDropoffPicker = () => {
-    const q = quoteReview;
-    if (!q?.allowBooking && !(q?.canManage && quoteManage === 'reschedule')) return null;
-    if (quoteSlotsErr) return <p className="text-sm text-muted text-center">Couldn't load drop-off times — please refresh, or call the workshop to book.</p>;
-    if (!quoteSlots) return <p className="text-sm text-muted text-center">Loading available times…</p>;
-    if (!quoteSlots.days.length) return <p className="text-sm text-muted text-center">No online times are open right now — please call the workshop to book.</p>;
-    const day = quoteSlots.days.find(d => d.date === quoteDay) || quoteSlots.days[0];
-    const ready = quoteDate ? quoteSlots.ready[quoteDate] : null;
+  type SlotData = { days: { date: string; open: string; close: string; times: string[] }[]; ready: Record<string, string | null>; labourHours: number };
+  // Day chips → morning/afternoon times → drop-off + estimated ready. `value` is 'YYYY-MM-DDTHH:mm' or ''.
+  const renderSlotPicker = (o: { slots: SlotData; dayIso: string; onDay: (iso: string) => void; value: string; onPick: (v: string) => void; dayLabel?: string }) => {
+    const { slots, value } = o;
+    const day = slots.days.find(d => d.date === o.dayIso) || slots.days[0];
+    const ready = value ? slots.ready[value] : null;
     const am = day.times.filter(t => Number(t.slice(0, 2)) < 12);
     const pm = day.times.filter(t => Number(t.slice(0, 2)) >= 12);
     const timeBtn = (t: string) => {
       const v = `${day.date}T${t}`;
       return (
-        <button key={t} type="button" role="radio" aria-checked={quoteDate === v} onClick={() => { setQuoteDate(v); setQuoteMsg(null); }}
-          className={cn('h-11 rounded-xl border text-sm font-semibold transition-colors', quoteDate === v ? 'bg-torqued-red border-torqued-red text-white' : 'border-border bg-background text-foreground hover:border-torqued-red/50')}>{fmtClock(t)}</button>
+        <button key={t} type="button" role="radio" aria-checked={value === v} onClick={() => o.onPick(v)}
+          className={cn('h-11 rounded-xl border text-sm font-semibold transition-colors', value === v ? 'bg-torqued-red border-torqued-red text-white' : 'border-border bg-background text-foreground hover:border-torqued-red/50')}>{fmtClock(t)}</button>
       );
     };
     return (
       <div className="space-y-5">
         <div className="space-y-2">
-          <p className="text-sm font-bold text-foreground">1. Pick a {q.allowBooking ? '' : 'new '}drop-off day</p>
+          <p className="text-sm font-bold text-foreground">1. Pick a {o.dayLabel || 'drop-off day'}</p>
           <div className="flex gap-2 overflow-x-auto pb-1 -mx-1 px-1 snap-x" role="radiogroup" aria-label="Drop-off day">
-            {quoteSlots.days.map(d => {
+            {slots.days.map((d, idx) => {
               const dp = dayParts(d.date); const on = d.date === day.date;
               return (
                 <button key={d.date} type="button" role="radio" aria-checked={on} aria-label={dp.long}
-                  onClick={() => { setQuoteDay(d.date); if (!quoteDate.startsWith(d.date)) setQuoteDate(''); }}
+                  onClick={() => o.onDay(d.date)}
                   className={cn('snap-start shrink-0 w-[4.25rem] rounded-2xl border py-2 text-center transition-colors', on ? 'bg-torqued-red border-torqued-red text-white' : 'border-border bg-background text-foreground hover:border-torqued-red/50')}>
-                  <span className={cn('block text-[11px] font-semibold uppercase', on ? 'text-white/80' : 'text-muted')}>{dp.wd}</span>
+                  <span className={cn('block text-[11px] font-semibold uppercase', on ? 'text-white/80' : 'text-muted')}>{idx === 0 ? 'Soonest' : dp.wd}</span>
                   <span className="block text-xl font-bold leading-tight">{dp.day}</span>
-                  <span className={cn('block text-[11px]', on ? 'text-white/80' : 'text-muted')}>{dp.mon}</span>
+                  <span className={cn('block text-[11px]', on ? 'text-white/80' : 'text-muted')}>{idx === 0 ? `${dp.wd} ${dp.mon}` : dp.mon}</span>
                 </button>
               );
             })}
@@ -1540,19 +1538,19 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
             {pm.length > 0 && <div><p className="text-xs text-muted mb-1">Afternoon</p><div className="grid grid-cols-3 gap-2">{pm.map(timeBtn)}</div></div>}
           </div>
         </div>
-        {quoteDate && (
+        {value && (
           <div className="rounded-2xl border border-emerald-500/30 bg-emerald-500/10 p-4" aria-live="polite">
             <div className="grid grid-cols-2 gap-3">
               <div>
                 <p className="text-[11px] font-semibold uppercase tracking-wide text-muted">Drop off</p>
-                <p className="font-bold text-foreground">{dayParts(quoteDate.slice(0, 10)).wd} {dayParts(quoteDate.slice(0, 10)).day} {dayParts(quoteDate.slice(0, 10)).mon}</p>
-                <p className="font-bold text-foreground">{fmtClock(quoteDate.slice(11, 16))}</p>
+                <p className="font-bold text-foreground">{dayParts(value.slice(0, 10)).wd} {dayParts(value.slice(0, 10)).day} {dayParts(value.slice(0, 10)).mon}</p>
+                <p className="font-bold text-foreground">{fmtClock(value.slice(11, 16))}</p>
               </div>
               <div>
                 <p className="text-[11px] font-semibold uppercase tracking-wide text-muted">Estimated ready</p>
                 {ready ? (<>
                   <p className="font-bold text-emerald-700 dark:text-emerald-400">{fmtClock(ready.slice(11, 16))}</p>
-                  <p className="text-sm text-foreground">{ready.slice(0, 10) === quoteDate.slice(0, 10) ? 'Same day' : `${dayParts(ready.slice(0, 10)).wd} ${dayParts(ready.slice(0, 10)).day} ${dayParts(ready.slice(0, 10)).mon}`}</p>
+                  <p className="text-sm text-foreground">{ready.slice(0, 10) === value.slice(0, 10) ? 'Same day' : `${dayParts(ready.slice(0, 10)).wd} ${dayParts(ready.slice(0, 10)).day} ${dayParts(ready.slice(0, 10)).mon}`}</p>
                 </>) : <p className="text-sm text-muted">—</p>}
               </div>
             </div>
@@ -1560,6 +1558,19 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
         )}
       </div>
     );
+  };
+  const renderDropoffPicker = () => {
+    const q = quoteReview;
+    if (!q?.allowBooking && !(q?.canManage && quoteManage === 'reschedule')) return null;
+    if (quoteSlotsErr) return <p className="text-sm text-muted text-center">Couldn't load drop-off times — please refresh, or call the workshop to book.</p>;
+    if (!quoteSlots) return <p className="text-sm text-muted text-center">Loading available times…</p>;
+    if (!quoteSlots.days.length) return <p className="text-sm text-muted text-center">No online times are open right now — please call the workshop to book.</p>;
+    return renderSlotPicker({
+      slots: quoteSlots, dayIso: quoteDay, value: quoteDate,
+      dayLabel: q.allowBooking ? 'drop-off day' : 'new drop-off day',
+      onDay: iso => { setQuoteDay(iso); if (!quoteDate.startsWith(iso)) setQuoteDate(''); },
+      onPick: v => { setQuoteDate(v); setQuoteMsg(null); },
+    });
   };
   // The quote card — used by the standalone quote link and the in-portal modal.
   const renderQuoteCard = () => {
@@ -3301,9 +3312,47 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
     return d;
   };
 
-  // Capacity-aware turnaround: parts lead time + job duration + technician capacity
+  // Online booking (Step 5): the workshop's real opening hours, with an estimated ready
+  // time per slot — the same rules as quote links (labour + 2 hrs, or by closing).
+  const [bookSlots, setBookSlots] = useState<SlotData | null>(null);
+  const [bookSlotsErr, setBookSlotsErr] = useState(false);
+  const onlineLabourHours = useMemo(() => {
+    let h = 0;
+    for (const id of selectedServices) {
+      const fp = fleetPricesRaw[id];
+      const fh = fp?.labourHours ? parseFloat(fp.labourHours) : NaN;
+      h += Number.isFinite(fh) && fh > 0 ? fh : (SERVICE_DURATIONS[id] || 60) / 60;
+    }
+    if (addWaterPump && selectedServices.includes('timing')) h += 0.5;
+    return Math.round(h * 100) / 100;
+  }, [selectedServices, fleetPricesRaw, addWaterPump]);
+  const onlineNeedsParts = selectedServices.some(id => NEEDS_PARTS.has(id));
   useEffect(() => {
-    if (!selectedTime) return;
+    const mechId = selectedMechanic?.id;
+    if (!mechId) { setBookSlots(null); return; }
+    let cancelled = false;
+    setBookSlotsErr(false);
+    fetch(`/api/mechanic/${encodeURIComponent(mechId)}/dropoff-slots?labourHours=${onlineLabourHours}&needsParts=${onlineNeedsParts ? 1 : 0}`)
+      .then(r => r.ok ? r.json() : Promise.reject(r.status))
+      .then((d: SlotData) => {
+        if (cancelled) return;
+        if (!Array.isArray(d?.days)) { setBookSlotsErr(true); return; }
+        setBookSlots(d);
+        // Keep the customer's pick if it's still open; otherwise the soonest day, 9am-ish.
+        if (!d.days.length) return;
+        const day = d.days.find(x => x.date === selectedDate) || d.days[0];
+        setSelectedDate(day.date);
+        setSelectedTime(t => day.times.includes(t) ? t : (day.times.find(x => x >= '09:00') || day.times[0]));
+      })
+      .catch(() => { if (!cancelled) setBookSlotsErr(true); });
+    return () => { cancelled = true; };
+  }, [selectedMechanic?.id, onlineLabourHours, onlineNeedsParts]);
+  const onlineReady = bookSlots?.ready?.[`${selectedDate}T${selectedTime}`] || null;
+  useEffect(() => { if (onlineReady) setEstimatedReadyTime(fmtReady(onlineReady, selectedDate)); }, [onlineReady, selectedDate]);
+
+  // Fallback turnaround (only used if the workshop's hours can't be loaded)
+  useEffect(() => {
+    if (!selectedTime || bookSlots?.days?.length) return;
     const totalMins = selectedServices.reduce((s, id) => s + (SERVICE_DURATIONS[id] || 60), 0);
     const technicians = selectedMechanic?.technicians || 1;
     const partsLead = selectedMechanic?.partsLeadDays ?? 1;
@@ -3311,10 +3360,7 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
     // Effective bay-hours: longer jobs split across technicians
     const effectiveHours = (totalMins / 60) / Math.max(1, technicians);
 
-    // Drop-off: next business day, or +partsLead if parts must be ordered
-    const earliestDrop = needsParts ? addBusinessDays(new Date(), Math.max(1, partsLead) + 1) : addBusinessDays(new Date(), 1);
-    setSelectedDate(earliestDrop.toISOString().slice(0, 10));
-
+    void partsLead; void needsParts;
     const [hour, min] = selectedTime.split(':').map(Number);
     // Turnaround = 2× the hands-on job time (e.g. a 2-hour job dropped at 9am → ready ~1pm).
     const turnaround = effectiveHours * 2;
@@ -3328,7 +3374,7 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
       if (readyHour > 12) readyHour -= 12;
       setEstimatedReadyTime(`${readyHour}:${min === 0 ? '00' : min} ${ampm}`);
     }
-  }, [selectedServices, selectedTime, selectedMechanic]);
+  }, [selectedServices, selectedTime, selectedMechanic, bookSlots]);
 
   // Fetch the workshop's genuine next-available drop-off dates whenever the chosen
   // mechanic or services change, then default the selection to the soonest one.
@@ -5171,103 +5217,54 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
               </div>
             </div>
 
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-12">
-              <div className="space-y-8">
-                <div className="space-y-4">
-                   <label className="text-xs font-black uppercase tracking-widest text-muted">Drop off Day</label>
-                   {availabilityLoading ? (
-                     <p className="text-xs text-muted italic">Checking {selectedMechanic?.name || 'the workshop'}'s availability…</p>
-                   ) : availableDates.length === 0 ? (
-                     <p className="text-xs text-muted italic">No upcoming availability published — we'll confirm a drop-off date with you after booking.</p>
-                   ) : (
-                   <div className="grid grid-cols-3 gap-3">
-                      {availableDates.map((d, idx) => (
-                        <button
-                          key={d.date}
-                          onClick={() => setSelectedDate(d.date)}
-                          className={cn(
-                            "relative p-4 rounded-2xl border text-[10px] font-black uppercase tracking-widest transition-all text-center",
-                            selectedDate === d.date ? "border-torqued-red bg-torqued-red text-white shadow-lg shadow-torqued-red/20" : "border-border bg-card text-muted hover:border-torqued-red/30 hover:text-torqued-red"
-                          )}
-                        >
-                          {idx === 0 && <span className="absolute -top-2 left-1/2 -translate-x-1/2 bg-emerald-500 text-white text-[7px] px-1.5 py-0.5 rounded-full">Soonest</span>}
-                          {d.label}
-                        </button>
-                      ))}
-                   </div>
-                   )}
+            <div className="font-raleway grid grid-cols-1 lg:grid-cols-[minmax(0,1fr)_340px] gap-6 lg:gap-8 items-start">
+              <div className="rounded-3xl border border-border bg-card p-5 sm:p-6 space-y-6">
+                <div className="space-y-1">
+                  <p className="text-lg font-bold text-foreground normal-case">When suits you to drop off your {vehicle ? `${vehicle.year} ${vehicle.make} ${vehicle.model}` : 'car'}{vehicle?.rego ? ` (${String(vehicle.rego).toUpperCase()})` : ''}?</p>
+                  <p className="text-sm text-muted">Times are {selectedMechanic?.name || 'the workshop'}'s opening hours. We'll show when it should be ready.</p>
                 </div>
-
-                <div className="space-y-4">
-                   <label className="text-xs font-black uppercase tracking-widest text-muted">Preferred Time</label>
-                   <div className="grid grid-cols-3 sm:grid-cols-4 gap-3">
-                      {['08:00', '09:00', '10:00', '11:00', '13:00', '14:00'].map(t => (
-                        <button 
-                          key={t}
-                          onClick={() => setSelectedTime(t)}
-                          className={cn(
-                            "p-3 rounded-xl border text-[10px] font-black uppercase tracking-widest transition-all text-center",
-                            selectedTime === t ? "border-torqued-red bg-torqued-red text-white shadow-lg shadow-torqued-red/20" : "border-border bg-card text-muted hover:border-torqued-red/30 hover:text-torqued-red"
-                          )}
-                        >
-                          {t}
-                        </button>
-                      ))}
-                   </div>
-                </div>
-
-                <Card className="p-8 bg-card border-border border-l-4 border-l-torqued-red shadow-xl space-y-6">
-                   <div className="flex items-center gap-4 text-torqued-red">
-                      <Clock size={24} />
-                      <h4 className="font-black uppercase tracking-widest text-[10px]">Booking Window: {selectedDate} @ {selectedTime}</h4>
-                   </div>
-                   <div className="pt-6 border-t border-border">
-                      <p className="text-[10px] font-bold uppercase text-muted mb-2 tracking-widest">Estimated Collection</p>
-                      <p className="text-4xl sm:text-5xl font-black tracking-tighter text-torqued-red">{estimatedReadyTime}</p>
-                      <p className="text-[10px] text-muted mt-4 italic leading-relaxed">
-                        {selectedServices.some(s => s.includes('timing')) ? 
-                          "*Major repairs typically require the vehicle for the full day." : 
-                          "*Standard service turnaround is approximately 4 hours."}
-                      </p>
-                   </div>
-                </Card>
-
-                <Button fullWidth size="lg" className="h-16 text-base rounded-2xl bg-torqued-red text-white shadow-xl shadow-torqued-red/20 flex flex-col gap-0.5" onClick={() => setStep(6)}>
-                  <span>Accept &amp; Pay →</span>
-                  {availableDates[0] && <span className="text-[10px] font-bold uppercase tracking-widest opacity-80">Soonest drop-off: {availableDates.find(d => d.date === selectedDate)?.label || availableDates[0].label}</span>}
+                {bookSlots && bookSlots.days.length > 0 ? renderSlotPicker({
+                  slots: bookSlots, dayIso: selectedDate, value: selectedDate && selectedTime ? `${selectedDate}T${selectedTime}` : '',
+                  onDay: iso => {
+                    setSelectedDate(iso);
+                    const d = bookSlots.days.find(x => x.date === iso);
+                    if (d && !d.times.includes(selectedTime)) setSelectedTime(d.times.find(x => x >= '09:00') || d.times[0]);
+                  },
+                  onPick: v => { setSelectedDate(v.slice(0, 10)); setSelectedTime(v.slice(11, 16)); },
+                }) : (
+                  <p className="text-sm text-muted">
+                    {!bookSlots && !bookSlotsErr ? `Checking ${selectedMechanic?.name || 'the workshop'}'s availability…` : "No online times are showing right now — we'll confirm a drop-off time with you after booking."}
+                  </p>
+                )}
+                <Button fullWidth size="lg" className="h-14 rounded-2xl bg-torqued-red text-white shadow-lg shadow-torqued-red/20 flex flex-col gap-0.5 normal-case" onClick={() => setStep(6)}>
+                  <span className="text-base font-bold">Accept &amp; Pay →</span>
+                  {bookSlots?.days?.length && selectedDate ? <span className="text-xs font-semibold opacity-90">Drop off {dayParts(selectedDate).wd} {dayParts(selectedDate).day} {dayParts(selectedDate).mon}, {fmtClock(selectedTime)}</span> : null}
                 </Button>
               </div>
 
-              <div className="space-y-6">
-                 <h4 className="text-xs font-black uppercase tracking-widest text-muted">Awaiting your arrival</h4>
-                 <div className="p-6 bg-emerald-500/5 rounded-3xl border border-emerald-500/10 flex gap-5">
-                    <div className="w-12 h-12 bg-emerald-500 text-white rounded-2xl flex items-center justify-center shrink-0 shadow-lg shadow-emerald-500/20">
-                       <CheckCircle2 size={24} />
-                    </div>
-                    <div>
-                        <p className="text-sm font-bold text-emerald-600">Workshop Capacity Confirmed</p>
-                        <p className="text-xs text-muted leading-relaxed mt-1">We've tentatively reserved this slot. Completing payment will lock it in.</p>
-                    </div>
-                 </div>
-                 
-                 <div className="p-8 border border-border rounded-3xl space-y-6 bg-card">
-                    <h5 className="text-[10px] font-black uppercase text-muted tracking-[0.2em]">Drop-off Instructions</h5>
-                    <div className="space-y-6">
-                       <div className="flex gap-4">
-                          <div className="w-6 h-6 bg-background border border-border rounded-lg flex items-center justify-center text-[10px] font-black shrink-0">1</div>
-                          <p className="text-sm text-foreground/80">Arrive at the workshop at your booked drop-off time.</p>
-                       </div>
-                       <div className="flex gap-4">
-                          <div className="w-6 h-6 bg-background border border-border rounded-lg flex items-center justify-center text-[10px] font-black shrink-0">2</div>
-                          <p className="text-sm text-foreground/80">Hand your keys to reception and confirm your booking reference.</p>
-                       </div>
-                       <div className="flex gap-4">
-                          <div className="w-6 h-6 bg-background border border-border rounded-lg flex items-center justify-center text-[10px] font-black shrink-0">3</div>
-                          <p className="text-sm text-foreground/80">We'll notify you via email when collection is ready.</p>
-                       </div>
-                    </div>
-                 </div>
-              </div>
+              <aside className="space-y-4">
+                <div className="rounded-3xl border border-border bg-card p-5 space-y-1 text-sm">
+                  <p className="text-[11px] font-semibold uppercase tracking-wide text-muted">Your workshop</p>
+                  <p className="text-base font-bold text-foreground normal-case">{selectedMechanic?.name}</p>
+                  {(selectedMechanic?.address || selectedMechanic?.suburb) && <p className="text-muted">{selectedMechanic?.address || selectedMechanic?.suburb}</p>}
+                  {selectedMechanic?.phone && <p><a href={`tel:${String(selectedMechanic.phone).replace(/[^\d+]/g, '')}`} className="text-muted underline underline-offset-2 hover:text-foreground">{selectedMechanic.phone}</a></p>}
+                </div>
+                <div className="rounded-3xl border border-border bg-card p-5 space-y-4">
+                  <p className="text-[11px] font-semibold uppercase tracking-wide text-muted">What happens next</p>
+                  <ol className="space-y-3 text-sm text-foreground">
+                    {[
+                      'Pay to lock in your drop-off time. You can reschedule or cancel later from My Garage.',
+                      'Drop your car and keys at the workshop at your chosen time.',
+                      "We'll email you when it's ready to collect.",
+                    ].map((t, n) => (
+                      <li key={n} className="flex gap-3">
+                        <span className="w-6 h-6 rounded-full bg-torqued-red/10 text-torqued-red text-xs font-bold flex items-center justify-center shrink-0">{n + 1}</span>
+                        <span className="leading-relaxed">{t}</span>
+                      </li>
+                    ))}
+                  </ol>
+                </div>
+              </aside>
             </div>
           </motion.div>
         );
@@ -5308,7 +5305,7 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
               </button>
               <div className="space-y-1">
                 <h2 className="text-3xl sm:text-4xl md:text-5xl tracking-tighter">Finalise Booking</h2>
-                <p className="text-sm sm:text-base text-muted">Drop off by {dropOffDeadline} on {selectedDate}.</p>
+                <p className="text-sm sm:text-base text-muted">{onlineReady ? `Drop off ${dayParts(selectedDate).long} at ${fmtClock(selectedTime)}.` : `Drop off by ${dropOffDeadline} on ${selectedDate}.`}</p>
               </div>
             </div>
 
@@ -5605,11 +5602,13 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                       {!collectNextDay && <div className="w-1.5 h-1.5 rounded-full bg-white" />}
                     </div>
                     <span className="text-sm font-semibold text-foreground">
-                      {isComplexJob ? `Ready between ${samePickupWindow} on ${selectedDate}` : `Ready by ${samePickupWindow} on ${selectedDate}`}
+                      {onlineReady ? `Estimated ready by ${fmtReady(onlineReady, '')}` : isComplexJob ? `Ready between ${samePickupWindow} on ${selectedDate}` : `Ready by ${samePickupWindow} on ${selectedDate}`}
                     </span>
                   </div>
                   <p className="text-xs text-muted pl-5">
-                    {isComplexJob
+                    {onlineReady
+                      ? `Drop off at ${fmtClock(selectedTime)}. We'll send you an email when your vehicle is ready to collect.`
+                      : isComplexJob
                       ? `Drop off by ${dropOffDeadline}. Your workshop closes at ${mechanicClosingTime} — we'll send you an email when your vehicle is ready.`
                       : `Drop off by ${dropOffDeadline}. We'll send you an email when your vehicle is ready to collect.`}
                   </p>
