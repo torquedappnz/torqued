@@ -48,6 +48,7 @@ import { Card } from '../components/Card';
 import { Input } from '../components/Input';
 import { VehicleTimelineAnalysis } from '../components/VehicleTimelineAnalysis';
 import { PrePurchaseInspection } from '../components/PrePurchaseInspection';
+import { mechanicFetch } from '../lib/mechanicFetch';
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, LineChart, Line } from 'recharts';
 import { formatCurrency, calculateGST, cn } from '../utils';
 import { useTheme } from '../context/ThemeContext';
@@ -246,7 +247,7 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
 
   useEffect(() => {
     if (!user) return;
-    fetch(`/api/mechanic/onboarding-status?id=${user.id}`)
+    mechanicFetch(`/api/mechanic/onboarding-status?id=${user.id}`)
       .then(r => r.json())
       .then(d => {
         setOnboardingComplete(!!d.complete);
@@ -287,7 +288,7 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
     if (!grade.trim()) { alert('Enter an oil grade first (e.g. 5W-30).'); return; }
     setOilPriceLookupBusy(true);
     try {
-      const r = await fetch('/api/ai/oil-price', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ grade }) });
+      const r = await mechanicFetch('/api/ai/oil-price', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ grade }) });
       const d = await r.json();
       if (d.pricePerLitre) setNewPkg(p => ({ ...p, oilCostPerL: String(d.pricePerLitre) }));
       else alert(d.error || 'Could not retrieve oil price.');
@@ -300,7 +301,7 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
     if (!ref) { alert('Enter a vehicle reference or package name first.'); return; }
     setCapacityLookupBusy(true);
     try {
-      const r = await fetch('/api/ai/service-lookup', {
+      const r = await mechanicFetch('/api/ai/service-lookup', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ query: ref, type: newPkg.type }),
       });
@@ -368,7 +369,7 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
   const [chatPhoto, setChatPhoto] = useState<string | null>(null);
   useEffect(() => {
     if (!user) return;
-    fetch(`/api/mechanic/packages?mechanicId=${user.id}`).then(r => r.json()).then(d => setPackages(d.packages || [])).catch(() => {});
+    mechanicFetch(`/api/mechanic/packages?mechanicId=${user.id}`).then(r => r.json()).then(d => setPackages(d.packages || [])).catch(() => {});
   }, [user]);
 
   // Quote builder
@@ -425,7 +426,7 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
     const p = qParts[i]; if (!p.name.trim()) { alert('Type a part name first.'); return; }
     setPartLookupBusy(i);
     try {
-      const r = await fetch('/api/ai/parts-lookup', {
+      const r = await mechanicFetch('/api/ai/parts-lookup', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ query: p.name, make: quoteJob?.model }),
       });
@@ -501,7 +502,7 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
     if (!jobId || !user?.id) return;
     setQDraftState(st => ({ ...st, status: 'saving' }));
     try {
-      const r = await fetch('/api/mechanic/quote-draft', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ mechanicId: user.id, bookingId: jobId, items, total }) });
+      const r = await mechanicFetch('/api/mechanic/quote-draft', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ mechanicId: user.id, bookingId: jobId, items, total }) });
       const d = await r.json().catch(() => ({}));
       if (!r.ok) throw new Error(d.error || 'autosave failed');
       qBaselineRef.current = snapshot;
@@ -941,7 +942,7 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
     setPastJobs(prev => prev.map(f));
   };
   const mpost = async (url: string, body: Record<string, any>) => {
-    const r = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ mechanicId: user?.id, ...body }) });
+    const r = await mechanicFetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ mechanicId: user?.id, ...body }) });
     const d = await r.json().catch(() => ({}));
     if (!r.ok) throw new Error(d.error || 'Something went wrong — please try again.');
     return d;
@@ -1131,12 +1132,12 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
         // A session_id is only present on a successful checkout return (cancel goes
         // to ?canceled=true). The mechanic is logged in, so activate them directly —
         // this also handles $0 promo subscriptions where payment_status != 'paid'.
-        await fetch('/api/mechanic/activate', {
+        await mechanicFetch('/api/mechanic/activate', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ mechanicId: user.id }),
         });
-        await fetch('/api/mechanic/save-onboarding', {
+        await mechanicFetch('/api/mechanic/save-onboarding', {
           method: 'POST', headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ mechanicId: user.id, fields: {}, complete: true }),
         });
@@ -1153,7 +1154,7 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
   // Reliable subscription status sync on load (service role — survives refresh)
   useEffect(() => {
     if (!user) return;
-    fetch(`/api/mechanic/status?id=${user.id}`)
+    mechanicFetch(`/api/mechanic/status?id=${user.id}`)
       .then(r => r.json())
       .then(d => { if (d.subscriptionActive) setJustActivated(true); })
       .catch(() => {});
@@ -1175,7 +1176,7 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
     if (!user) return;
 
     // Profile — use admin-backed endpoint to bypass any RLS restrictions
-    fetch(`/api/mechanic/profile?mechanicId=${user.id}`)
+    mechanicFetch(`/api/mechanic/profile?mechanicId=${user.id}`)
       .then(r => r.json())
       .then(({ profile: data }) => {
         if (!data) return;
@@ -1208,16 +1209,16 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
       .catch(err => console.error('[mechanic profile load]', err));
 
     // Subscription status + payment history
-    fetch(`/api/mechanic/billing?mechanicId=${user.id}`).then(r => r.json()).then(setBilling).catch(() => {});
+    mechanicFetch(`/api/mechanic/billing?mechanicId=${user.id}`).then(r => r.json()).then(setBilling).catch(() => {});
     // Staff roster (team members + shifts)
-    fetch(`/api/mechanic/roster?mechanicId=${user.id}`)
+    mechanicFetch(`/api/mechanic/roster?mechanicId=${user.id}`)
       .then(r => r.json())
       .then(d => { setRosterStaff(d.staff || []); setRosterShifts(d.shifts || []); setRosterLoaded(true); })
       .catch(() => setRosterLoaded(true));
     // Customers who've interacted with this workshop
-    fetch(`/api/mechanic/customers?mechanicId=${user.id}`).then(r => r.json()).then(d => { setCustomers(d.customers || []); setAccountsReady(d.accountsReady !== false); }).catch(() => {});
+    mechanicFetch(`/api/mechanic/customers?mechanicId=${user.id}`).then(r => r.json()).then(d => { setCustomers(d.customers || []); setAccountsReady(d.accountsReady !== false); }).catch(() => {});
     // Mechanic availability slots + closed periods
-    fetch(`/api/mechanic/availability?mechanicId=${user.id}`)
+    mechanicFetch(`/api/mechanic/availability?mechanicId=${user.id}`)
       .then(r => r.json())
       .then(d => {
         const slots = d.slots || [];
@@ -1234,7 +1235,7 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
       .catch(() => {});
 
     // Incoming jobs from bookings assigned to this mechanic (service role — bypasses RLS)
-    fetch(`/api/mechanic/jobs?mechanicId=${user.id}`)
+    mechanicFetch(`/api/mechanic/jobs?mechanicId=${user.id}`)
       .then(r => r.json())
       .then(({ jobs: rows }) => {
         const all = rows || [];
@@ -1281,7 +1282,7 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
       }).catch(() => { setPortalLoading(false); });
 
     // Parts inventory — routed through Express (service role) to bypass RLS issues
-    fetch(`/api/mechanic/parts?mechanicId=${user.id}`)
+    mechanicFetch(`/api/mechanic/parts?mechanicId=${user.id}`)
       .then(r => r.json())
       .then(({ parts: rows }) => {
         if (!rows?.length) return;
@@ -1307,7 +1308,7 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
       .catch(() => {});
 
     fetch('/api/part-categories').then(r => r.json()).then(d => setPartCategories(d.categories || [])).catch(() => {});
-    fetch(`/api/mechanic/reorder-queue?mechanicId=${user.id}`).then(r => r.json()).then(d => setReorderQueue(d.items || [])).catch(() => {});
+    mechanicFetch(`/api/mechanic/reorder-queue?mechanicId=${user.id}`).then(r => r.json()).then(d => setReorderQueue(d.items || [])).catch(() => {});
   }, [user]);
 
   const [searchQuery, setSearchQuery] = useState('');
@@ -1346,7 +1347,7 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
   const [accountsReady, setAccountsReady] = useState(true);
   const reloadCustomers = () => {
     if (!user) return;
-    fetch(`/api/mechanic/customers?mechanicId=${user.id}`).then(r => r.json()).then(d => { setCustomers(d.customers || []); setAccountsReady(d.accountsReady !== false); }).catch(() => {});
+    mechanicFetch(`/api/mechanic/customers?mechanicId=${user.id}`).then(r => r.json()).then(d => { setCustomers(d.customers || []); setAccountsReady(d.accountsReady !== false); }).catch(() => {});
   };
   const [editCustBusy, setEditCustBusy] = useState(false);
 
@@ -1378,7 +1379,7 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
       if (editCustomer.isNew || !(editCustomer.regos?.length || editCustomer.email || editCustomer.phone)) {
         reloadCustomers(); setEditCustomer(null); return;
       }
-      const r = await fetch('/api/mechanic/update-customer', {
+      const r = await mechanicFetch('/api/mechanic/update-customer', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           mechanicId: user.id,
@@ -1423,7 +1424,7 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
     const next = [...chatMessages, userMsg];
     setChatMessages(next); setChatInput(''); setChatPhoto(null); setChatBusy(true);
     try {
-      const r = await fetch('/api/ai/mechanic-assistant', {
+      const r = await mechanicFetch('/api/ai/mechanic-assistant', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ messages: next, vehicle: quoteJob?.model || undefined, rego: quoteJob?.reg || undefined, mechanicId: user?.id }),
       });
@@ -1442,7 +1443,7 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
   const openJobNotes = async (bookingId: string) => {
     setJobNotes(prev => ({ ...prev, [bookingId]: { ...prev[bookingId], open: true, loading: true, notes: prev[bookingId]?.notes || [], input: prev[bookingId]?.input || '' } }));
     try {
-      const r = await fetch(`/api/booking/${bookingId}/notes`);
+      const r = await mechanicFetch(`/api/booking/${bookingId}/notes`);
       const d = await r.json();
       setJobNotes(prev => ({ ...prev, [bookingId]: { ...prev[bookingId], notes: d.notes || [], loading: false } }));
     } catch { setJobNotes(prev => ({ ...prev, [bookingId]: { ...prev[bookingId], loading: false } })); }
@@ -1454,7 +1455,7 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
     const note = s.input.trim();
     setJobNotes(prev => ({ ...prev, [bookingId]: { ...prev[bookingId], input: '', loading: true } }));
     try {
-      const r = await fetch(`/api/booking/${bookingId}/notes`, {
+      const r = await mechanicFetch(`/api/booking/${bookingId}/notes`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ note, author: profileData.name || 'mechanic' }),
       });
@@ -1464,7 +1465,7 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
   };
 
   const deleteJobNote = async (bookingId: string, noteId: string) => {
-    await fetch(`/api/booking/${bookingId}/notes/${noteId}`, { method: 'DELETE' });
+    await mechanicFetch(`/api/booking/${bookingId}/notes/${noteId}`, { method: 'DELETE' });
     setJobNotes(prev => ({ ...prev, [bookingId]: { ...prev[bookingId], notes: (prev[bookingId]?.notes || []).filter(n => n.id !== noteId) } }));
   };
 
@@ -1517,7 +1518,7 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
     setUnlockedHistory(null);
     try {
       // Now emails the owner a 12-hour ACCESS LINK (no code to relay).
-      const r = await fetch('/api/mechanic/request-history-link', {
+      const r = await mechanicFetch('/api/mechanic/request-history-link', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ mechanicId: user.id, rego: plateRego, customerEmail: coldForm.email || undefined }),
@@ -1525,7 +1526,7 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
       const d = await r.json();
       if (!d.hasAccount) { setHistAccessState('no_account'); return; }
       if (d.priorBooking) {
-        const sr = await fetch(`/api/mechanic/history-access-status?mechanicId=${encodeURIComponent(user.id)}&rego=${encodeURIComponent(plateRego)}`);
+        const sr = await mechanicFetch(`/api/mechanic/history-access-status?mechanicId=${encodeURIComponent(user.id)}&rego=${encodeURIComponent(plateRego)}`);
         if (sr.ok) { const sd = await sr.json(); if (sd.granted) { setUnlockedHistory({ imported: sd.imported || [], torquedJobs: sd.jobs || [] }); setHistAccessState('granted'); return; } }
         setHistAccessState('prior_booking');
         return;
@@ -1545,7 +1546,7 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
     if (!user?.id || !coldForm.rego) return;
     setHistAccessState('verifying');
     try {
-      const r = await fetch(`/api/mechanic/history-access-status?mechanicId=${encodeURIComponent(user.id)}&rego=${encodeURIComponent(coldForm.rego)}`);
+      const r = await mechanicFetch(`/api/mechanic/history-access-status?mechanicId=${encodeURIComponent(user.id)}&rego=${encodeURIComponent(coldForm.rego)}`);
       const d = await r.json();
       if (!r.ok || !d.granted) { setHistAccessState('otp_sent'); setHistAccessMsg('Not granted yet — ask the customer to approve it in their Torqued portal (My Garage) or tap the link in their email, then check again.'); return; }
       setUnlockedHistory({ imported: d.imported || [], torquedJobs: d.jobs || [] });
@@ -1631,7 +1632,7 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
     if (!Number.isFinite(km) || km <= 0) { alert('Please enter a valid odometer reading.'); return; }
     setCheckoutBusy(true);
     try {
-      const r = await fetch('/api/mechanic/car-ready', {
+      const r = await mechanicFetch('/api/mechanic/car-ready', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ bookingId: job.id, km, notes: checkoutNotes.trim() || undefined, mechanicName: profileData.name }),
       });
@@ -1667,7 +1668,7 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
     const msg = prompt(`Message to the customer about ${job.reg || 'this job'}:`);
     if (msg == null || !msg.trim()) return;
     try {
-      const r = await fetch('/api/mechanic/message-customer', {
+      const r = await mechanicFetch('/api/mechanic/message-customer', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ bookingId: job.id, message: msg }),
       });
@@ -1683,7 +1684,7 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
     // Remove from incoming + persist accepted status (service role — survives refresh)
     const customerName = (job as any).customerName || (job.model.includes(' — ') ? job.model.split(' — ').slice(1).join(' — ') : '');
     // Check billing_start_date before accepting
-    const acceptResp = await fetch('/api/mechanic/update-job-status', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ bookingId: jobId, status: 'accepted' }) });
+    const acceptResp = await mechanicFetch('/api/mechanic/update-job-status', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ bookingId: jobId, status: 'accepted' }) });
     if (acceptResp.status === 403) {
       const d = await acceptResp.json();
       alert(d.error || 'Your subscription has not yet started. You cannot accept jobs yet.');
@@ -1706,7 +1707,7 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
     if (!user) return;
     setProfileSaveStatus('idle'); setProfileSaveError(null);
     try {
-      const r = await fetch('/api/mechanic/save-onboarding', {
+      const r = await mechanicFetch('/api/mechanic/save-onboarding', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ mechanicId: user.id, fields: {
           name: profileData.name, phone: profileData.phone, address: profileData.address,
@@ -1726,7 +1727,7 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
       if (profileData.address) {
         setAddressUpdateStatus('updating');
         try {
-          await fetch('/api/mechanic/update-address', {
+          await mechanicFetch('/api/mechanic/update-address', {
             method: 'POST', headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ mechanicId: user.id, address: profileData.address }),
           });
@@ -2010,7 +2011,7 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                 setIsAddingPart(false);
                 setNewPart({ name: '', quantity: 0, unitPrice: 0, unit: 'each' });
                 // Persist via Express API (service role — bypasses RLS)
-                fetch('/api/mechanic/parts', {
+                mechanicFetch('/api/mechanic/parts', {
                   method: 'POST',
                   headers: { 'Content-Type': 'application/json' },
                   body: JSON.stringify({
@@ -2134,14 +2135,14 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                   <button
                     onClick={async () => {
                       setReorderQueue(prev => prev.filter(x => x.id !== r.id));
-                      try { await fetch(`/api/mechanic/reorder-queue/${r.id}/mark-ordered`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ mechanicId: user?.id }) }); } catch {}
+                      try { await mechanicFetch(`/api/mechanic/reorder-queue/${r.id}/mark-ordered`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ mechanicId: user?.id }) }); } catch {}
                     }}
                     className="text-[10px] font-bold text-emerald-600 dark:text-emerald-400 underline"
                   >Mark ordered</button>
                   <button
                     onClick={async () => {
                       setReorderQueue(prev => prev.filter(x => x.id !== r.id));
-                      try { await fetch(`/api/mechanic/reorder-queue/${r.id}/dismiss`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ mechanicId: user?.id }) }); } catch {}
+                      try { await mechanicFetch(`/api/mechanic/reorder-queue/${r.id}/dismiss`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ mechanicId: user?.id }) }); } catch {}
                     }}
                     className="text-muted hover:text-torqued-red"
                   ><X size={14} /></button>
@@ -2212,7 +2213,7 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                     <button
                       onClick={() => {
                         setParts(prev => prev.filter(p => p.id !== part.id));
-                        fetch(`/api/mechanic/parts/${part.id}?mechanicId=${user?.id}`, { method: 'DELETE' })
+                        mechanicFetch(`/api/mechanic/parts/${part.id}?mechanicId=${user?.id}`, { method: 'DELETE' })
                           .catch(() => {});
                       }}
                       className="p-2 hover:bg-torqued-red/20 rounded-lg text-muted hover:text-torqued-red"
@@ -2353,7 +2354,7 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                   {job.quoteItems ? (
                     <>
                       <button type="button" className={actCls('green')} onClick={() => {
-                        fetch('/api/mechanic/update-job-status', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ bookingId: job.id, status: 'in_progress' }) }).catch(() => {});
+                        mechanicFetch('/api/mechanic/update-job-status', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ bookingId: job.id, status: 'in_progress' }) }).catch(() => {});
                         setIncomingJobs(prev => prev.map(j => j.id === job.id ? { ...j, services: j.services.filter(s => s !== 'Diagnostic Inspection').concat(['Quoted Job']) } : j));
                         setActiveTab('jobs');
                       }}>Move to My Jobs</button>
@@ -2377,13 +2378,13 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                   <button type="button" className={actCls('amber')} onClick={async () => {
                     const amt = prompt('Refund amount (NZD). Leave blank for FULL refund:');
                     if (amt == null) return;
-                    const r = await fetch('/api/stripe/refund', {
+                    const r = await mechanicFetch('/api/stripe/refund', {
                       method: 'POST', headers: { 'Content-Type': 'application/json' },
                       body: JSON.stringify({ bookingId: job.id, amount: amt.trim() ? parseFloat(amt) : undefined }),
                     });
                     const d = await r.json();
                     if (d.success) {
-                      await fetch('/api/mechanic/update-job-status', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ bookingId: job.id, status: 'cancelled' }) });
+                      await mechanicFetch('/api/mechanic/update-job-status', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ bookingId: job.id, status: 'cancelled' }) });
                       setIncomingJobs(incomingJobs.filter(j => j.id !== job.id));
                     }
                     alert(d.success ? `Refunded $${d.refunded}. Booking cancelled.` : (d.error || 'Refund failed.'));
@@ -2391,7 +2392,7 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                   <button type="button" className={actCls('blue')} onClick={() => { setRescheduleModal({ job }); setRescheduleDate(''); setRescheduleComment(''); }}>Request reschedule</button>
                   <button type="button" className={actCls('muted')} onClick={async () => {
                     if (!confirm('Decline this job? It will be removed from your queue.')) return;
-                    await fetch('/api/mechanic/update-job-status', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ bookingId: job.id, status: 'declined' }) });
+                    await mechanicFetch('/api/mechanic/update-job-status', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ bookingId: job.id, status: 'declined' }) });
                     setIncomingJobs(incomingJobs.filter(j => j.id !== job.id));
                   }}>Decline</button>
                 </>
@@ -2408,7 +2409,7 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
     if (!user) return;
     setStockReportBusy(true); setStockReportError(null);
     try {
-      const r = await fetch(`/api/mechanic/inventory-report?mechanicId=${user.id}&from=${stockReportFrom}&to=${stockReportTo}`);
+      const r = await mechanicFetch(`/api/mechanic/inventory-report?mechanicId=${user.id}&from=${stockReportFrom}&to=${stockReportTo}`);
       const d = await r.json();
       if (!r.ok) { setStockReportError(d.error || 'Could not generate report.'); return; }
       const doc = new jsPDF({ unit: 'mm', format: 'a4' });
@@ -2488,7 +2489,7 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                         reader.onerror = reject;
                         reader.readAsDataURL(file);
                       });
-                      const r = await fetch('/api/mechanic/profile-photo', {
+                      const r = await mechanicFetch('/api/mechanic/profile-photo', {
                         method: 'POST', headers: { 'Content-Type': 'application/json' },
                         body: JSON.stringify({ mechanicId: user.id, imageBase64 }),
                       });
@@ -2618,7 +2619,7 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
               <div className="pt-1">
                 <Button variant="outline" size="sm" className="text-foreground border-border h-8 text-[10px]" onClick={async () => {
                   try {
-                    const r = await fetch('/api/mechanic/billing-portal', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ mechanicId: user!.id }) });
+                    const r = await mechanicFetch('/api/mechanic/billing-portal', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ mechanicId: user!.id }) });
                     const d = await r.json();
                     if (d.url) window.location.href = d.url; else alert(d.error || 'No active subscription to manage.');
                   } catch { alert('Could not open billing.'); }
@@ -2691,7 +2692,7 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                   setAddressUpdateStatus('updating');
                   setProfileAddrSuggestions([]);
                   try {
-                    const r = await fetch('/api/mechanic/update-address', {
+                    const r = await mechanicFetch('/api/mechanic/update-address', {
                       method: 'POST', headers: { 'Content-Type': 'application/json' },
                       body: JSON.stringify({ mechanicId: user.id, address: profileData.address }),
                     });
@@ -2774,7 +2775,7 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
               if (!user) return;
               setCapSaving(true); setCapSaveStatus('idle'); setCapSaveError(null);
               try {
-                const r = await fetch('/api/mechanic/save-onboarding', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ mechanicId: user.id, fields: cap }) });
+                const r = await mechanicFetch('/api/mechanic/save-onboarding', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ mechanicId: user.id, fields: cap }) });
                 const d = await r.json();
                 if (!r.ok) { setCapSaveStatus('error'); setCapSaveError(d.error || 'Could not save. Please try again.'); return; }
                 setCapSaveStatus('saved');
@@ -2862,7 +2863,7 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                     {st.name}{st.role ? <span className="text-muted font-normal">· {st.role}</span> : null}
                     <button onClick={async () => {
                       if (!confirm(`Remove ${st.name} and their shifts?`)) return;
-                      await fetch(`/api/mechanic/staff/${st.id}`, { method: 'DELETE' });
+                      await mechanicFetch(`/api/mechanic/staff/${st.id}`, { method: 'DELETE' });
                       setRosterStaff(prev => prev.filter(s => s.id !== st.id));
                       setRosterShifts(prev => prev.filter(s => s.staff_id !== st.id));
                     }} className="text-muted hover:text-torqued-red"><X size={12} /></button>
@@ -2875,7 +2876,7 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                 <Input value={newStaffRole} onChange={e => setNewStaffRole(e.target.value)} placeholder="Role (optional)" className="bg-background text-foreground flex-1 min-w-[140px]" />
                 <Button className="bg-torqued-red text-white" disabled={!user || !newStaffName.trim()} onClick={async () => {
                   if (!user || !newStaffName.trim()) return;
-                  const r = await fetch('/api/mechanic/staff', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ mechanicId: user.id, name: newStaffName, role: newStaffRole }) });
+                  const r = await mechanicFetch('/api/mechanic/staff', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ mechanicId: user.id, name: newStaffName, role: newStaffRole }) });
                   const d = await r.json();
                   if (d.staff) { setRosterStaff(prev => [...prev, d.staff]); setNewStaffName(''); setNewStaffRole(''); }
                   else alert(d.error || 'Could not add team member. Have you run roster-schema.sql in Supabase?');
@@ -2921,7 +2922,7 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                                 <div key={x.id} className="group/sh bg-emerald-400/15 border-l-2 border-emerald-500 rounded px-1.5 py-1 mb-1 text-[10px]">
                                   <div className="flex items-center justify-between">
                                     <span className="font-bold text-emerald-700 dark:text-emerald-400">{x.start_time.slice(0,5)}–{x.end_time.slice(0,5)}</span>
-                                    <button onClick={async (e) => { e.stopPropagation(); await fetch(`/api/mechanic/roster/shift/${x.id}`, { method: 'DELETE' }); setRosterShifts(prev => prev.filter(s => s.id !== x.id)); }} className="opacity-0 group-hover/sh:opacity-100 text-red-400 hover:text-red-600"><X size={10} /></button>
+                                    <button onClick={async (e) => { e.stopPropagation(); await mechanicFetch(`/api/mechanic/roster/shift/${x.id}`, { method: 'DELETE' }); setRosterShifts(prev => prev.filter(s => s.id !== x.id)); }} className="opacity-0 group-hover/sh:opacity-100 text-red-400 hover:text-red-600"><X size={10} /></button>
                                   </div>
                                   {x.break_start && <span className="text-muted">break {x.break_start.slice(0,5)}–{(x.break_end||'').slice(0,5)}</span>}
                                 </div>
@@ -3035,7 +3036,7 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                           <button
                             onClick={async (e) => {
                               e.stopPropagation();
-                              await fetch(`/api/mechanic/availability/${slot.id}`, { method: 'DELETE' });
+                              await mechanicFetch(`/api/mechanic/availability/${slot.id}`, { method: 'DELETE' });
                               setMechAvailability(prev => prev.filter(s => s.id !== slot.id));
                             }}
                             className="opacity-0 group-hover/avail:opacity-100 text-red-400 hover:text-red-600 transition-opacity leading-none"
@@ -3270,7 +3271,7 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                 if (!user) return;
                 setOhSaving(true); setOhStatus('idle'); setOhError(null);
                 try {
-                  const r = await fetch('/api/mechanic/availability/replace', {
+                  const r = await mechanicFetch('/api/mechanic/availability/replace', {
                     method: 'POST', headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ mechanicId: user.id, slots: operatingHours.filter(o => o.enabled).map(o => ({ day_of_week: o.dayOfWeek, start_time: o.startTime, end_time: o.endTime })) }),
                   });
@@ -3309,7 +3310,7 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                   </div>
                   <button
                     onClick={async () => {
-                      await fetch(`/api/mechanic/closed-periods/${cp.id}`, { method: 'DELETE' });
+                      await mechanicFetch(`/api/mechanic/closed-periods/${cp.id}`, { method: 'DELETE' });
                       setClosedPeriods(prev => prev.filter(p => p.id !== cp.id));
                     }}
                     className="text-muted hover:text-torqued-red transition-colors"
@@ -3343,7 +3344,7 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                     if (!user || !newClosedPeriod.startDate) return;
                     setClosedSaving(true); setClosedError(null); setClosedSuccess(false);
                     try {
-                      const r = await fetch('/api/mechanic/closed-periods', {
+                      const r = await mechanicFetch('/api/mechanic/closed-periods', {
                         method: 'POST', headers: { 'Content-Type': 'application/json' },
                         body: JSON.stringify({ mechanicId: user.id, startDate: newClosedPeriod.startDate, endDate: newClosedPeriod.endDate || newClosedPeriod.startDate, reason: newClosedPeriod.reason }),
                       });
@@ -3409,7 +3410,7 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
               <Button variant="ghost" onClick={() => setShiftModal(null)}>Cancel</Button>
               <Button className="bg-emerald-500 text-white" disabled={!user || !shiftModal.staffId} onClick={async () => {
                 if (!user || !shiftModal) return;
-                const r = await fetch('/api/mechanic/roster/shift', {
+                const r = await mechanicFetch('/api/mechanic/roster/shift', {
                   method: 'POST', headers: { 'Content-Type': 'application/json' },
                   body: JSON.stringify({ mechanicId: user.id, staffId: shiftModal.staffId, shiftDate: shiftModal.date, startTime: shiftModal.startTime, endTime: shiftModal.endTime, breakStart: shiftModal.breakStart || null, breakEnd: shiftModal.breakEnd || null }),
                 });
@@ -3449,7 +3450,7 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                 onClick={async () => {
                   if (!user || !addAvailModal) return;
                   try {
-                    const r = await fetch('/api/mechanic/availability/slot', {
+                    const r = await mechanicFetch('/api/mechanic/availability/slot', {
                       method: 'POST', headers: { 'Content-Type': 'application/json' },
                       body: JSON.stringify({ mechanicId: user.id, dayOfWeek: addAvailModal.dayIdx, startTime: addAvailModal.startTime, endTime: addAvailModal.endTime }),
                     });
@@ -4005,7 +4006,7 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
       try {
         const data = quoteDataFromItems(r.quote_items, quoteTotalOf(r));
         const pdfBase64 = await buildQuotePdf(rowToJobShape(r), data);
-        const resp = await fetch('/api/mechanic/send-quote-pdf', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+        const resp = await mechanicFetch('/api/mechanic/send-quote-pdf', { method: 'POST', headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ bookingId: r.id, total: data.total, note: r.quote_note || null, pdfBase64, items: itemsOf(r) }) });
         const d = await resp.json().catch(() => ({}));
         if (!resp.ok) { alert(d.error || 'Could not send.'); return; }
@@ -4301,7 +4302,7 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
     const sub = billing || {};
     const currentPlan = planById((userProfile as any)?.subscription_tier);
     const startPlan = async (tier: PlanTier) => {
-      const r = await fetch('/api/stripe/create-subscription', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ email: user!.email, mechanicId: user!.id, tier, billing: 'launch' }) });
+      const r = await mechanicFetch('/api/stripe/create-subscription', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ email: user!.email, mechanicId: user!.id, tier, billing: 'launch' }) });
       const d = await r.json(); if (d.url) window.location.href = d.url; else alert(d.error || 'Could not start checkout.');
     };
     return (
@@ -4820,7 +4821,7 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                 <Button fullWidth className="bg-torqued-red text-white" disabled={!obEmail || obOtpLoading} onClick={async () => {
                   setObOtpLoading(true); setObOtpError('');
                   try {
-                    const r = await fetch('/api/mechanic/send-email-otp', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ email: obEmail, mechanicId: user.id }) });
+                    const r = await mechanicFetch('/api/mechanic/send-email-otp', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ email: obEmail, mechanicId: user.id }) });
                     const d = await r.json();
                     if (r.ok) setObOtpSent(true);
                     else setObOtpError(d.error || 'Could not send code');
@@ -4839,14 +4840,14 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                     <Button variant="outline" className="border-border text-white" disabled={obOtpLoading} onClick={async () => {
                       setObOtpLoading(true); setObOtpError('');
                       try {
-                        const r = await fetch('/api/mechanic/send-email-otp', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ email: obEmail, mechanicId: user.id }) });
+                        const r = await mechanicFetch('/api/mechanic/send-email-otp', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ email: obEmail, mechanicId: user.id }) });
                         if (!r.ok) { const d = await r.json(); setObOtpError(d.error || 'Could not resend'); }
                       } catch { setObOtpError('Could not connect'); } finally { setObOtpLoading(false); }
                     }}>Resend</Button>
                     <Button fullWidth className="bg-torqued-red text-white" disabled={obOtp.length < 6 || obOtpLoading} onClick={async () => {
                       setObOtpLoading(true); setObOtpError('');
                       try {
-                        const r = await fetch('/api/mechanic/verify-email-otp', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ email: obEmail, code: obOtp, mechanicId: user.id }) });
+                        const r = await mechanicFetch('/api/mechanic/verify-email-otp', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ email: obEmail, code: obOtp, mechanicId: user.id }) });
                         const d = await r.json();
                         if (d.verified) { setObOtpVerified(true); setObOtpError(''); }
                         else setObOtpError(d.error || 'Invalid or expired code');
@@ -5017,7 +5018,7 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                   setObSaving(true);
                   setObError('');
                   try {
-                    const saveRes = await fetch('/api/mechanic/save-onboarding', {
+                    const saveRes = await mechanicFetch('/api/mechanic/save-onboarding', {
                       method:'POST', headers:{'Content-Type':'application/json'},
                       body: JSON.stringify({ mechanicId: user.id, fields: { ...ob, agreement_signed_at: new Date().toISOString(), agreement_signed_by: ob.owner_name }, complete: true }),
                     });
@@ -5027,7 +5028,7 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                     }
                     try {
                       const pdfBase64 = generateContractPdf(ob.signer_title || 'Owner');
-                      await fetch('/api/mechanic/email-contract', {
+                      await mechanicFetch('/api/mechanic/email-contract', {
                         method: 'POST', headers: { 'Content-Type': 'application/json' },
                         body: JSON.stringify({ mechanicId: user.id, pdfBase64, email: user.email, workshopName: ob.legal_name || ob.name, ownerName: ob.owner_name }),
                       });
@@ -5145,7 +5146,7 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                         if (!mechEmail) { setMechAuthError('Enter your email above first, then tap "Forgot password".'); return; }
                         setMechAuthError(null); setMechResendMsg(null); setMechAuthLoading(true);
                         try {
-                          const r = await fetch('/api/mechanic/forgot-password', {
+                          const r = await mechanicFetch('/api/mechanic/forgot-password', {
                             method: 'POST', headers: { 'Content-Type': 'application/json' },
                             body: JSON.stringify({ email: mechEmail }),
                           });
@@ -5598,7 +5599,7 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                       }
                       // Auto-fill customer name/email from most recent booking for this rego
                       if (user?.id) {
-                        const custRes = await fetch(`/api/mechanic/customer-lookup?mechanicId=${encodeURIComponent(user.id)}&rego=${encodeURIComponent(plate)}`).then(r => r.ok ? r.json() : null).catch(() => null);
+                        const custRes = await mechanicFetch(`/api/mechanic/customer-lookup?mechanicId=${encodeURIComponent(user.id)}&rego=${encodeURIComponent(plate)}`).then(r => r.ok ? r.json() : null).catch(() => null);
                         if (custRes?.customer) {
                           if (custRes.customer.customer_name && !coldForm.customerName) setColdForm(c => ({ ...c, customerName: custRes.customer.customer_name }));
                           if (custRes.customer.email && !coldForm.email) setColdForm(c => ({ ...c, email: custRes.customer.email }));
@@ -5723,7 +5724,7 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
               <Button fullWidth className="bg-torqued-red text-white" disabled={coldBusy || !coldForm.customerName.trim() || (!coldForm.email.trim() && !coldForm.phone.trim())} onClick={async () => {
                 setColdBusy(true);
                 try {
-                  const r = await fetch('/api/mechanic/cold-quote', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ mechanicId: user!.id, ...coldForm }) });
+                  const r = await mechanicFetch('/api/mechanic/cold-quote', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ mechanicId: user!.id, ...coldForm }) });
                   const d = await r.json();
                   if (!r.ok) { alert(d.error || 'Could not create cold quote.'); return; }
                   setShowColdQuote(false);
@@ -5791,7 +5792,7 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
             try {
               settle();
               const pdfBase64 = await buildQuotePdf(quoteJob);
-              const r = await fetch('/api/mechanic/send-quote-pdf', {
+              const r = await mechanicFetch('/api/mechanic/send-quote-pdf', {
                 method: 'POST', headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ bookingId: quoteJob.id, total: qTotal, note, customerName: quoteJob.customerName, pdfBase64, items }),
               });
@@ -5800,7 +5801,7 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
               applyQuoteResult(quoteJob.id, d.quoteItems, qTotal);
               if (d.emailed) {
                 if (!isJob) {
-                  fetch('/api/mechanic/update-job-status', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ bookingId: quoteJob.id, status: 'quoted' }) }).catch(() => {});
+                  mechanicFetch('/api/mechanic/update-job-status', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ bookingId: quoteJob.id, status: 'quoted' }) }).catch(() => {});
                   patchRow(quoteJob.id, { status: 'quoted' });
                 }
                 goToQuotes();
@@ -6371,7 +6372,7 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
               <button onClick={() => !refundBusy && setRefundModal(null)} className="flex-1 px-4 h-10 rounded-xl border border-border text-sm font-bold text-foreground hover:bg-background">Cancel</button>
               <button disabled={refundBusy || !refundReason.trim()} onClick={async () => {
                 setRefundBusy(true);
-                const r = await fetch('/api/stripe/refund', {
+                const r = await mechanicFetch('/api/stripe/refund', {
                   method: 'POST', headers: { 'Content-Type': 'application/json' },
                   body: JSON.stringify({ bookingId: refundModal.job.id, amount: refundAmount.trim() ? parseFloat(refundAmount) : undefined, reason: refundReason.trim() }),
                 });
@@ -6420,7 +6421,7 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                 <Button disabled={!rescheduleDate || rescheduleSending} className="flex-1 bg-torqued-red text-white" onClick={async () => {
                   setRescheduleSending(true);
                   try {
-                    const r = await fetch('/api/mechanic/reschedule-request', {
+                    const r = await mechanicFetch('/api/mechanic/reschedule-request', {
                       method: 'POST', headers: { 'Content-Type': 'application/json' },
                       body: JSON.stringify({ bookingId: rescheduleModal.job.id, proposedDate: rescheduleDate, comment: rescheduleComment, mechanicName: profileData.name }),
                     });
