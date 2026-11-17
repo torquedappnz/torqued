@@ -962,7 +962,10 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
     if (!(amount > 0)) { alert('Enter an amount greater than $0.'); return; }
     setPayBusy(true);
     try {
-      const d = await mpost('/api/mechanic/record-payment', { bookingId: payModal.rowId, amount, method: payForm.method, kind: payForm.kind, note: payForm.note.trim() || undefined, payer: payForm.payer });
+      const prow = allJobRows.find((r: any) => r.id === payModal.rowId);
+      const pps = prow ? paySummary(prow) : null;
+      const kind = !pps || !(pps.total > 0) ? 'credit' : pps.depositOutstanding > 0 && prow?.status !== 'completed' && payForm.payer !== 'account' ? 'deposit' : 'payment';
+      const d = await mpost('/api/mechanic/record-payment', { bookingId: payModal.rowId, amount, method: payForm.method, kind, note: payForm.note.trim() || undefined, payer: payForm.payer });
       upsertRow(d.row);
       setPayModal(null);
     } catch (e: any) { alert(e?.message || 'Could not record the payment.'); }
@@ -5358,7 +5361,7 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
   }
 
   return (
-    <div className="min-h-screen bg-background text-foreground flex flex-col md:flex-row transition-colors duration-300 overflow-x-hidden">
+    <div className="mech-ui font-raleway min-h-screen bg-background text-foreground flex flex-col md:flex-row transition-colors duration-300 overflow-x-hidden">
       {/* Mobile Header */}
       <div className="md:hidden p-4 border-b border-border flex justify-between items-center bg-background sticky top-0 z-50">
         <Logo />
@@ -5395,7 +5398,7 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                 setIsMobileMenuOpen(false);
               }}
               className={cn(
-                "w-full flex items-center gap-3 px-4 py-3 rounded-xl transition-all font-bold uppercase tracking-wider text-xs",
+                "w-full flex items-center gap-3 px-4 py-2.5 rounded-xl transition-all font-semibold text-sm",
                 activeTab === item.id ? "bg-torqued-red text-white" : "text-muted hover:bg-card hover:text-foreground"
               )}
             >
@@ -5449,7 +5452,7 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
             <h1 className="text-4xl text-foreground tracking-tighter">
               {sidebarItems.find(i => i.id === activeTab)?.label}
             </h1>
-            <p className="text-muted font-bold uppercase tracking-widest text-[10px]">{new Date().toLocaleDateString('en-NZ', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' })}</p>
+            <p className="text-muted font-semibold text-sm">{new Date().toLocaleDateString('en-NZ', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' })}</p>
           </div>
           <div className="flex flex-wrap items-center gap-4">
             {/* Theme Toggle */}
@@ -6315,23 +6318,15 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                 </div>
               )}
               <div>
-                <p className={UI_LABEL}>Type</p>
-                <div className="grid grid-cols-3 gap-2" role="radiogroup" aria-label="Payment type">
-                  {([['deposit', 'Deposit'], ['payment', 'Payment'], ['credit', 'Credit']] as const).map(([v, l]) => (
-                    <button key={v} type="button" role="radio" aria-checked={payForm.kind === v} onClick={() => setPayForm(f => ({ ...f, kind: v, amount: v === 'deposit' && ps.depositOutstanding > 0 ? ps.depositOutstanding.toFixed(2) : v === 'payment' && ps.balance > 0 ? ps.balance.toFixed(2) : f.amount }))}
-                      className={cn('h-11 rounded-xl border text-sm font-semibold transition-colors', payForm.kind === v ? 'border-torqued-red bg-torqued-red/5 text-foreground' : 'border-border text-muted hover:text-foreground')}>{l}</button>
-                  ))}
-                </div>
-              </div>
-              <div>
                 <label htmlFor="pay-amount" className={UI_LABEL}>Amount ($)</label>
                 <div className="flex gap-2">
                   <input id="pay-amount" type="number" min={0} step="0.01" inputMode="decimal" value={payForm.amount} onChange={e => setPayForm(f => ({ ...f, amount: e.target.value }))} className={UI_INPUT} />
-                  {ps.balance > 0 && <button type="button" onClick={() => setPayForm(f => ({ ...f, amount: ps.balance.toFixed(2) }))} className="h-11 px-3 rounded-xl border border-border text-sm font-semibold hover:bg-card shrink-0">Full balance</button>}
+                  {ps.depositOutstanding > 0 && <button type="button" onClick={() => setPayForm(f => ({ ...f, amount: ps.depositOutstanding.toFixed(2) }))} className="h-11 px-3 rounded-xl border border-border text-sm font-semibold hover:bg-card shrink-0">Deposit</button>}
+                  {ps.balance > 0 && <button type="button" onClick={() => setPayForm(f => ({ ...f, amount: (ps.billTo ? (f.payer === 'account' ? ps.accountBalance : ps.customerBalance) : ps.balance).toFixed(2) }))} className="h-11 px-3 rounded-xl border border-border text-sm font-semibold hover:bg-card shrink-0">Full balance</button>}
                 </div>
               </div>
               <div>
-                <p className={UI_LABEL}>Paid by</p>
+                <p className={UI_LABEL}>How they paid</p>
                 <div className="grid grid-cols-2 sm:grid-cols-3 gap-2" role="radiogroup" aria-label="Payment method">
                   {MANUAL_METHODS.map(m => (
                     <button key={m} type="button" role="radio" aria-checked={payForm.method === m} onClick={() => setPayForm(f => ({ ...f, method: m }))}
@@ -6340,8 +6335,8 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                 </div>
               </div>
               <div>
-                <label htmlFor="pay-note" className={UI_LABEL}>Note (optional)</label>
-                <input id="pay-note" value={payForm.note} onChange={e => setPayForm(f => ({ ...f, note: e.target.value }))} placeholder="e.g. EFTPOS receipt 004512" className={UI_INPUT} />
+                <label htmlFor="pay-note" className={UI_LABEL}>Notes (optional)</label>
+                <textarea id="pay-note" rows={2} value={payForm.note} onChange={e => setPayForm(f => ({ ...f, note: e.target.value }))} placeholder="e.g. Deposit taken over the phone · EFTPOS receipt 004512" className={cn(UI_INPUT, 'h-auto py-2.5')} />
               </div>
               <div className="flex gap-2">
                 <Button variant="outline" className="flex-1 border-border text-foreground" disabled={payBusy} onClick={() => setPayModal(null)}>Cancel</Button>

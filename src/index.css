@@ -118,3 +118,13 @@ html[data-display-type="oled"] .dark {
 .btn-outline {
   @apply border-2 border-border text-foreground px-6 py-3 rounded-lg font-bold uppercase tracking-wide transition-all hover:bg-foreground hover:text-background active:scale-95;
 }
+
+/* Mechanic portal: one typeface (Raleway) and sentence-case buttons, matching Quotes / My Jobs. */
+.mech-ui .btn-primary,
+.mech-ui .btn-outline {
+  text-transform: none;
+  letter-spacing: normal;
+  font-weight: 600;
+  border-radius: 0.75rem;
+}
+.mech-ui .btn-outline { border-width: 1px; }
