@@ -79,11 +79,23 @@ async function verifyMechanicToken(token: string): Promise<{ uid?: string; statu
   return { uid: user.id };
 }
 
-app.use('/api/mechanic', async (req, res, next) => {
+// Route-level guard for mechanic-only routes outside /api/mechanic. `bookingParam`
+// names a route param holding a booking id that must belong to the caller.
+// `allowAdmin` also lets the admin back-office through with its key.
+const requireMechanic = (opts: { bookingParam?: string; allowAdmin?: boolean } = {}): express.RequestHandler =>
+  (req, res, next) => {
+    if (opts.allowAdmin && adminOk(req)) return next();
+    return verifyMechanicRequest(req, res, next, opts.bookingParam);
+  };
+
+app.use('/api/mechanic', (req, res, next) => {
   const p = req.path.length > 1 ? req.path.replace(/\/+$/, '') : req.path;
   if (matchRoute(PUBLIC_MECHANIC_ROUTES, req.method, p)) return next();
   if (matchRoute(ADMIN_MECHANIC_ROUTES, req.method, p) && adminOk(req)) return next();
+  return verifyMechanicRequest(req, res, next);
+});
 
+async function verifyMechanicRequest(req: express.Request, res: express.Response, next: express.NextFunction, bookingParam?: string) {
   try {
     const header = req.headers.authorization || '';
     const token = /^Bearer\s+(.+)$/i.exec(header)?.[1]?.trim();
@@ -102,19 +114,22 @@ app.use('/api/mechanic', async (req, res, next) => {
     (req as any).mechanicId = uid;
 
     // A request that names a booking must be for one of this workshop's bookings.
-    const bookingId = body?.bookingId;
-    if (bookingId != null && bookingId !== '') {
+    const bookingIds = [body?.bookingId, bookingParam ? req.params[bookingParam] : undefined]
+      .filter(x => x != null && x !== '').map(String);
+    if (bookingIds.length) {
       const supabase = getSupabaseAdmin();
       if (!supabase) return res.status(503).json({ error: 'Database not configured' });
-      const { data: bk } = await supabase.from('bookings').select('mechanic_id').eq('id', String(bookingId)).maybeSingle();
-      if (!bk || String(bk.mechanic_id) !== uid) return res.status(404).json({ error: 'Booking not found' });
+      for (const id of new Set(bookingIds)) {
+        const { data: bk } = await supabase.from('bookings').select('mechanic_id').eq('id', id).maybeSingle();
+        if (!bk || String(bk.mechanic_id) !== uid) return res.status(404).json({ error: 'Booking not found' });
+      }
     }
     next();
   } catch (err) {
     console.error('[mechanic auth]', err);
     res.status(500).json({ error: 'Could not verify your session' });
   }
-});
+}
 
 // The verified workshop id set by the middleware above.
 const authedMechanicId = (req: express.Request): string => (req as any).mechanicId;
@@ -3964,7 +3979,8 @@ app.post('/api/mechanic/send-quote-pdf', async (req, res) => {
 });
 
 // POST /api/stripe/refund — full or partial refund tied to a booking
-app.post('/api/stripe/refund', async (req, res) => {
+// Admin back-office (key) or the workshop that owns the booking.
+app.post('/api/stripe/refund', requireMechanic({ allowAdmin: true }), async (req, res) => {
   try {
     const { bookingId, amount, reason } = req.body; // amount optional (full if omitted)
     if (!bookingId) return res.status(400).json({ error: 'bookingId required' });
@@ -5632,7 +5648,7 @@ async function callClaudeChat(messages: any[], maxTokens = 500, jsonMode = false
 }
 
 // POST /api/ai/mechanic-assistant — mechanic data chat with full DB access.
-app.post('/api/ai/mechanic-assistant', async (req, res) => {
+app.post('/api/ai/mechanic-assistant', requireMechanic(), async (req, res) => {
   try {
     const { messages, vehicle, rego, mechanicId } = req.body;
     if (!Array.isArray(messages) || messages.length === 0) return res.status(400).json({ error: 'messages required' });
@@ -5656,8 +5672,16 @@ app.post('/api/ai/mechanic-assistant', async (req, res) => {
         supabase!.from('vehicles').select('rego,make,model,year,variant,mileage,owner_id').eq('rego', plate).single(),
         supabase!.from('vehicle_specs').select('oil_type,oil_capacity_litres,oil_service_interval_km,transmission_fluid_type,transmission_service_interval_km,cambelt_or_chain,cambelt_interval_km').eq('rego', plate).single(),
         supabase!.from('vehicle_history').select('service_date,work_done,mileage,provider,price').eq('rego', plate).order('service_date', { ascending: false }).limit(15),
-        supabase!.from('bookings').select('id,status,service_ids,description,date,quoted_price,total_price,customer_name,email').eq('vehicle_rego', plate).order('created_at', { ascending: false }).limit(10),
+        supabase!.from('bookings').select('id,status,service_ids,description,date,quoted_price,total_price,customer_name,email').eq('vehicle_rego', plate).eq('mechanic_id', mechanicId).order('created_at', { ascending: false }).limit(10),
       ]);
+      // Service history follows the same consent rule as the history-access flow:
+      // only this workshop's own customers' cars, or a customer-granted link.
+      let historyAllowed = !!bRes.data?.length;
+      if (!historyAllowed) {
+        const { data: granted } = await supabase!.from('history_access_links').select('token').eq('mechanic_id', mechanicId).eq('rego', plate).eq('granted', true).gt('expires_at', new Date().toISOString()).limit(1).maybeSingle();
+        historyAllowed = !!granted;
+      }
+      if (!historyAllowed) hRes.data = null;
       let ctx = '';
       if (vRes.data) {
         const v = vRes.data;
@@ -5699,13 +5723,17 @@ app.post('/api/ai/mechanic-assistant', async (req, res) => {
       }
 
       // Customer name lookup — "Sri's car" or "cars for Sri"
+      // Only this workshop's own customers — never a platform-wide name search.
       if (mentionedName) {
-        const { data: matchedProfiles } = await supabase.from('profiles').select('id,name').ilike('name', `%${mentionedName}%`).limit(3);
-        if (matchedProfiles?.length) {
-          const ownerIds = matchedProfiles.map((p: any) => p.id);
-          const { data: ownerVehicles } = await supabase.from('vehicles').select('rego,make,model,year,variant,mileage').in('owner_id', ownerIds);
+        const safeName = mentionedName.replace(/[%_,()]/g, '');
+        const { data: myJobs } = safeName ? await supabase.from('bookings').select('customer_name,vehicle_rego')
+          .eq('mechanic_id', mechanicId).ilike('customer_name', `%${safeName}%`).not('vehicle_rego', 'is', null)
+          .order('created_at', { ascending: false }).limit(10) : { data: null };
+        const regos = [...new Set((myJobs || []).map((j: any) => j.vehicle_rego))].slice(0, 5);
+        if (regos.length) {
+          const { data: ownerVehicles } = await supabase.from('vehicles').select('rego,make,model,year,variant,mileage').in('rego', regos);
           if (ownerVehicles?.length) {
-            customerCtx = `Vehicles for ${matchedProfiles[0].name}: ` + ownerVehicles.map((v: any) => `${v.rego} – ${v.year} ${v.make} ${v.model}${v.variant ? ` ${v.variant}` : ''}${v.mileage ? ` @${Number(v.mileage).toLocaleString()}km` : ''}`).join(', ');
+            customerCtx = `Vehicles for ${myJobs![0].customer_name}: ` + ownerVehicles.map((v: any) => `${v.rego} – ${v.year} ${v.make} ${v.model}${v.variant ? ` ${v.variant}` : ''}${v.mileage ? ` @${Number(v.mileage).toLocaleString()}km` : ''}`).join(', ');
           }
         }
       }
@@ -7233,7 +7261,7 @@ Return ONLY valid JSON (no markdown): {"insights":[{"title":"short label","detai
 });
 
 // POST /api/ai/oil-price — looks up current NZ retail price per litre for a given oil grade via Claude
-app.post('/api/ai/oil-price', async (req, res) => {
+app.post('/api/ai/oil-price', requireMechanic(), async (req, res) => {
   try {
     const { grade } = req.body;
     if (!grade?.trim()) return res.status(400).json({ error: 'Oil grade is required (e.g. 5W-30).' });
@@ -7255,7 +7283,7 @@ Use a realistic mid-market figure. Do not include $ symbol.`;
 });
 
 // POST /api/ai/service-lookup — AI lookup for oil/fluid capacity + filter cost given a vehicle or service query
-app.post('/api/ai/service-lookup', async (req, res) => {
+app.post('/api/ai/service-lookup', requireMechanic(), async (req, res) => {
   try {
     const { query, type } = req.body;
     if (!query?.trim()) return res.status(400).json({ error: 'query is required (e.g. Toyota Camry 2.5L 2018).' });
@@ -7647,7 +7675,7 @@ app.delete('/api/mechanic/roster/shift/:id', async (req, res) => {
 
 // ── Booking Notes ──────────────────────────────────────────────────────────────
 // GET /api/booking/:id/notes — list mechanic notes for a booking (newest first)
-app.get('/api/booking/:id/notes', async (req, res) => {
+app.get('/api/booking/:id/notes', requireMechanic({ bookingParam: 'id' }), async (req, res) => {
   try {
     const supabase = getSupabaseAdmin();
     if (!supabase) return res.status(503).json({ error: 'DB unavailable' });
@@ -7663,7 +7691,7 @@ app.get('/api/booking/:id/notes', async (req, res) => {
 });
 
 // POST /api/booking/:id/notes — add a mechanic note to a booking
-app.post('/api/booking/:id/notes', async (req, res) => {
+app.post('/api/booking/:id/notes', requireMechanic({ bookingParam: 'id' }), async (req, res) => {
   try {
     const supabase = getSupabaseAdmin();
     if (!supabase) return res.status(503).json({ error: 'DB unavailable' });
@@ -7680,7 +7708,7 @@ app.post('/api/booking/:id/notes', async (req, res) => {
 });
 
 // DELETE /api/booking/:id/notes/:noteId — delete a note
-app.delete('/api/booking/:id/notes/:noteId', async (req, res) => {
+app.delete('/api/booking/:id/notes/:noteId', requireMechanic({ bookingParam: 'id' }), async (req, res) => {
   try {
     const supabase = getSupabaseAdmin();
     if (!supabase) return res.status(503).json({ error: 'DB unavailable' });
@@ -7749,10 +7777,16 @@ app.post('/api/vehicle-photos', async (req, res) => {
 });
 
 // DELETE /api/vehicle-photos/:id — remove a photo record
-app.delete('/api/vehicle-photos/:id', async (req, res) => {
+// Only the workshop whose booking the photo was taken on may remove it.
+app.delete('/api/vehicle-photos/:id', requireMechanic(), async (req, res) => {
   try {
     const supabase = getSupabaseAdmin();
     if (!supabase) return res.status(503).json({ error: 'DB unavailable' });
+    const { data: photo } = await supabase.from('vehicle_photos').select('booking_id').eq('id', req.params.id).maybeSingle();
+    const { data: bk } = photo?.booking_id
+      ? await supabase.from('bookings').select('mechanic_id').eq('id', photo.booking_id).maybeSingle()
+      : { data: null };
+    if (!bk || String(bk.mechanic_id) !== authedMechanicId(req)) return res.status(404).json({ error: 'Photo not found' });
     const { error } = await supabase.from('vehicle_photos').delete().eq('id', req.params.id);
     if (error) throw error;
     res.json({ success: true });
@@ -7762,7 +7796,7 @@ app.delete('/api/vehicle-photos/:id', async (req, res) => {
 });
 
 // POST /api/ai/parts-lookup — AI-assisted NZ parts lookup (name, OEM #, price, suppliers)
-app.post('/api/ai/parts-lookup', async (req, res) => {
+app.post('/api/ai/parts-lookup', requireMechanic(), async (req, res) => {
   try {
     const { query, make, model, year } = req.body;
     if (!query?.trim()) return res.status(400).json({ error: 'query required' });
@@ -9034,7 +9068,7 @@ app.get('/api/plans', (_req, res) => {
   });
 });
 
-app.post('/api/stripe/create-subscription', async (req, res) => {
+app.post('/api/stripe/create-subscription', requireMechanic(), async (req, res) => {
   try {
     const { email, mechanicId, tier, billing } = req.body;
     if (!email || !mechanicId) return res.status(400).json({ error: 'Email and mechanicId are required' });

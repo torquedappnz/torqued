@@ -478,7 +478,7 @@ export const AdminPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) => {
     if (amt == null) return;
     const r = await fetch('/api/stripe/refund', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ bookingId: b.id, amount: amt.trim() ? parseFloat(amt) : undefined }),
+      body: JSON.stringify({ key, bookingId: b.id, amount: amt.trim() ? parseFloat(amt) : undefined }),
     });
     const d = await r.json();
     window.alert(d.success ? `Refunded $${d.refunded}.` : (d.error || 'Refund failed.'));

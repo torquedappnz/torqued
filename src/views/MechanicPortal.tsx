@@ -288,7 +288,7 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
     if (!grade.trim()) { alert('Enter an oil grade first (e.g. 5W-30).'); return; }
     setOilPriceLookupBusy(true);
     try {
-      const r = await fetch('/api/ai/oil-price', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ grade }) });
+      const r = await mechanicFetch('/api/ai/oil-price', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ grade }) });
       const d = await r.json();
       if (d.pricePerLitre) setNewPkg(p => ({ ...p, oilCostPerL: String(d.pricePerLitre) }));
       else alert(d.error || 'Could not retrieve oil price.');
@@ -301,7 +301,7 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
     if (!ref) { alert('Enter a vehicle reference or package name first.'); return; }
     setCapacityLookupBusy(true);
     try {
-      const r = await fetch('/api/ai/service-lookup', {
+      const r = await mechanicFetch('/api/ai/service-lookup', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ query: ref, type: newPkg.type }),
       });
@@ -426,7 +426,7 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
     const p = qParts[i]; if (!p.name.trim()) { alert('Type a part name first.'); return; }
     setPartLookupBusy(i);
     try {
-      const r = await fetch('/api/ai/parts-lookup', {
+      const r = await mechanicFetch('/api/ai/parts-lookup', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ query: p.name, make: quoteJob?.model }),
       });
@@ -1424,7 +1424,7 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
     const next = [...chatMessages, userMsg];
     setChatMessages(next); setChatInput(''); setChatPhoto(null); setChatBusy(true);
     try {
-      const r = await fetch('/api/ai/mechanic-assistant', {
+      const r = await mechanicFetch('/api/ai/mechanic-assistant', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ messages: next, vehicle: quoteJob?.model || undefined, rego: quoteJob?.reg || undefined, mechanicId: user?.id }),
       });
@@ -1443,7 +1443,7 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
   const openJobNotes = async (bookingId: string) => {
     setJobNotes(prev => ({ ...prev, [bookingId]: { ...prev[bookingId], open: true, loading: true, notes: prev[bookingId]?.notes || [], input: prev[bookingId]?.input || '' } }));
     try {
-      const r = await fetch(`/api/booking/${bookingId}/notes`);
+      const r = await mechanicFetch(`/api/booking/${bookingId}/notes`);
       const d = await r.json();
       setJobNotes(prev => ({ ...prev, [bookingId]: { ...prev[bookingId], notes: d.notes || [], loading: false } }));
     } catch { setJobNotes(prev => ({ ...prev, [bookingId]: { ...prev[bookingId], loading: false } })); }
@@ -1455,7 +1455,7 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
     const note = s.input.trim();
     setJobNotes(prev => ({ ...prev, [bookingId]: { ...prev[bookingId], input: '', loading: true } }));
     try {
-      const r = await fetch(`/api/booking/${bookingId}/notes`, {
+      const r = await mechanicFetch(`/api/booking/${bookingId}/notes`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ note, author: profileData.name || 'mechanic' }),
       });
@@ -1465,7 +1465,7 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
   };
 
   const deleteJobNote = async (bookingId: string, noteId: string) => {
-    await fetch(`/api/booking/${bookingId}/notes/${noteId}`, { method: 'DELETE' });
+    await mechanicFetch(`/api/booking/${bookingId}/notes/${noteId}`, { method: 'DELETE' });
     setJobNotes(prev => ({ ...prev, [bookingId]: { ...prev[bookingId], notes: (prev[bookingId]?.notes || []).filter(n => n.id !== noteId) } }));
   };
 
@@ -2378,7 +2378,7 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                   <button type="button" className={actCls('amber')} onClick={async () => {
                     const amt = prompt('Refund amount (NZD). Leave blank for FULL refund:');
                     if (amt == null) return;
-                    const r = await fetch('/api/stripe/refund', {
+                    const r = await mechanicFetch('/api/stripe/refund', {
                       method: 'POST', headers: { 'Content-Type': 'application/json' },
                       body: JSON.stringify({ bookingId: job.id, amount: amt.trim() ? parseFloat(amt) : undefined }),
                     });
@@ -4302,7 +4302,7 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
     const sub = billing || {};
     const currentPlan = planById((userProfile as any)?.subscription_tier);
     const startPlan = async (tier: PlanTier) => {
-      const r = await fetch('/api/stripe/create-subscription', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ email: user!.email, mechanicId: user!.id, tier, billing: 'launch' }) });
+      const r = await mechanicFetch('/api/stripe/create-subscription', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ email: user!.email, mechanicId: user!.id, tier, billing: 'launch' }) });
       const d = await r.json(); if (d.url) window.location.href = d.url; else alert(d.error || 'Could not start checkout.');
     };
     return (
@@ -6372,7 +6372,7 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
               <button onClick={() => !refundBusy && setRefundModal(null)} className="flex-1 px-4 h-10 rounded-xl border border-border text-sm font-bold text-foreground hover:bg-background">Cancel</button>
               <button disabled={refundBusy || !refundReason.trim()} onClick={async () => {
                 setRefundBusy(true);
-                const r = await fetch('/api/stripe/refund', {
+                const r = await mechanicFetch('/api/stripe/refund', {
                   method: 'POST', headers: { 'Content-Type': 'application/json' },
                   body: JSON.stringify({ bookingId: refundModal.job.id, amount: refundAmount.trim() ? parseFloat(refundAmount) : undefined, reason: refundReason.trim() }),
                 });
