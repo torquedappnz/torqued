@@ -24,6 +24,101 @@ app.use(express.json({
   },
 }));
 
+// ── Mechanic API auth ─────────────────────────────────────────
+// Every /api/mechanic/* route acts as a workshop, so the workshop's identity must
+// come from a verified Supabase session — never from a client-supplied
+// mechanicId. This middleware verifies the `Authorization: Bearer <access token>`
+// header, confirms the user is a mechanic, rejects a body/query mechanicId that
+// names someone else (403), and then overwrites mechanicId with the verified id
+// so every handler below works off the real one. Requests that name a booking
+// (body.bookingId) must also own that booking.
+//
+// Public exceptions: the customer booking flow (profile, prices, slots, hours),
+// pre-login account flows, and the customer's reschedule acceptance.
+const PUBLIC_MECHANIC_ROUTES: Array<[string, RegExp]> = [
+  ['GET', /^\/public\/[^/]+$/],                // direct-booking link profile
+  ['GET', /^\/[^/]+\/package-price$/],         // customer quote (web + iOS)
+  ['GET', /^\/[^/]+\/dropoff-slots$/],         // customer online booking
+  ['GET', /^\/next-available$/],               // customer online booking
+  ['GET', /^\/availability$/],                 // opening hours, read by the customer portal
+  ['POST', /^\/register$/],                    // sign-up (no session yet)
+  ['POST', /^\/ensure-confirmed$/],            // login auto-heal (no session yet)
+  ['POST', /^\/forgot-password$/],             // password reset (no session yet)
+  ['POST', /^\/resend$/],                      // resend sign-in link (no session yet)
+  ['POST', /^\/email-trial$/],                 // trial-code email, not workshop-scoped
+  ['POST', /^\/accept-reschedule$/],           // the CUSTOMER accepts (web + iOS)
+];
+// Routes the admin back-office may call for any workshop with its admin key.
+const ADMIN_MECHANIC_ROUTES: Array<[string, RegExp]> = [
+  ['POST', /^\/update-address$/],
+];
+const matchRoute = (list: Array<[string, RegExp]>, method: string, p: string) =>
+  list.some(([m, re]) => (m === method || (m === 'GET' && method === 'HEAD')) && re.test(p));
+
+// Short-lived cache of verified tokens so a burst of portal requests doesn't
+// round-trip to Supabase Auth for each one. Entries never outlive the token.
+const mechanicTokenCache = new Map<string, { uid: string; until: number }>();
+async function verifyMechanicToken(token: string): Promise<{ uid?: string; status?: number; error?: string }> {
+  const now = Date.now();
+  const hit = mechanicTokenCache.get(token);
+  if (hit && hit.until > now) return { uid: hit.uid };
+  const supabase = getSupabaseAdmin();
+  if (!supabase) return { status: 503, error: 'Auth not configured' };
+  const { data, error } = await supabase.auth.getUser(token);
+  const user = data?.user;
+  if (error || !user) return { status: 401, error: 'Your session has expired — please sign in again.' };
+  const { data: profile } = await supabase.from('profiles').select('role').eq('id', user.id).maybeSingle();
+  if (profile?.role !== 'mechanic') return { status: 403, error: 'This account is not a workshop account.' };
+  let exp = now + 60_000;
+  try {
+    const payload = JSON.parse(Buffer.from(token.split('.')[1], 'base64url').toString());
+    if (payload?.exp) exp = Math.min(exp, payload.exp * 1000);
+  } catch { /* keep the 60s default */ }
+  if (mechanicTokenCache.size > 1000) mechanicTokenCache.clear();
+  mechanicTokenCache.set(token, { uid: user.id, until: exp });
+  return { uid: user.id };
+}
+
+app.use('/api/mechanic', async (req, res, next) => {
+  const p = req.path.length > 1 ? req.path.replace(/\/+$/, '') : req.path;
+  if (matchRoute(PUBLIC_MECHANIC_ROUTES, req.method, p)) return next();
+  if (matchRoute(ADMIN_MECHANIC_ROUTES, req.method, p) && adminOk(req)) return next();
+
+  try {
+    const header = req.headers.authorization || '';
+    const token = /^Bearer\s+(.+)$/i.exec(header)?.[1]?.trim();
+    if (!token) return res.status(401).json({ error: 'Please sign in to continue.' });
+    const v = await verifyMechanicToken(token);
+    if (!v.uid) return res.status(v.status || 401).json({ error: v.error || 'Unauthorized' });
+    const uid = v.uid;
+
+    const body = req.body && typeof req.body === 'object' && !Array.isArray(req.body) ? req.body : null;
+    const claimed = [body?.mechanicId, req.query.mechanicId]
+      .filter(x => x != null && x !== '').map(String);
+    if (claimed.some(c => c !== uid)) return res.status(403).json({ error: 'You can only act on your own workshop.' });
+    if (body) body.mechanicId = uid;
+    else req.body = { mechanicId: uid };
+    (req.query as any).mechanicId = uid;
+    (req as any).mechanicId = uid;
+
+    // A request that names a booking must be for one of this workshop's bookings.
+    const bookingId = body?.bookingId;
+    if (bookingId != null && bookingId !== '') {
+      const supabase = getSupabaseAdmin();
+      if (!supabase) return res.status(503).json({ error: 'Database not configured' });
+      const { data: bk } = await supabase.from('bookings').select('mechanic_id').eq('id', String(bookingId)).maybeSingle();
+      if (!bk || String(bk.mechanic_id) !== uid) return res.status(404).json({ error: 'Booking not found' });
+    }
+    next();
+  } catch (err) {
+    console.error('[mechanic auth]', err);
+    res.status(500).json({ error: 'Could not verify your session' });
+  }
+});
+
+// The verified workshop id set by the middleware above.
+const authedMechanicId = (req: express.Request): string => (req as any).mechanicId;
+
 // Lazy-initialized Stripe instance
 let stripeInstance: Stripe | null = null;
 function getStripe(): Stripe | null {
@@ -5247,7 +5342,7 @@ app.post('/api/mechanic/verify-email-otp', async (req, res) => {
 // GET /api/mechanic/onboarding-status — has the mechanic completed onboarding?
 app.get('/api/mechanic/onboarding-status', async (req, res) => {
   try {
-    const id = req.query.id as string;
+    const id = authedMechanicId(req);
     if (!id) return res.status(400).json({ error: 'id required' });
     const supabase = getSupabaseAdmin();
     if (!supabase) return res.json({ complete: true });
@@ -5271,7 +5366,7 @@ app.get('/api/mechanic/onboarding-status', async (req, res) => {
 // GET /api/mechanic/status — reliable subscription status read (service role, no RLS race)
 app.get('/api/mechanic/status', async (req, res) => {
   try {
-    const id = req.query.id as string;
+    const id = authedMechanicId(req);
     if (!id) return res.status(400).json({ error: 'id required' });
     const supabase = getSupabaseAdmin();
     if (!supabase) return res.json({ subscriptionActive: false });
@@ -5353,17 +5448,9 @@ app.post('/api/mechanic/update-address', async (req, res) => {
 // bypasses RLS so it always persists). Used by the activation/return flows.
 app.post('/api/mechanic/activate', async (req, res) => {
   try {
-    const { mechanicId, email } = req.body;
-    if (!mechanicId && !email) return res.status(400).json({ error: 'mechanicId or email required' });
+    const id = authedMechanicId(req);
     const supabase = getSupabaseAdmin();
     if (!supabase) return res.status(500).json({ error: 'Database not configured' });
-
-    let id = mechanicId;
-    if (!id && email) {
-      const { data: p } = await supabase.from('profiles').select('id').eq('email', email).single();
-      id = p?.id;
-    }
-    if (!id) return res.status(404).json({ error: 'Mechanic not found' });
 
     const { error } = await supabase.from('profiles')
       .update({ subscription_active: true })
@@ -7230,7 +7317,11 @@ app.post('/api/mechanic/ppi', async (req, res) => {
       status: complete ? 'completed' : 'in_progress',
       completed_at: complete ? new Date().toISOString() : null,
     };
-    if (id) payload.id = id;
+    if (id) {
+      const { data: existingPpi } = await supabase.from('ppi_inspections').select('mechanic_id').eq('id', id).maybeSingle();
+      if (existingPpi && String(existingPpi.mechanic_id) !== String(mechanicId)) return res.status(404).json({ error: 'Inspection not found' });
+      payload.id = id;
+    }
     const { data, error } = await supabase.from('ppi_inspections').upsert(payload, { onConflict: 'id' }).select().single();
     if (error) return res.status(500).json({ error: error.message });
 
@@ -7425,7 +7516,7 @@ app.delete('/api/mechanic/availability/:id', async (req, res) => {
   try {
     const supabase = getSupabaseAdmin();
     if (!supabase) return res.status(500).json({ error: 'DB unavailable' });
-    await supabase.from('mechanic_availability').delete().eq('id', req.params.id);
+    await supabase.from('mechanic_availability').delete().eq('id', req.params.id).eq('mechanic_id', authedMechanicId(req));
     res.json({ success: true });
   } catch (err: any) {
     res.status(500).json({ error: err?.message || 'Failed' });
@@ -7455,7 +7546,7 @@ app.delete('/api/mechanic/closed-periods/:id', async (req, res) => {
   try {
     const supabase = getSupabaseAdmin();
     if (!supabase) return res.status(500).json({ error: 'DB unavailable' });
-    await supabase.from('mechanic_closed_periods').delete().eq('id', req.params.id);
+    await supabase.from('mechanic_closed_periods').delete().eq('id', req.params.id).eq('mechanic_id', authedMechanicId(req));
     res.json({ success: true });
   } catch (err: any) {
     res.status(500).json({ error: err?.message || 'Failed' });
@@ -7511,7 +7602,7 @@ app.delete('/api/mechanic/staff/:id', async (req, res) => {
   try {
     const supabase = getSupabaseAdmin();
     if (!supabase) return res.status(500).json({ error: 'DB unavailable' });
-    await supabase.from('mechanic_staff').delete().eq('id', req.params.id);
+    await supabase.from('mechanic_staff').delete().eq('id', req.params.id).eq('mechanic_id', authedMechanicId(req));
     res.json({ success: true });
   } catch (err: any) {
     res.status(500).json({ error: err?.message || 'Failed' });
@@ -7527,6 +7618,8 @@ app.post('/api/mechanic/roster/shift', async (req, res) => {
     }
     const supabase = getSupabaseAdmin();
     if (!supabase) return res.status(500).json({ error: 'DB unavailable' });
+    const { data: staffRow } = await supabase.from('mechanic_staff').select('id').eq('id', staffId).eq('mechanic_id', mechanicId).maybeSingle();
+    if (!staffRow) return res.status(404).json({ error: 'Team member not found' });
     const { data, error } = await supabase.from('mechanic_roster').insert({
       mechanic_id: mechanicId, staff_id: staffId, shift_date: shiftDate,
       start_time: startTime, end_time: endTime,
@@ -7545,7 +7638,7 @@ app.delete('/api/mechanic/roster/shift/:id', async (req, res) => {
   try {
     const supabase = getSupabaseAdmin();
     if (!supabase) return res.status(500).json({ error: 'DB unavailable' });
-    await supabase.from('mechanic_roster').delete().eq('id', req.params.id);
+    await supabase.from('mechanic_roster').delete().eq('id', req.params.id).eq('mechanic_id', authedMechanicId(req));
     res.json({ success: true });
   } catch (err: any) {
     res.status(500).json({ error: err?.message || 'Failed' });

@@ -3,6 +3,7 @@ import jsPDF from 'jspdf';
 import { Card } from './Card';
 import { Button } from './Button';
 import { cn } from '../utils';
+import { mechanicFetch } from '../lib/mechanicFetch';
 
 // Inspection checklist — grouped by area. Excludes high-voltage battery testing by design.
 const CHECKLIST: { category: string; items: string[] }[] = [
@@ -106,7 +107,7 @@ export const PrePurchaseInspection: React.FC<{
       }
       // Auto-fill customer details from most recent booking for this rego
       if (mechanicId) {
-        const custRes = await fetch(`/api/mechanic/customer-lookup?mechanicId=${encodeURIComponent(mechanicId)}&rego=${encodeURIComponent(plate)}`).then(r => r.ok ? r.json() : null).catch(() => null);
+        const custRes = await mechanicFetch(`/api/mechanic/customer-lookup?mechanicId=${encodeURIComponent(mechanicId)}&rego=${encodeURIComponent(plate)}`).then(r => r.ok ? r.json() : null).catch(() => null);
         if (custRes?.customer) {
           if (custRes.customer.customer_name && !custName) setCustName(custRes.customer.customer_name);
           if (custRes.customer.email && !custEmail) setCustEmail(custRes.customer.email);
@@ -193,7 +194,7 @@ export const PrePurchaseInspection: React.FC<{
       } catch (e) { console.warn('PDF gen failed', e); }
     }
     try {
-      const r = await fetch('/api/mechanic/ppi', {
+      const r = await mechanicFetch('/api/mechanic/ppi', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           mechanicId, workshopName, rego: rego.toUpperCase().trim(),

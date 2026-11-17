@@ -208,7 +208,7 @@ export const AdminPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) => {
     try {
       const r = await fetch('/api/mechanic/update-address', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ mechanicId, address: adminAddress.trim() }),
+        body: JSON.stringify({ key, mechanicId, address: adminAddress.trim() }),
       });
       const d = await r.json();
       if (r.ok) {
