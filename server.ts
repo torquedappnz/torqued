@@ -1233,7 +1233,17 @@ app.get('/api/mechanic/customers', async (req, res) => {
         lastSeen: existing?.lastSeen || b.created_at,
       });
     });
-    res.json({ customers: [...map.values()] });
+    const list: any[] = [...map.values()];
+    // Credit / bill-to accounts (migration 072). Missing table = accounts not set up yet.
+    const { data: accts, error: aErr } = await supabase.from('customer_accounts').select('*').eq('mechanic_id', mechanicId).order('created_at', { ascending: false });
+    const digits = (v: any) => String(v || '').replace(/\D/g, '');
+    for (const a of accts ?? []) {
+      const em = String(a.email || '').toLowerCase().trim(); const ph = digits(a.phone);
+      const hit = list.find(c => !c.account && ((em && String(c.email || '').toLowerCase().trim() === em) || (ph && digits(c.phone) === ph)));
+      if (hit) { hit.account = a; hit.regos = [...new Set([...(hit.regos || []), ...(a.regos || [])])]; }
+      else list.unshift({ name: a.name || a.company || '', email: a.email || '', phone: a.phone || '', regos: a.regos || [], lastSeen: a.created_at, account: a });
+    }
+    res.json({ customers: list, accountsReady: !accountsTableMissing(aErr) });
   } catch (err) {
     console.error('[mechanic/customers]', err);
     res.json({ customers: [] });
@@ -1287,6 +1297,106 @@ app.post('/api/mechanic/update-customer', async (req, res) => {
   } catch (err) {
     console.error('[mechanic/update-customer]', err);
     res.status(500).json({ error: 'Could not update customer' });
+  }
+});
+
+// POST /api/mechanic/customer-account — create or update a customer's account:
+// bill-to address, payment terms (cash / 20th of the following month / set date),
+// credit limit, manual terms and whether invoices are emailed automatically.
+app.post('/api/mechanic/customer-account', async (req, res) => {
+  try {
+    const { mechanicId, account } = req.body || {};
+    if (!mechanicId || !account) return res.status(400).json({ error: 'mechanicId and account required' });
+    const supabase = getSupabaseAdmin();
+    if (!supabase) return res.status(500).json({ error: 'Database not configured' });
+    const clean = cleanAccountInput(account);
+    if (clean.customer_type === 'business' && !clean.legal_name && !clean.company) return res.status(400).json({ error: 'Enter the business legal or trading name.' });
+    if (!clean.name && !clean.company && !clean.legal_name) return res.status(400).json({ error: 'Enter a name or company.' });
+    if (!clean.name) clean.name = clean.company || clean.legal_name;
+    if (clean.nzbn && clean.nzbn.length !== 13) return res.status(400).json({ error: 'An NZBN is 13 digits.' });
+    if (clean.email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(clean.email)) return res.status(400).json({ error: 'That invoice email doesn\'t look right.' });
+    if (clean.payment_terms === 'custom_date' && !clean.due_date) return res.status(400).json({ error: 'Pick the date payment is due.' });
+    const row: Record<string, any> = { ...clean, updated_at: new Date().toISOString() };
+    if (row.regos === undefined) delete row.regos;
+    let saved: any = null; let error: any = null;
+    if (account.id) {
+      const owned = await loadOwnedAccount(supabase, account.id, mechanicId);
+      if (!owned) return res.status(404).json({ error: 'Account not found' });
+      ({ data: saved, error } = await supabase.from('customer_accounts').update(row).eq('id', owned.id).select('*').maybeSingle());
+    } else {
+      ({ data: saved, error } = await supabase.from('customer_accounts').insert({ ...row, mechanic_id: mechanicId }).select('*').maybeSingle());
+    }
+    if (error) return res.status(accountsTableMissing(error) ? 503 : 500).json({ error: accountsTableMissing(error) ? MIGRATION_072_MSG : error.message });
+    await refreshAccountSnapshots(supabase, saved).catch(e => console.error('[customer-account] refresh', e));
+    res.json({ success: true, account: saved });
+  } catch (err) {
+    console.error('[customer-account]', err);
+    res.status(500).json({ error: 'Could not save the account' });
+  }
+});
+
+// POST /api/mechanic/quote-bill-to — bill a quote/job to an account. Pass accountId to
+// use an existing account, billTo {name, company, address, email, phone} to create one
+// (re-using a matching account by email), or remove: true to bill the driver again.
+app.post('/api/mechanic/quote-bill-to', async (req, res) => {
+  try {
+    const { bookingId, mechanicId, accountId, billTo, remove } = req.body || {};
+    const shareIn = req.body?.amount === '' || req.body?.amount == null ? null : round2(Number(req.body.amount));
+    if (shareIn != null && !(shareIn >= 0)) return res.status(400).json({ error: 'Enter how much to bill the account.' });
+    const reference = typeof req.body?.reference === 'string' ? req.body.reference.trim().slice(0, 80) : undefined;
+    const supabase = getSupabaseAdmin();
+    if (!supabase) return res.status(500).json({ error: 'Database not configured' });
+    const row = await loadOwnedBooking(supabase, bookingId, mechanicId);
+    if (!row) return res.status(404).json({ error: 'Quote not found' });
+    const meta = row.quote_items?.meta || {};
+    if (remove) {
+      const patch: Record<string, any> = { billTo: null };
+      if (meta.paymentTerms?.require === 'on_account') patch.paymentTerms = { require: 'on_collection', depositAmount: 0 };
+      await mergeQuoteMeta(supabase, row.id, patch);
+      return res.json({ success: true, row: await syncPaymentColumns(supabase, row.id), account: null });
+    }
+    let account: any = null;
+    if (accountId) {
+      account = await loadOwnedAccount(supabase, accountId, mechanicId);
+      if (!account) return res.status(404).json({ error: 'Account not found' });
+    } else {
+      const c = cleanAccountInput({ customerType: billTo?.type, legalName: billTo?.legalName, nzbn: billTo?.nzbn, name: billTo?.name, company: billTo?.company, email: billTo?.email, phone: billTo?.phone, billToAddress: billTo?.address });
+      if (!c.name && !c.company && !c.legal_name) return res.status(400).json({ error: 'Enter a name or company to bill.' });
+      if (!c.bill_to_address) return res.status(400).json({ error: 'Enter the bill-to address.' });
+      if (c.email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(c.email)) return res.status(400).json({ error: 'That invoice email doesn\'t look right.' });
+      if (c.email) {
+        const { data: existing, error: findErr } = await supabase.from('customer_accounts').select('*').eq('mechanic_id', mechanicId).eq('email', c.email).limit(1);
+        if (findErr) return res.status(accountsTableMissing(findErr) ? 503 : 500).json({ error: accountsTableMissing(findErr) ? MIGRATION_072_MSG : findErr.message });
+        account = existing?.[0] || null;
+      }
+      const rego = row.vehicle_rego ? String(row.vehicle_rego).toUpperCase() : null;
+      if (account) {
+        const upd: Record<string, any> = { bill_to_address: c.bill_to_address, updated_at: new Date().toISOString() };
+        if (c.company) upd.company = c.company;
+        if (rego && !(account.regos || []).includes(rego)) upd.regos = [...(account.regos || []), rego];
+        const { data: u } = await supabase.from('customer_accounts').update(upd).eq('id', account.id).select('*').maybeSingle();
+        account = u || account;
+      } else {
+        const { data: ins, error: insErr } = await supabase.from('customer_accounts').insert({
+          mechanic_id: mechanicId, customer_type: c.customer_type, legal_name: c.legal_name, nzbn: c.nzbn,
+          name: c.name || c.company || c.legal_name, company: c.company, email: c.email, phone: c.phone,
+          bill_to_address: c.bill_to_address, payment_terms: 'cash', regos: rego ? [rego] : [],
+        }).select('*').maybeSingle();
+        if (insErr) return res.status(accountsTableMissing(insErr) ? 503 : 500).json({ error: accountsTableMissing(insErr) ? MIGRATION_072_MSG : insErr.message });
+        account = ins;
+      }
+    }
+    const prev = meta.billTo && meta.billTo.accountId === account.id ? meta.billTo : null;
+    const keep = { amount: shareIn !== null ? (shareIn > 0 ? shareIn : null) : (prev?.amount ?? null), reference: reference !== undefined ? reference : (prev?.reference ?? '') };
+    const patch: Record<string, any> = { billTo: billToSnapshot(account, keep), billing: 'manual' };
+    const full = !(Number(keep.amount) > 0);
+    if (full && account.payment_terms !== 'cash') patch.paymentTerms = { require: 'on_account', depositAmount: 0 };
+    else if (meta.paymentTerms?.require === 'on_account') patch.paymentTerms = { require: 'on_collection', depositAmount: 0 };
+    await mergeQuoteMeta(supabase, row.id, patch);
+    res.json({ success: true, row: await syncPaymentColumns(supabase, row.id), account });
+  } catch (err) {
+    console.error('[quote-bill-to]', err);
+    res.status(500).json({ error: 'Could not save the bill-to details' });
   }
 });
 
@@ -2850,7 +2960,81 @@ async function persistQuote(supabase: any, bookingId: string, total: any, note: 
 // Online marketplace bookings are prepaid through Stripe and keep their
 // existing payment flow — the ledger never changes their payment_status.
 const MANUAL_PAYMENT_METHODS = ['cash', 'eftpos', 'bank_transfer', 'internal', 'other'];
-const PAYMENT_REQUIREMENTS = ['none', 'deposit', 'full_before', 'on_collection'];
+const PAYMENT_REQUIREMENTS = ['none', 'deposit', 'full_before', 'on_collection', 'on_account'];
+
+// ── Customer accounts (bill-to, payment terms, credit limit) — migration 072 ──
+const ACCOUNT_TERMS = ['cash', 'month_20th', 'custom_date', 'claim'];
+const MIGRATION_072_MSG = 'Customer accounts need a one-off database update: run supabase/migrations/072_customer_accounts.sql in Supabase, then try again.';
+const accountsTableMissing = (err: any) => !!err && /customer_accounts|does not exist|schema cache/i.test(String(err?.message || err));
+const fmtNzDate = (iso: string) => new Date(`${String(iso).slice(0, 10)}T00:00:00Z`).toLocaleDateString('en-NZ', { timeZone: 'UTC', day: 'numeric', month: 'long', year: 'numeric' });
+function accountTermsLabel(a: any): string {
+  if (!a) return '';
+  if (a.payment_terms === 'month_20th') return 'Due in full on the 20th of the month following invoice';
+  if (a.payment_terms === 'custom_date') return a.due_date ? `Due in full by ${fmtNzDate(a.due_date)}` : 'Due in full on the agreed date';
+  if (a.payment_terms === 'claim') return 'Paid through the claims process';
+  return 'Pay on or before collection';
+}
+// When an invoice raised today (NZ) on this account falls due. null = on collection / receipt.
+function accountDueDate(a: any, fromIso = nzTodayIso()): string | null {
+  if (!a) return null;
+  if (a.payment_terms === 'month_20th') {
+    const [y, m] = fromIso.split('-').map(Number);
+    return `${m === 12 ? y + 1 : y}-${String(m === 12 ? 1 : m + 1).padStart(2, '0')}-20`;
+  }
+  if (a.payment_terms === 'custom_date') return a.due_date ? String(a.due_date).slice(0, 10) : null;
+  return null;
+}
+// What a quote/job keeps about who it's billed to (a snapshot, refreshed when the account changes).
+function billToSnapshot(a: any, keep?: any) {
+  return {
+    // per-quote: how much of the job this account pays (null = all of it) and its claim / PO number
+    amount: keep?.amount ?? null, reference: keep?.reference ?? '',
+    accountId: a.id, type: a.customer_type || 'individual', name: a.name || '', company: a.company || '',
+    legalName: a.legal_name || '', nzbn: a.nzbn || '', address: a.bill_to_address || '',
+    email: a.email || '', phone: a.phone || '', terms: a.payment_terms || 'cash',
+    dueDate: a.payment_terms === 'custom_date' ? (a.due_date || null) : null,
+    termsLabel: accountTermsLabel(a), manualTerms: a.manual_terms || '',
+    creditLimit: a.credit_limit != null ? Number(a.credit_limit) : null,
+  };
+}
+async function loadOwnedAccount(supabase: any, accountId: any, mechanicId: any) {
+  if (!accountId || !mechanicId) return null;
+  const { data } = await supabase.from('customer_accounts').select('*').eq('id', String(accountId)).maybeSingle();
+  if (!data || String(data.mechanic_id) !== String(mechanicId)) return null;
+  return data;
+}
+// Keep every open quote/job billed to this account in step with its terms.
+async function refreshAccountSnapshots(supabase: any, account: any) {
+  const { data: rows } = await supabase.from('bookings').select('id, quote_items, payment_status')
+    .eq('mechanic_id', account.mechanic_id).eq('quote_items->meta->billTo->>accountId', String(account.id));
+  for (const r of rows ?? []) {
+    if (r.payment_status === 'confirmed') continue;
+    const meta = r.quote_items?.meta || {};
+    const patch: Record<string, any> = { billTo: billToSnapshot(account, meta.billTo) };
+    const full = !(Number(meta.billTo?.amount) > 0);
+    if (full && account.payment_terms !== 'cash') patch.paymentTerms = { require: 'on_account', depositAmount: 0 };
+    else if (meta.paymentTerms?.require === 'on_account') patch.paymentTerms = { require: 'on_collection', depositAmount: 0 };
+    await mergeQuoteMeta(supabase, r.id, patch);
+  }
+}
+function cleanAccountInput(a: any) {
+  const str = (v: any, n: number) => (typeof v === 'string' ? v.trim().slice(0, n) : '') || null;
+  const terms = ACCOUNT_TERMS.includes(a?.paymentTerms) ? a.paymentTerms : 'cash';
+  const due = typeof a?.dueDate === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(a.dueDate) ? a.dueDate : null;
+  const lim = a?.creditLimit === '' || a?.creditLimit == null ? null : Number(a.creditLimit);
+  const nz = String(a?.nzbn || '').replace(/\D/g, '').slice(0, 13);
+  return {
+    customer_type: a?.customerType === 'business' ? 'business' : 'individual',
+    legal_name: str(a?.legalName, 200), nzbn: nz || null,
+    name: str(a?.name, 120), company: str(a?.company, 160), email: str(a?.email, 200)?.toLowerCase() || null,
+    phone: str(a?.phone, 40), bill_to_address: str(a?.billToAddress, 400),
+    payment_terms: terms, due_date: terms === 'custom_date' ? due : null,
+    credit_limit: lim != null && Number.isFinite(lim) ? round2(Math.min(Math.max(lim, 0), 10_000_000)) : null,
+    manual_terms: str(a?.manualTerms, 1000),
+    auto_email_invoice: a?.autoEmailInvoice !== false,
+    regos: Array.isArray(a?.regos) ? [...new Set(a.regos.map((r: any) => String(r).toUpperCase().trim()).filter(Boolean))].slice(0, 50) as string[] : undefined,
+  };
+}
 
 async function loadOwnedBooking(supabase: any, bookingId: any, mechanicId: any) {
   if (!bookingId || !mechanicId) return null;
@@ -2876,8 +3060,19 @@ function paymentSummary(row: any) {
   // A legacy cold quote paid in full online (before the ledger existed) counts as settled.
   const settledOutsideLedger = row?.payment_status === 'confirmed' && meta.paidVia !== 'ledger';
   const balance = settledOutsideLedger ? 0 : Math.max(0, round2(total - paid));
-  const depositRequired = terms.require === 'deposit' ? round2(Math.min(Number(terms.depositAmount) || 0, total || Infinity)) : 0;
-  return { payments, paid, total, balance, terms, depositRequired, depositOutstanding: Math.max(0, round2(depositRequired - paid)) };
+  // Split billing: part (or all) of the job is billed to an account (e.g. an insurer);
+  // the customer pays the rest. Payments marked payer 'account' go to the account's share.
+  const billTo = meta.billTo || null;
+  const accountShare = billTo ? (Number(billTo.amount) > 0 ? Math.min(round2(Number(billTo.amount)), total) : total) : 0;
+  const customerShare = round2(Math.max(0, total - accountShare));
+  const accountPaid = round2(payments.filter((p: any) => p.payer === 'account').reduce((t: number, p: any) => t + (Number(p.amount) || 0), 0));
+  const customerPaid = round2(paid - accountPaid);
+  const accountBalance = settledOutsideLedger ? 0 : Math.min(balance, Math.max(0, round2(accountShare - accountPaid)));
+  const customerBalance = settledOutsideLedger ? 0 : Math.min(balance, Math.max(0, round2(customerShare - customerPaid)));
+  const depositRequired = terms.require === 'deposit' ? round2(Math.min(Number(terms.depositAmount) || 0, (billTo ? customerShare : total) || Infinity)) : 0;
+  const depositPaid = billTo ? customerPaid : paid;
+  return { payments, paid, total, balance, terms, depositRequired, depositOutstanding: Math.max(0, round2(depositRequired - depositPaid)),
+    billTo, accountShare, customerShare, accountPaid, customerPaid, accountBalance, customerBalance };
 }
 
 async function syncPaymentColumns(supabase: any, bookingId: string) {
@@ -2978,11 +3173,12 @@ app.post('/api/mechanic/record-payment', async (req, res) => {
     if (!row) return res.status(404).json({ error: 'Quote or job not found' });
     const meta = row.quote_items?.meta || {};
     const payments = Array.isArray(meta.payments) ? [...meta.payments] : [];
-    const entry = {
+    const entry: Record<string, any> = {
       id: newPaymentId(), amount, method,
       kind: kind === 'deposit' ? 'deposit' : kind === 'credit' ? 'credit' : 'payment',
       note: note ? String(note).slice(0, 300) : null, at: new Date().toISOString(),
     };
+    if (req.body.payer === 'account' && meta.billTo?.accountId) entry.payer = 'account';
     payments.push(entry);
     await mergeQuoteMeta(supabase, row.id, { payments, ...(meta.billing ? {} : { billing: 'manual' }) });
     const fresh = await syncPaymentColumns(supabase, row.id);
@@ -3039,6 +3235,147 @@ app.post('/api/mechanic/schedule-quote', async (req, res) => {
   } catch (err) {
     console.error('[schedule-quote]', err);
     res.status(500).json({ error: 'Could not add it to the calendar' });
+  }
+});
+
+// Tax invoice PDF (server side) — itemised, with bill-to, terms and due date.
+function buildTaxInvoicePdf(o: { row: any; ctx: any; mech: any; billTo: any; dueDate: string | null; invoiceNo: string; summary: ReturnType<typeof paymentSummary> }): Buffer {
+  const { row, ctx, mech, billTo, dueDate, invoiceNo, summary } = o;
+  const doc = new jsPDF({ unit: 'mm', format: 'a4' });
+  const F = 'helvetica';
+  doc.setFillColor(255, 24, 0); doc.rect(0, 0, 210, 3, 'F');
+  doc.setFont(F, 'bold'); doc.setFontSize(18); doc.setTextColor(21, 4, 2);
+  doc.text(mech?.name || 'Workshop', 15, 20);
+  doc.setFont(F, 'normal'); doc.setFontSize(8.5); doc.setTextColor(90, 90, 90);
+  const wl = [mech?.address, mech?.phone, mech?.email, mech?.nzbn ? `NZBN ${mech.nzbn}` : null].filter(Boolean) as string[];
+  wl.forEach((l, i) => doc.text(String(l), 15, 26 + i * 4.5));
+  doc.setFont(F, 'bold'); doc.setFontSize(14); doc.setTextColor(255, 24, 0); doc.text('TAX INVOICE', 195, 20, { align: 'right' });
+  doc.setFont(F, 'normal'); doc.setFontSize(9); doc.setTextColor(21, 4, 2);
+  const today = nzTodayIso();
+  [[`Invoice`, invoiceNo], ['Date', fmtNzDate(today)], ['Due', dueDate ? fmtNzDate(dueDate) : billTo?.terms === 'claim' ? 'Per claim' : 'On receipt']].forEach(([k, v], i) => {
+    doc.setTextColor(120, 120, 120); doc.text(k, 150, 27 + i * 5); doc.setTextColor(21, 4, 2); doc.text(v, 195, 27 + i * 5, { align: 'right' });
+  });
+  let y = 50;
+  doc.setDrawColor(226, 232, 240); doc.line(15, y, 195, y); y += 7;
+  doc.setFont(F, 'bold'); doc.setFontSize(9); doc.text('BILL TO', 15, y); doc.text('VEHICLE', 120, y); y += 5;
+  doc.setFont(F, 'normal');
+  const bizName = billTo?.legalName || billTo?.company;
+  const bl = (billTo
+    ? [bizName, billTo.company && billTo.legalName && billTo.company !== billTo.legalName ? `t/a ${billTo.company}` : null,
+       bizName && billTo.name && billTo.name !== bizName ? `Attn: ${billTo.name}` : (!bizName ? billTo.name : null),
+       ...(String(billTo.address || '').split(/\n|,\s*/)), billTo.nzbn ? `NZBN ${billTo.nzbn}` : null, billTo.email]
+    : [ctx.custName, ctx.email, ctx.custPhone]).filter(Boolean) as string[];
+  bl.slice(0, 7).forEach((l, i) => doc.text(String(l).trim(), 15, y + i * 4.6));
+  [ctx.vehicleLabel || row.vehicle_rego, billTo && ctx.custName ? `Driver: ${ctx.custName}` : null, row.mileage_out ? `${Number(row.mileage_out).toLocaleString()} km` : null, row.completed_at ? `Completed ${fmtNzDate(String(row.completed_at).slice(0, 10))}` : null]
+    .filter(Boolean).forEach((l, i) => doc.text(String(l), 120, y + i * 4.6));
+  y += Math.max(bl.slice(0, 7).length, 3) * 4.6 + 8;
+  doc.setFont(F, 'bold'); doc.setFillColor(247, 247, 249); doc.rect(15, y - 5, 180, 8, 'F');
+  doc.text('Description', 18, y); doc.text('Amount', 192, y, { align: 'right' }); y += 8;
+  doc.setFont(F, 'normal');
+  const { meta: _m, draft: _d, ...live } = row.quote_items || {};
+  let lines = quoteLinesOf(live);
+  if (!lines.length) lines = [{ label: (row.service_ids || []).join(', ') || 'Workshop services', amount: summary.total }];
+  for (const ln of lines) {
+    if (y > 250) { doc.addPage(); y = 20; }
+    const wrapped = doc.splitTextToSize(ln.label, 140);
+    doc.text(wrapped, 18, y); doc.text(`${ln.amount < 0 ? '-' : ''}$${Math.abs(ln.amount).toFixed(2)}`, 192, y, { align: 'right' });
+    y += wrapped.length * 4.6 + 2;
+  }
+  y += 2; doc.line(15, y, 195, y); y += 7;
+  const tot = (k: string, v: string, bold = false) => { doc.setFont(F, bold ? 'bold' : 'normal'); doc.text(k, 120, y); doc.text(v, 192, y, { align: 'right' }); y += 6; };
+  // Billed to an account for part of the job (e.g. insurer pays all but the excess).
+  const split = !!billTo && summary.customerShare > 0;
+  const invTotal = billTo ? summary.accountShare : summary.total;
+  const invPaid = billTo ? summary.accountPaid : summary.paid;
+  const invDue = billTo ? summary.accountBalance : summary.balance;
+  if (split) {
+    tot('Job total (GST incl.)', `$${summary.total.toFixed(2)}`);
+    tot('Less: paid by the customer / excess', `-$${summary.customerShare.toFixed(2)}`);
+  }
+  const gst = round2(invTotal * 3 / 23);
+  tot('Subtotal (excl. GST)', `$${(invTotal - gst).toFixed(2)}`);
+  tot('GST (15%)', `$${gst.toFixed(2)}`);
+  tot(split ? 'Invoice total (GST incl.)' : 'Total (GST incl.)', `$${invTotal.toFixed(2)}`, true);
+  if (invPaid > 0) tot('Paid', `-$${invPaid.toFixed(2)}`);
+  doc.setTextColor(255, 24, 0); tot('Amount due', `$${invDue.toFixed(2)}`, true); doc.setTextColor(21, 4, 2);
+  y += 4;
+  doc.setFont(F, 'bold'); doc.setFontSize(9); doc.text('Payment terms', 15, y); y += 5; doc.setFont(F, 'normal'); doc.setFontSize(8.5);
+  const termLines = [billTo?.reference ? `Claim / PO number: ${billTo.reference}` : null, billTo?.termsLabel || 'Due on receipt', billTo?.manualTerms || null,
+    billTo ? null : `Pay online: https://torqued.site/customer?quote=${row.id}`, `Please quote ${invoiceNo} as your reference.`].filter(Boolean) as string[];
+  termLines.forEach(t => { const w = doc.splitTextToSize(t, 180); doc.text(w, 15, y); y += w.length * 4.4 + 1; });
+  doc.setFontSize(7.5); doc.setTextColor(150, 150, 150);
+  doc.text('Tax invoice issued via Torqued. Prices include 15% GST.', 15, 287);
+  return Buffer.from(doc.output('arraybuffer'));
+}
+
+function accountInvoiceEmailHtml(o: { name: string; mechanicName: string; vehicleLabel: string; invoiceNo: string; amountDue: number; dueDate: string | null; termsLabel: string; bookingId: string; payOnline: boolean }) {
+  const link = `https://torqued.site/customer?quote=${encodeURIComponent(o.bookingId)}`;
+  return emailWrap(`<tr><td style="padding:36px 32px;">
+${emailTitle(`Invoice ${o.invoiceNo}`)}
+${emailGreeting(o.name)}
+${emailPara(`Please find attached your tax invoice from <strong>${o.mechanicName || 'your workshop'}</strong>${o.vehicleLabel ? ` for the work on <strong>${o.vehicleLabel}</strong>` : ''}.`)}
+${emailPara(`Amount due: <strong>$${o.amountDue.toFixed(2)}</strong> (GST incl.)<br/>${o.dueDate ? `Due: <strong>${fmtNzDate(o.dueDate)}</strong>` : 'Due on receipt'}${o.termsLabel ? `<br/><span style="color:#777;">${o.termsLabel}</span>` : ''}`)}
+${o.payOnline ? `<a href="${link}" style="display:inline-block;background:${EMAIL_RED};color:#fff;font-family:${EMAIL_TITLE_FONT};font-weight:900;text-transform:uppercase;font-size:13px;letter-spacing:1px;text-decoration:none;padding:14px 32px;border-radius:12px;">Pay online</a>` : ''}
+${emailPara(`<span style="color:#999;">Kind regards,<br/>${o.mechanicName || 'The Torqued team'}</span>`)}
+</td></tr>`);
+}
+
+// Build the tax invoice and (optionally) email it to the bill-to address / customer.
+async function sendTaxInvoice(supabase: any, row: any, opts: { email: boolean }) {
+  const s = paymentSummary(row);
+  const meta = row.quote_items?.meta || {};
+  const billTo = meta.billTo || null;
+  const account = billTo?.accountId ? (await supabase.from('customer_accounts').select('*').eq('id', billTo.accountId).maybeSingle()).data : null;
+  const snap = account ? billToSnapshot(account, billTo) : billTo;
+  const dueDate = meta.invoiceDue || (account ? accountDueDate(account) : null);
+  const invoiceNo = meta.invoiceNo || `INV-${String(row.id).toUpperCase().slice(-8)}`;
+  const ctx = await getBookingContext(row.id);
+  const { data: mech } = await supabase.from('profiles').select('name, address, phone, email, nzbn').eq('id', row.mechanic_id).maybeSingle();
+  const pdf = buildTaxInvoicePdf({ row, ctx, mech, billTo: snap, dueDate, invoiceNo, summary: s });
+  let emailed = false; let reason: string | null = null; let sentTo: string | null = null;
+  if (opts.email) {
+    const to = snap?.email || ctx.email;
+    const transporter = getMailTransporter();
+    if (!to) reason = 'No invoice email on file — download the PDF and send it yourself.';
+    else if (!transporter) reason = 'Email is not set up on the server — download the PDF instead.';
+    else {
+      try {
+        await transporter.sendMail({
+          from: process.env.SMTP_FROM || '"Torqued" <torquedapp.nz@gmail.com>',
+          to, replyTo: mech?.email || undefined,
+          subject: `Invoice ${invoiceNo} from ${mech?.name || 'your workshop'}`,
+          html: accountInvoiceEmailHtml({ name: snap?.name || snap?.company || ctx.custName, mechanicName: mech?.name || '', vehicleLabel: ctx.vehicleLabel, invoiceNo, amountDue: billTo ? s.accountBalance : s.balance, dueDate, termsLabel: [snap?.reference ? `Claim / PO ${snap.reference}` : '', snap?.termsLabel || ''].filter(Boolean).join(' · '), bookingId: row.id, payOnline: !billTo }),
+          attachments: [{ filename: `${invoiceNo}.pdf`, content: pdf, contentType: 'application/pdf' }],
+        });
+        emailed = true; sentTo = to;
+      } catch (mailErr: any) {
+        console.error('[tax-invoice] email failed:', mailErr?.message);
+        reason = /auth|login|credential|535/i.test(mailErr?.message || '') ? 'The email service rejected the login — email is down. Download the PDF instead.' : 'The email could not be delivered. Download the PDF instead.';
+      }
+    }
+  }
+  const patch: Record<string, any> = { invoiceNo, invoiceDue: dueDate };
+  if (!meta.invoicedAt || emailed) patch.invoicedAt = new Date().toISOString();
+  if (emailed) { patch.invoiceSentTo = sentTo; patch.invoiceSentAt = new Date().toISOString(); }
+  await mergeQuoteMeta(supabase, row.id, patch);
+  return { emailed, reason, sentTo, invoiceNo, dueDate, amountDue: billTo ? s.accountBalance : s.balance, pdfBase64: pdf.toString('base64') };
+}
+
+// POST /api/mechanic/send-invoice — tax invoice PDF; emailed unless email: false.
+app.post('/api/mechanic/send-invoice', async (req, res) => {
+  try {
+    const { bookingId, mechanicId, email } = req.body || {};
+    const supabase = getSupabaseAdmin();
+    if (!supabase) return res.status(500).json({ error: 'Database not configured' });
+    const row = await loadOwnedBooking(supabase, bookingId, mechanicId);
+    if (!row) return res.status(404).json({ error: 'Job not found' });
+    if (!(paymentSummary(row).total > 0)) return res.status(400).json({ error: 'Save the quote with prices before invoicing.' });
+    const out = await sendTaxInvoice(supabase, row, { email: email !== false });
+    const { data: fresh } = await supabase.from('bookings').select('*').eq('id', row.id).maybeSingle();
+    res.json({ success: true, ...out, row: fresh });
+  } catch (err) {
+    console.error('[send-invoice]', err);
+    res.status(500).json({ error: 'Could not create the invoice' });
   }
 });
 
@@ -3364,9 +3701,12 @@ function quoteCustomerTerms(row: any) {
   return {
     cancelled, canManage,
     isManual: !!row?.is_cold_quote, paymentRequirement: s.terms.require || 'none',
-    depositRequired: s.depositRequired, depositOutstanding: Math.min(s.depositOutstanding, s.balance),
-    paid: s.paid, balance: s.balance, allowBooking, scheduled,
+    depositRequired: s.depositRequired, depositOutstanding: Math.min(s.depositOutstanding, s.billTo ? s.customerBalance : s.balance),
+    paid: s.billTo ? s.customerPaid : s.paid, balance: s.billTo ? s.customerBalance : s.balance, allowBooking, scheduled,
+    accountShare: s.accountShare, customerShare: s.billTo ? s.customerShare : s.total,
     leadTimeDays: Number(row?.quote_items?.leadTimeDays) || 0,
+    accountTerms: s.terms.require === 'on_account' ? (meta.billTo?.termsLabel || 'Charged to your account') : null,
+    billToName: meta.billTo ? (meta.billTo.company || meta.billTo.name || null) : null,
   };
 }
 
@@ -3639,6 +3979,18 @@ app.post('/api/mechanic/car-ready', async (req, res) => {
       try { await supabase.from('vehicles').update({ mileage: Number(km), mileage_date: new Date().toISOString() }).eq('rego', booking.vehicle_rego); } catch {}
     }
     await supabase.from('bookings').update(updatePayload).eq('id', bookingId);
+
+    // Account customers: email the tax invoice automatically when the job is done.
+    const billTo = booking.quote_items?.meta?.billTo;
+    if (booking.is_cold_quote && billTo?.accountId) {
+      try {
+        const { data: acct } = await supabase.from('customer_accounts').select('auto_email_invoice').eq('id', billTo.accountId).maybeSingle();
+        const doneRow = { ...booking, ...updatePayload };
+        if (acct?.auto_email_invoice !== false && paymentSummary(doneRow).accountBalance > 0) {
+          await emailsWithin(8000, sendTaxInvoice(supabase, doneRow, { email: true }));
+        }
+      } catch (e: any) { console.error('[car-ready] auto invoice', e?.message); }
+    }
 
     // Save mechanic note with timestamp
     if (notes?.trim()) {

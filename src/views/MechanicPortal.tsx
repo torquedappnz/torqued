@@ -391,7 +391,12 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
   const qDraftTimer = useRef<any>(null);
   // Record-payment dialog + customer transactions panel
   const [payModal, setPayModal] = useState<{ rowId: string; choices?: string[] } | null>(null);
-  const [payForm, setPayForm] = useState<{ amount: string; method: string; kind: 'deposit' | 'payment' | 'credit'; note: string }>({ amount: '', method: 'eftpos', kind: 'payment', note: '' });
+  const [payForm, setPayForm] = useState<{ amount: string; method: string; kind: 'deposit' | 'payment' | 'credit'; note: string; payer: 'customer' | 'account' }>({ amount: '', method: 'eftpos', kind: 'payment', note: '', payer: 'customer' });
+  // Bill-to (an insurer, fleet or business paying all or part of a job)
+  const BT_BLANK = { accountId: '', type: 'business' as 'business' | 'individual', legalName: '', company: '', name: '', email: '', phone: '', nzbn: '', address: '', amount: '', reference: '' };
+  const [btOpen, setBtOpen] = useState(false);
+  const [btForm, setBtForm] = useState(BT_BLANK);
+  const [btBusy, setBtBusy] = useState(false);
   const [payBusy, setPayBusy] = useState(false);
   const [custPanel, setCustPanel] = useState<any | null>(null);
   // Parts-to-order is cached locally PER MECHANIC so one workshop never sees another's
@@ -449,6 +454,7 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
     // Switching quotes with edits still pending? Save them to the old quote's draft first.
     if (quoteJob?.id && quoteJob.id !== job.id && qBaselineRef.current !== null && qSnapshot !== qBaselineRef.current) { clearTimeout(qDraftTimer.current); saveDraftNow(); }
     setQuoteJob(job);
+    setBtOpen(false);
     const row = rowIn || allJobRows.find((r: any) => r.id === job.id) || null;
     const qiRaw = row?.quote_items ?? job.quoteItems ?? null;
     // An autosaved draft wins over the last saved quote — it's the newer work.
@@ -730,6 +736,35 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
     walk_in: { label: 'Walk-in', dot: 'bg-amber-500',  block: 'bg-amber-500' },
     manual:  { label: 'Manual',  dot: 'bg-slate-500',  block: 'bg-slate-500' },
   };
+  // Card actions: sentence-case, compact — the Quotes / My Jobs design language.
+  type ActTone = 'primary' | 'green' | 'plain' | 'blue' | 'amber' | 'muted';
+  const actCls = (tone: ActTone = 'plain') => cn(
+    'h-9 px-3.5 rounded-xl text-sm font-semibold border inline-flex items-center gap-1.5 transition-colors disabled:opacity-50 disabled:pointer-events-none',
+    {
+      primary: 'bg-torqued-red border-torqued-red text-white hover:bg-red-700',
+      green: 'bg-emerald-600 border-emerald-600 text-white hover:bg-emerald-700',
+      plain: 'bg-card border-border text-foreground hover:border-foreground/30',
+      blue: 'bg-card border-border text-blue-600 hover:border-blue-500/40',
+      amber: 'bg-card border-border text-amber-600 hover:border-amber-500/40',
+      muted: 'bg-card border-border text-muted hover:text-foreground',
+    }[tone]);
+  const PILL = 'text-[11px] font-semibold px-2 py-0.5 rounded-md border';
+  // 'YYYY-MM-DDTHH:mm' (NZ wall clock) → 'Wed 18 Nov, 9:00 am'
+  const fmtJobWhen = (d: any) => {
+    const m = String(d || '').match(/^(\d{4})-(\d{2})-(\d{2})(?:[T ](\d{2}):(\d{2}))?/);
+    if (!m) return String(d || '') || '—';
+    const dt = new Date(Date.UTC(Number(m[1]), Number(m[2]) - 1, Number(m[3])));
+    const day = dt.toLocaleDateString('en-NZ', { timeZone: 'UTC', weekday: 'short', day: 'numeric', month: 'short', ...(Number(m[1]) !== new Date().getFullYear() ? { year: 'numeric' } : {}) });
+    if (!m[4]) return day;
+    const h = Number(m[4]);
+    return `${day}, ${((h + 11) % 12) + 1}:${m[5]} ${h < 12 ? 'am' : 'pm'}`;
+  };
+  const JOB_STATUS_META: Record<string, { label: string; cls: string }> = {
+    accepted:    { label: 'Booked', cls: 'bg-blue-500/10 text-blue-600 border-blue-500/30' },
+    in_progress: { label: 'In progress', cls: 'bg-violet-500/10 text-violet-600 border-violet-500/30' },
+    completed:   { label: 'Completed', cls: 'bg-emerald-500/15 text-emerald-600 border-emerald-500/30' },
+    pending:     { label: 'Pending', cls: 'bg-amber-500/10 text-amber-600 border-amber-500/30' },
+  };
   const channelOf = (row: any): Channel => row?.is_cold_quote ? ((row.quote_items?.meta?.channel as Channel) || 'manual') : 'online';
   const hasLiveItems = (qi: any) => !!(qi && ((qi.parts || []).some((x: any) => x?.name) || (qi.labourHours || 0) > 0 || (qi.other || []).some((x: any) => x?.name)));
   const quoteHasPrices = (row: any) => (parseFloat(row?.quoted_price) || 0) > 0 || hasLiveItems(row?.quote_items);
@@ -773,7 +808,10 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
   // ── Payments (phone/walk-in ledger; online bookings are prepaid via Torqued) ──
   const PAY_METHOD_LABEL: Record<string, string> = { cash: 'Cash', eftpos: 'EFTPOS', bank_transfer: 'Bank transfer', internal: 'Internal / account', other: 'Other', torqued_online: 'Online via Torqued' };
   const MANUAL_METHODS = ['cash', 'eftpos', 'bank_transfer', 'internal', 'other'];
-  const PAY_REQ_LABEL: Record<string, string> = { none: 'No upfront payment', deposit: 'Minimum deposit before work', full_before: 'Full payment before work', on_collection: 'Pay on or before collection' };
+  const PAY_REQ_LABEL: Record<string, string> = { none: 'No upfront payment', deposit: 'Minimum deposit before work', full_before: 'Full payment before work', on_collection: 'Pay on or before collection', on_account: 'On account (their payment terms)' };
+  const ACCOUNT_TERMS_LABEL: Record<string, string> = { cash: 'Cash — pay on or before collection', month_20th: 'Due on the 20th of the following month', custom_date: 'Due in full on a set date', claim: 'Insurance / MBI — paid through their claims process' };
+  const nzTodayIso = () => new Intl.DateTimeFormat('en-CA', { timeZone: 'Pacific/Auckland', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date());
+  const billToWho = (bt: any) => bt ? (bt.company || bt.legalName || bt.name || 'the account') : '';
   const r2 = (n: number) => Math.round(n * 100) / 100;
   const quoteTotalOf = (r: any) => {
     const q = parseFloat(r?.quoted_price) || 0; if (q > 0) return r2(q);
@@ -786,21 +824,51 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
     const total = quoteTotalOf(r);
     if (!r?.is_cold_quote) {
       const paid = r?.payment_status === 'confirmed' ? r2(parseFloat(r?.total_price) || total) : 0;
-      return { online: true, ledger, paid, total, balance: r?.payment_status === 'confirmed' ? 0 : total, terms: { require: 'none', depositAmount: 0 }, depositRequired: 0, depositOutstanding: 0 };
+      const bal = r?.payment_status === 'confirmed' ? 0 : total;
+      return { online: true, ledger, paid, total, balance: bal, terms: { require: 'none', depositAmount: 0 }, depositRequired: 0, depositOutstanding: 0,
+        billTo: null as any, accountShare: 0, customerShare: total, accountPaid: 0, customerPaid: paid, accountBalance: 0, customerBalance: bal };
     }
     const paidLedger = r2(ledger.filter(x => !x.voided).reduce((t, x) => t + (Number(x.amount) || 0), 0));
     const terms = meta.paymentTerms || { require: 'none', depositAmount: 0 };
     const settledOutside = r?.payment_status === 'confirmed' && meta.paidVia !== 'ledger';   // paid online before the ledger existed
     const paid = settledOutside ? Math.max(paidLedger, total) : paidLedger;
     const balance = settledOutside ? 0 : Math.max(0, r2(total - paid));
-    const depositRequired = terms.require === 'deposit' ? r2(Math.min(Number(terms.depositAmount) || 0, total || Infinity)) : 0;
-    return { online: false, ledger, paid, total, balance, terms, depositRequired, depositOutstanding: Math.min(balance, Math.max(0, r2(depositRequired - paid))) };
+    // Split billing: the bill-to account pays its share (all of it unless an amount is set), the customer the rest.
+    const billTo = meta.billTo || null;
+    const accountShare = billTo ? (Number(billTo.amount) > 0 ? Math.min(r2(Number(billTo.amount)), total) : total) : 0;
+    const customerShare = r2(Math.max(0, total - accountShare));
+    const live = ledger.filter(x => !x.voided);
+    const accountPaid = r2(live.filter(x => x.payer === 'account').reduce((t, x) => t + (Number(x.amount) || 0), 0));
+    const customerPaid = r2(paid - accountPaid);
+    const accountBalance = settledOutside ? 0 : Math.min(balance, Math.max(0, r2(accountShare - accountPaid)));
+    const customerBalance = settledOutside ? 0 : Math.min(balance, Math.max(0, r2(customerShare - customerPaid)));
+    const depositRequired = terms.require === 'deposit' ? r2(Math.min(Number(terms.depositAmount) || 0, (billTo ? customerShare : total) || Infinity)) : 0;
+    const depBase = billTo ? customerPaid : paid;
+    return { online: false, ledger, paid, total, balance, terms, depositRequired, depositOutstanding: Math.min(billTo ? customerBalance : balance, Math.max(0, r2(depositRequired - depBase))),
+      billTo, accountShare, customerShare, accountPaid, customerPaid, accountBalance, customerBalance };
   };
   // Why a job needs paying attention (null = nothing owing).
   const paymentFlag = (r: any): { tone: 'red' | 'amber'; text: string } | null => {
     const ps = paySummary(r);
     if (ps.online) return r.payment_status === 'confirmed' ? null : { tone: 'amber', text: 'Awaiting online payment' };
     if (!(ps.total > 0) || ps.balance <= 0) return null;
+    if (ps.billTo) {
+      const meta = r.quote_items?.meta || {};
+      const who = billToWho(ps.billTo);
+      const out: { tone: 'red' | 'amber'; text: string }[] = [];
+      if (ps.customerBalance > 0) {
+        if (ps.depositOutstanding > 0 && r.status !== 'completed') out.push({ tone: 'red', text: `Deposit ${formatCurrency(ps.depositOutstanding)} from the customer before work starts` });
+        else if (ps.terms.require === 'full_before' && r.status !== 'completed') out.push({ tone: 'red', text: `${formatCurrency(ps.customerBalance)} from the customer before work starts` });
+        else out.push({ tone: r.status === 'completed' ? 'red' : 'amber', text: r.status === 'completed' ? `${formatCurrency(ps.customerBalance)} still owing from the customer` : `${formatCurrency(ps.customerBalance)} from the customer on collection` });
+      }
+      if (ps.accountBalance > 0 && (r.status === 'completed' || meta.invoicedAt)) {
+        const ref = ps.billTo.reference ? ` (claim/PO ${ps.billTo.reference})` : '';
+        if (!meta.invoicedAt) out.push({ tone: 'amber', text: `Invoice ${who} ${formatCurrency(ps.accountBalance)}${ref}` });
+        else if (ps.billTo.terms !== 'claim' && meta.invoiceDue && meta.invoiceDue < nzTodayIso()) out.push({ tone: 'red', text: `${formatCurrency(ps.accountBalance)} overdue from ${who}${ref}` });
+        else out.push({ tone: 'amber', text: `Awaiting ${formatCurrency(ps.accountBalance)} from ${who}${ref}${meta.invoiceDue && ps.billTo.terms !== 'claim' ? ` · due ${fmtJobWhen(meta.invoiceDue)}` : ''}` });
+      }
+      return out.length ? { tone: out.some(x => x.tone === 'red') ? 'red' : 'amber', text: out.map(x => x.text).join(' · ') } : null;
+    }
     if (ps.terms.require === 'deposit' && ps.depositOutstanding > 0 && r.status !== 'completed') return { tone: 'red', text: `Deposit ${formatCurrency(ps.depositOutstanding)} required before work starts` };
     if (ps.terms.require === 'full_before' && r.status !== 'completed') return { tone: 'red', text: `Full payment ${formatCurrency(ps.balance)} required before work starts` };
     if (r.status === 'completed') return { tone: 'red', text: `${formatCurrency(ps.balance)} still owing` };
@@ -882,8 +950,10 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
     if (!row) return;
     const ps = paySummary(row);
     const k = kind || (ps.depositOutstanding > 0 ? 'deposit' : 'payment');
-    const amt = k === 'deposit' && ps.depositOutstanding > 0 ? ps.depositOutstanding : k === 'credit' ? 0 : ps.balance;
-    setPayForm({ amount: amt > 0 ? amt.toFixed(2) : '', method: 'eftpos', kind: k, note: '' });
+    const payer: 'customer' | 'account' = ps.billTo && !(ps.customerBalance > 0) && ps.accountBalance > 0 ? 'account' : 'customer';
+    const due = ps.billTo ? (payer === 'account' ? ps.accountBalance : ps.customerBalance) : ps.balance;
+    const amt = k === 'deposit' && ps.depositOutstanding > 0 ? ps.depositOutstanding : k === 'credit' ? 0 : due;
+    setPayForm({ amount: amt > 0 ? amt.toFixed(2) : '', method: payer === 'account' ? 'bank_transfer' : 'eftpos', kind: k, note: '', payer });
     setPayModal({ rowId: row.id, choices });
   };
   const submitPayment = async () => {
@@ -892,7 +962,7 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
     if (!(amount > 0)) { alert('Enter an amount greater than $0.'); return; }
     setPayBusy(true);
     try {
-      const d = await mpost('/api/mechanic/record-payment', { bookingId: payModal.rowId, amount, method: payForm.method, kind: payForm.kind, note: payForm.note.trim() || undefined });
+      const d = await mpost('/api/mechanic/record-payment', { bookingId: payModal.rowId, amount, method: payForm.method, kind: payForm.kind, note: payForm.note.trim() || undefined, payer: payForm.payer });
       upsertRow(d.row);
       setPayModal(null);
     } catch (e: any) { alert(e?.message || 'Could not record the payment.'); }
@@ -917,11 +987,29 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
         : `Not emailed: ${d.reason}\n\nPay link${copied ? ' (copied)' : ''}: ${d.payLink}`);
     } catch (e: any) { alert(e?.message || 'Could not create the invoice.'); }
   };
+  const saveBillTo = async (row: any, body: Record<string, any>) => {
+    setBtBusy(true);
+    try {
+      const d = await mpost('/api/mechanic/quote-bill-to', { bookingId: row.id, ...body });
+      if (d.row) upsertRow(d.row);
+      if (d.account || body.remove) reloadCustomers();
+      setBtOpen(false);
+    } catch (e: any) { alert(e?.message || 'Could not save the bill-to details.'); }
+    finally { setBtBusy(false); }
+  };
+  const accountInvoice = async (row: any, email: boolean) => {
+    try {
+      const d = await mpost('/api/mechanic/send-invoice', { bookingId: row.id, email });
+      if (d.row) upsertRow(d.row);
+      if (!email || !d.emailed) downloadBase64Pdf(d.pdfBase64, `${d.invoiceNo}.pdf`);
+      if (email) alert(d.emailed ? `Invoice ${d.invoiceNo} emailed to ${d.sentTo}.` : `Not emailed: ${d.reason}\n\nThe PDF has been downloaded instead.`);
+    } catch (e: any) { alert(e?.message || 'Could not create the invoice.'); }
+  };
   const renderLedgerItem = (row: any, pmt: any) => (
     <li key={pmt.id} className={cn('flex items-center justify-between gap-3 py-2 text-xs', pmt.voided && 'opacity-50')}>
       <span className={cn('min-w-0', pmt.voided && 'line-through')}>
         <span className="font-semibold text-foreground">{pmt.kind === 'deposit' ? 'Deposit' : pmt.kind === 'credit' ? 'Credit' : 'Payment'}</span>
-        <span className="text-muted"> · {PAY_METHOD_LABEL[pmt.method] || pmt.method} · {pmt.at ? new Date(pmt.at).toLocaleDateString('en-NZ', { day: 'numeric', month: 'short', year: 'numeric' }) : ''}{pmt.note ? ` · ${pmt.note}` : ''}</span>
+        <span className="text-muted">{pmt.payer === 'account' ? ` · ${billToWho(row?.quote_items?.meta?.billTo)}` : ''} · {PAY_METHOD_LABEL[pmt.method] || pmt.method} · {pmt.at ? new Date(pmt.at).toLocaleDateString('en-NZ', { day: 'numeric', month: 'short', year: 'numeric' }) : ''}{pmt.note ? ` · ${pmt.note}` : ''}</span>
       </span>
       <span className="flex items-center gap-2 shrink-0">
         <span className={cn('font-semibold tabular-nums text-foreground', pmt.voided && 'line-through')}>{formatCurrency(Number(pmt.amount) || 0)}</span>
@@ -1124,7 +1212,7 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
       .then(d => { setRosterStaff(d.staff || []); setRosterShifts(d.shifts || []); setRosterLoaded(true); })
       .catch(() => setRosterLoaded(true));
     // Customers who've interacted with this workshop
-    fetch(`/api/mechanic/customers?mechanicId=${user.id}`).then(r => r.json()).then(d => setCustomers(d.customers || [])).catch(() => {});
+    fetch(`/api/mechanic/customers?mechanicId=${user.id}`).then(r => r.json()).then(d => { setCustomers(d.customers || []); setAccountsReady(d.accountsReady !== false); }).catch(() => {});
     // Mechanic availability slots + closed periods
     fetch(`/api/mechanic/availability?mechanicId=${user.id}`)
       .then(r => r.json())
@@ -1249,17 +1337,44 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
   const [ppiPreloadMileage, setPpiPreloadMileage] = useState('');
   // Editing a customer's contact details from the Customers tab
   const [editCustomer, setEditCustomer] = useState<any | null>(null);
-  const [editCustForm, setEditCustForm] = useState({ name: '', email: '', phone: '' });
+  const CUST_BLANK = { name: '', email: '', phone: '', type: 'individual' as 'individual' | 'business', legalName: '', company: '', nzbn: '', address: '',
+    hasAccount: false, terms: 'cash', dueDate: '', creditLimit: '', manualTerms: '', autoEmail: true };
+  const [editCustForm, setEditCustForm] = useState(CUST_BLANK);
+  const [accountsReady, setAccountsReady] = useState(true);
+  const reloadCustomers = () => {
+    if (!user) return;
+    fetch(`/api/mechanic/customers?mechanicId=${user.id}`).then(r => r.json()).then(d => { setCustomers(d.customers || []); setAccountsReady(d.accountsReady !== false); }).catch(() => {});
+  };
   const [editCustBusy, setEditCustBusy] = useState(false);
 
   const openEditCustomer = (c: any) => {
+    const a = c.account || null;
     setEditCustomer(c);
-    setEditCustForm({ name: c.name || '', email: c.email || '', phone: c.phone || '' });
+    setEditCustForm({
+      ...CUST_BLANK,
+      name: a?.name || c.name || '', email: a?.email || c.email || '', phone: a?.phone || c.phone || '',
+      type: a?.customer_type === 'business' ? 'business' : 'individual',
+      legalName: a?.legal_name || '', company: a?.company || '', nzbn: a?.nzbn || '', address: a?.bill_to_address || '',
+      hasAccount: !!a || !!c.isNew, terms: a?.payment_terms || 'cash', dueDate: a?.due_date || '',
+      creditLimit: a?.credit_limit != null ? String(a.credit_limit) : '', manualTerms: a?.manual_terms || '', autoEmail: a ? a.auto_email_invoice !== false : true,
+    });
   };
   const saveEditCustomer = async () => {
     if (!editCustomer || !user) return;
     setEditCustBusy(true);
     try {
+      const f = editCustForm;
+      if (f.hasAccount) {
+        await mpost('/api/mechanic/customer-account', { account: {
+          id: editCustomer.account?.id, customerType: f.type, legalName: f.legalName, company: f.company, nzbn: f.nzbn,
+          name: f.name, email: f.email, phone: f.phone, billToAddress: f.address,
+          paymentTerms: f.terms, dueDate: f.dueDate || null, creditLimit: f.creditLimit, manualTerms: f.manualTerms, autoEmailInvoice: f.autoEmail,
+          regos: editCustomer.regos || [],
+        } });
+      }
+      if (editCustomer.isNew || !(editCustomer.regos?.length || editCustomer.email || editCustomer.phone)) {
+        reloadCustomers(); setEditCustomer(null); return;
+      }
       const r = await fetch('/api/mechanic/update-customer', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -1267,13 +1382,13 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
           regos: editCustomer.regos || [],
           oldEmail: editCustomer.email || undefined,
           oldPhone: editCustomer.phone || undefined,
-          name: editCustForm.name, email: editCustForm.email, phone: editCustForm.phone,
+          name: editCustForm.name || editCustForm.company || editCustForm.legalName, email: editCustForm.email, phone: editCustForm.phone,
         }),
       });
       if (!r.ok) { const d = await r.json().catch(() => ({})); alert(d.error || 'Could not save customer.'); return; }
-      setCustomers(prev => prev.map(c => c === editCustomer ? { ...c, ...editCustForm } : c));
+      reloadCustomers();
       setEditCustomer(null);
-    } catch { alert('Could not save customer.'); }
+    } catch (e: any) { alert(e?.message || 'Could not save customer.'); }
     finally { setEditCustBusy(false); }
   };
   const [chatMessages, setChatMessages] = useState<{ role: 'user' | 'assistant'; content: string }[]>([]);
@@ -2172,147 +2287,91 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
 
         <div className="space-y-4">
           {displayJobs.length === 0 ? (
-            <div className="text-center py-20 bg-card rounded-3xl border border-dashed border-border">
-              <p className="text-muted font-bold uppercase tracking-widest">
+            <div className="text-center py-10 bg-card rounded-2xl border border-border">
+              <p className="text-muted">
                 {showOnlyDiagnostics
                   ? (manualQuoteFilter === 'queue' ? 'No jobs awaiting a quote' : 'No sent quotes pending booking')
                   : 'No jobs in this queue'}
               </p>
             </div>
           ) : displayJobs.map(job => (
-          <Card key={job.id} className={cn("p-6 space-y-6 border-border bg-card hover:border-torqued-red transition-all", job.quoteItems && "border-emerald-500/30")}>
-            <div className="flex justify-between items-start">
-              <div className="flex gap-4">
-                <div className="w-16 h-16 bg-background border border-border rounded-xl flex items-center justify-center">
-                  <Car size={32} className="text-muted/40" />
-                </div>
-                <div>
-                  <div className="flex items-center gap-2 mb-1">
-                    {job.reg && <div className="torqued-badge text-[10px]">{job.reg}</div>}
-                    {job.quoteItems && (
-                      <span className="text-[10px] font-black uppercase tracking-wider px-2 py-0.5 rounded bg-emerald-500/15 text-emerald-500 border border-emerald-500/30">Quote Sent</span>
+          <Card key={job.id} className={cn('p-4 sm:p-5 bg-card space-y-3', job.quoteItems ? 'border-emerald-500/40' : 'border-border')}>
+            {(() => {
+              const jx = job as any;
+              const custName = jx.customerName && jx.customerName !== job.reg ? jx.customerName : null;
+              const vd = jx.vehicleLabel || (jx.vehicleMake ? `${jx.vehicleYear ? jx.vehicleYear + ' ' : ''}${jx.vehicleMake}${jx.vehicleModel ? ' ' + jx.vehicleModel : ''}`.trim() : null);
+              const qi = job.quoteItems;
+              const price = qi ? ((qi.parts || []).reduce((s: number, p: any) => s + (p.qty || 0) * (p.unitPrice || 0), 0) + (qi.labourHours || 0) * (qi.labourRate || 0) + (qi.other || []).reduce((s: number, o: any) => s + (o.amount || 0), 0) - (qi.discount || 0)) : job.suggestedQuote;
+              return (<>
+                <div className="flex items-start justify-between gap-3">
+                  <div className="min-w-0 space-y-1">
+                    <div className="flex items-center gap-2 flex-wrap">
+                      {job.reg && <span className="torqued-badge text-[10px]">{job.reg}</span>}
+                      <span className="inline-flex items-center gap-1 text-xs font-semibold text-muted"><span className={cn('w-2 h-2 rounded-full', CHANNEL_META.online.dot)} />Online</span>
+                      <span className={cn(PILL, qi ? 'bg-emerald-500/15 text-emerald-600 border-emerald-500/30' : 'bg-amber-500/10 text-amber-600 border-amber-500/30')}>{qi ? 'Quote sent' : 'New request'}</span>
+                    </div>
+                    <p className="font-bold text-foreground truncate">{custName || job.reg || 'Customer'}</p>
+                    {(vd || jx.customerEmail) && <p className="text-sm text-muted truncate">{[vd, jx.customerEmail].filter(Boolean).join(' · ')}</p>}
+                    {job.services?.length > 0 && <p className="text-sm text-foreground/80">{job.services.join(', ')}</p>}
+                    <p className="text-xs text-muted">{job.details}</p>
+                    {job.description && <p className="text-xs text-muted italic line-clamp-2">&ldquo;{job.description}&rdquo;</p>}
+                  </div>
+                  <div className="text-right shrink-0 space-y-0.5">
+                    <p className="font-bold text-lg text-torqued-red tabular-nums">{formatCurrency(price || 0)}</p>
+                    <p className="text-[11px] text-muted">{qi ? 'Quoted · GST incl.' : 'Suggested · GST incl.'}</p>
+                    {custName && (
+                      <button onClick={() => { setActiveTab('customers'); setCustSearch(custName); }}
+                        className="text-xs font-semibold text-muted hover:text-torqued-red underline underline-offset-2">View customer</button>
                     )}
                   </div>
-                  <h3 className="text-2xl text-foreground font-bold">{(job as any).customerName || (job.reg ? job.reg : 'Unknown Vehicle')}</h3>
-                  {(() => { const vd = (job as any).vehicleLabel || ((job as any).vehicleMake ? `${(job as any).vehicleYear ? (job as any).vehicleYear + ' ' : ''}${(job as any).vehicleMake}${(job as any).vehicleModel ? ' ' + (job as any).vehicleModel : ''}`.trim() : null); return vd ? <p className="text-sm text-muted font-medium">{vd}</p> : null; })()}
-                  <p className="text-xs text-muted">{job.details}</p>
                 </div>
-              </div>
-              <div className="text-right">
-                <p className="text-[10px] font-bold uppercase text-muted">{job.quoteItems ? 'Quoted Price' : 'Suggested Quote'}</p>
-                <p className="text-2xl font-bold text-torqued-red">{formatCurrency(job.quoteItems ? (job.quoteItems.parts?.reduce((s: number, p: any) => s + (p.qty||0)*(p.unitPrice||0), 0) + (job.quoteItems.labourHours||0)*(job.quoteItems.labourRate||0) + (job.quoteItems.other||[]).reduce((s: number, o: any) => s + (o.amount||0), 0) - (job.quoteItems.discount||0)) : job.suggestedQuote)} <span className="text-[10px] block font-normal text-muted/50">Incl. GST</span></p>
-              </div>
-            </div>
-
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-4 sm:gap-6">
-              <div className="space-y-4">
-                <div className="space-y-2">
-                  <h4 className="text-xs font-bold uppercase tracking-wider text-muted font-accent">Services Requested</h4>
-                  <div className="flex flex-wrap gap-2">
-                    {job.services.map(s => (
-                      <span key={s} className="bg-background border border-border px-3 py-1 rounded-lg text-sm font-bold text-foreground">{s}</span>
+                {qi && (
+                  <div className="rounded-xl border border-border bg-background p-3 space-y-1.5">
+                    <p className="text-xs font-semibold text-muted">What you quoted</p>
+                    {(qi.parts || []).filter((p: any) => p.name).map((p: any, i: number) => (
+                      <div key={`p${i}`} className="flex justify-between text-xs"><span className="text-foreground">{p.name}{p.qty > 1 ? ` ×${p.qty}` : ''}</span><span className="text-muted tabular-nums">{formatCurrency((p.qty || 0) * (p.unitPrice || 0))}</span></div>
                     ))}
-                  </div>
-                </div>
-                <div className="space-y-2">
-                  <h4 className="text-xs font-bold uppercase tracking-wider text-muted font-accent">Customer</h4>
-                  {(job as any).customerName && (job as any).customerName !== job.reg ? (
-                    <div className="space-y-1">
-                      <p className="text-sm font-bold text-foreground">{(job as any).customerName}</p>
-                      {(job as any).customerEmail && <p className="text-xs text-muted">{(job as any).customerEmail}</p>}
-                      <button onClick={() => { setActiveTab('customers'); setCustSearch((job as any).customerName || ''); }}
-                        className="text-[10px] text-torqued-red hover:underline">View customer profile →</button>
-                    </div>
-                  ) : (
-                    <p className="text-sm italic text-muted">No customer details recorded</p>
-                  )}
-                  {job.description && (
-                    <div className="mt-2">
-                      <p className="text-[10px] font-bold uppercase tracking-wider text-muted mb-1">Description</p>
-                      <p className="text-sm italic text-foreground/80">{job.description}</p>
-                    </div>
-                  )}
-                </div>
-                {job.quoteItems && (
-                  <div className="space-y-2">
-                    <h4 className="text-xs font-bold uppercase tracking-wider text-muted font-accent">What You Quoted</h4>
-                    <div className="rounded-xl border border-border bg-background p-3 space-y-1.5">
-                      {(job.quoteItems.parts || []).filter((p: any) => p.name).map((p: any, i: number) => (
-                        <div key={`p${i}`} className="flex justify-between text-xs">
-                          <span className="text-foreground">{p.name}{p.qty > 1 ? ` ×${p.qty}` : ''}</span>
-                          <span className="text-muted font-mono">{formatCurrency((p.qty || 0) * (p.unitPrice || 0))}</span>
-                        </div>
-                      ))}
-                      {(job.quoteItems.labourHours > 0) && (
-                        <div className="flex justify-between text-xs">
-                          <span className="text-foreground">Labour ({job.quoteItems.labourHours}h @ {formatCurrency(job.quoteItems.labourRate || 0)})</span>
-                          <span className="text-muted font-mono">{formatCurrency((job.quoteItems.labourHours || 0) * (job.quoteItems.labourRate || 0))}</span>
-                        </div>
-                      )}
-                      {(job.quoteItems.shopFee > 0) && (
-                        <div className="flex justify-between text-xs"><span className="text-foreground">Workshop fee</span><span className="text-muted font-mono">{formatCurrency(job.quoteItems.shopFee)}</span></div>
-                      )}
-                      {(job.quoteItems.other || []).filter((o: any) => o.label || o.amount).map((o: any, i: number) => (
-                        <div key={`o${i}`} className="flex justify-between text-xs"><span className="text-foreground">{o.label || 'Other'}</span><span className="text-muted font-mono">{formatCurrency(o.amount || 0)}</span></div>
-                      ))}
-                      {(job.quoteItems.discount > 0) && (
-                        <div className="flex justify-between text-xs"><span className="text-emerald-600">Discount</span><span className="text-emerald-600 font-mono">−{formatCurrency(job.quoteItems.discount)}</span></div>
-                      )}
-                      {job.quoteItems.notes && <p className="text-[11px] italic text-muted pt-1 border-t border-border">{job.quoteItems.notes}</p>}
-                    </div>
+                    {qi.labourHours > 0 && (
+                      <div className="flex justify-between text-xs"><span className="text-foreground">Labour ({qi.labourHours}h @ {formatCurrency(qi.labourRate || 0)})</span><span className="text-muted tabular-nums">{formatCurrency((qi.labourHours || 0) * (qi.labourRate || 0))}</span></div>
+                    )}
+                    {qi.shopFee > 0 && <div className="flex justify-between text-xs"><span className="text-foreground">Workshop fee</span><span className="text-muted tabular-nums">{formatCurrency(qi.shopFee)}</span></div>}
+                    {(qi.other || []).filter((o: any) => o.label || o.amount).map((o: any, i: number) => (
+                      <div key={`o${i}`} className="flex justify-between text-xs"><span className="text-foreground">{o.label || 'Other'}</span><span className="text-muted tabular-nums">{formatCurrency(o.amount || 0)}</span></div>
+                    ))}
+                    {qi.discount > 0 && <div className="flex justify-between text-xs"><span className="text-emerald-600">Discount</span><span className="text-emerald-600 tabular-nums">−{formatCurrency(qi.discount)}</span></div>}
+                    {qi.notes && <p className="text-[11px] italic text-muted pt-1 border-t border-border">{qi.notes}</p>}
                   </div>
                 )}
-                <div className="space-y-2">
-                  <div className="flex items-center gap-2">
-                     <h4 className="text-xs font-bold uppercase tracking-wider text-muted font-accent">Status Check</h4>
-                     <CheckCircle2 size={12} className="text-green-500" />
-                  </div>
-                  <div className="flex items-center gap-3">
-                    <span className="text-lg font-display font-bold text-emerald-500 uppercase tracking-tighter italic">{job.status}</span>
-                    <Button 
-                      variant="outline" 
-                      size="sm" 
-                      className="h-8 py-0 px-3 text-[10px] border-border text-foreground"
-                      onClick={() => setSelectedJobId(job.id)}
-                    >
-                      View Health Report
-                    </Button>
-                  </div>
-                </div>
-              </div>
-
-              <div className="bg-background text-foreground p-4 rounded-2xl border border-border shadow-inner">
-                <span className="text-foreground font-bold text-xs font-accent">Profit Margin: {formatCurrency(job.profit)} (excl. labour).</span>
-              </div>
-            </div>
-
-            <div className="flex gap-3 pt-4 border-t border-border">
+              </>);
+            })()}
+            <div className="flex flex-wrap gap-2">
               {showOnlyDiagnostics ? (
                 <>
                   {job.quoteItems ? (
                     <>
-                      <Button className="flex-1 bg-emerald-600 hover:bg-emerald-700 text-white font-bold" onClick={() => {
+                      <button type="button" className={actCls('green')} onClick={() => {
                         fetch('/api/mechanic/update-job-status', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ bookingId: job.id, status: 'in_progress' }) }).catch(() => {});
                         setIncomingJobs(prev => prev.map(j => j.id === job.id ? { ...j, services: j.services.filter(s => s !== 'Diagnostic Inspection').concat(['Quoted Job']) } : j));
                         setActiveTab('jobs');
-                      }}>Move to My Jobs</Button>
-                      <Button className="bg-torqued-red text-white" onClick={() => openQuoteEditor(job)}>Revise Quote</Button>
+                      }}>Move to My Jobs</button>
+                      <button type="button" className={actCls('primary')} onClick={() => openQuoteEditor(job)}>Revise quote</button>
                     </>
                   ) : (
-                    <Button className="flex-1 bg-torqued-red text-white" onClick={() => openQuoteEditor(job)}>Write Manual Quote</Button>
+                    <button type="button" className={actCls('primary')} onClick={() => openQuoteEditor(job)}>Write quote</button>
                   )}
-                  <Button variant="outline" className="border-border text-foreground hover:bg-card" onClick={() => setSelectedJobId(job.id)}>Diagnostic Report</Button>
-                  <Button variant="outline" className="border-border text-foreground hover:bg-card" onClick={() => recordMileage(job, 'in')}>Check-in km</Button>
-                  <Button variant="outline" className="border-border text-foreground hover:bg-card" onClick={() => messageCustomer(job)}>Message</Button>
+                  <button type="button" className={actCls('plain')} onClick={() => setSelectedJobId(job.id)}>Diagnostic report</button>
+                  <button type="button" className={actCls('plain')} onClick={() => recordMileage(job, 'in')}>Check-in km</button>
+                  <button type="button" className={actCls('plain')} onClick={() => messageCustomer(job)}>Message</button>
                 </>
               ) : (
                 <>
-                  <Button className="flex-1 bg-emerald-600 hover:bg-emerald-700 text-white font-bold" onClick={() => handleAcceptJob(job.id)}>Accept Job</Button>
-                  <Button variant="outline" className="text-foreground border-border hover:bg-card" onClick={() => recordMileage(job, 'in')}>Check-in km</Button>
+                  <button type="button" className={actCls('green')} onClick={() => handleAcceptJob(job.id)}>Accept job</button>
+                  <button type="button" className={actCls('plain')} onClick={() => setSelectedJobId(job.id)}>Health report</button>
+                  <button type="button" className={actCls('plain')} onClick={() => recordMileage(job, 'in')}>Check-in km</button>
                   {/* Check-out records the odometer, marks the job complete, emails the customer their car is ready + a review link, and files it to history. One step. */}
-                  <Button variant="outline" className="flex-1 text-emerald-600 border-border hover:bg-card font-bold" onClick={() => recordMileage(job, 'out')}>Check-out km & Complete</Button>
-                  <Button variant="outline" className="text-foreground border-border hover:bg-card" onClick={() => openQuoteEditor(job)}>Build Quote</Button>
-                  <Button variant="outline" className="text-amber-500 border-border hover:bg-card" onClick={async () => {
+                  <button type="button" className={actCls('plain')} onClick={() => recordMileage(job, 'out')}>Check out &amp; complete</button>
+                  <button type="button" className={actCls('plain')} onClick={() => openQuoteEditor(job)}>Build quote</button>
+                  <button type="button" className={actCls('amber')} onClick={async () => {
                     const amt = prompt('Refund amount (NZD). Leave blank for FULL refund:');
                     if (amt == null) return;
                     const r = await fetch('/api/stripe/refund', {
@@ -2325,13 +2384,13 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                       setIncomingJobs(incomingJobs.filter(j => j.id !== job.id));
                     }
                     alert(d.success ? `Refunded $${d.refunded}. Booking cancelled.` : (d.error || 'Refund failed.'));
-                  }}>Refund</Button>
-                  <Button variant="outline" className="text-blue-500 border-border hover:bg-card" onClick={() => { setRescheduleModal({ job }); setRescheduleDate(''); setRescheduleComment(''); }}>Request Reschedule</Button>
-                  <Button variant="outline" className="text-muted border-border hover:bg-card" onClick={async () => {
+                  }}>Refund</button>
+                  <button type="button" className={actCls('blue')} onClick={() => { setRescheduleModal({ job }); setRescheduleDate(''); setRescheduleComment(''); }}>Request reschedule</button>
+                  <button type="button" className={actCls('muted')} onClick={async () => {
                     if (!confirm('Decline this job? It will be removed from your queue.')) return;
                     await fetch('/api/mechanic/update-job-status', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ bookingId: job.id, status: 'declined' }) });
                     setIncomingJobs(incomingJobs.filter(j => j.id !== job.id));
-                  }}>Decline</Button>
+                  }}>Decline</button>
                 </>
               )}
             </div>
@@ -3730,7 +3789,7 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
   const renderJobList = (list: any[], emptyMsg = 'No jobs here yet.') => (
     <div className="space-y-4">
       {list.length === 0 && (
-        <Card className="p-10 text-center text-muted italic bg-card border-border">{emptyMsg}</Card>
+        <Card className="p-10 text-center text-muted bg-card border-border">{emptyMsg}</Card>
       )}
       {list.map((j: any) => {
         const jobShape = {
@@ -3750,99 +3809,104 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
         const flag = paymentFlag(j);
         const ps = paySummary(j);
         return (
-          <Card key={j.id} className={cn('p-4 sm:p-5 bg-card space-y-3', flag?.tone === 'red' ? 'border-torqued-red/60 ring-1 ring-torqued-red/25' : flag ? 'border-amber-500/60' : 'border-border')}>
-            <div className="flex items-start justify-between gap-3">
-              <div className="space-y-1 min-w-0">
-                <div className="flex items-center gap-2 flex-wrap">
-                  {j.vehicle_rego && <span className="torqued-badge text-[10px]">{j.vehicle_rego}</span>}
-                  <span className="inline-flex items-center gap-1 text-[10px] uppercase font-bold tracking-wide text-muted"><span className={cn('w-2 h-2 rounded-full', CHANNEL_META[channelOf(j)].dot)} />{CHANNEL_META[channelOf(j)].label}</span>
-                  {j.transaction_id && <span className="text-[9px] uppercase font-black tracking-widest bg-amber-500/10 text-amber-500 px-1.5 py-0.5 rounded">Linked job</span>}
-                </div>
-                {(() => {
-                  const custName = j.customer_name && j.customer_name !== j.vehicle_rego ? j.customer_name : null;
-                  const carDesc = j.vehicle_label || (j.vehicle_make ? `${j.vehicle_year ? j.vehicle_year + ' ' : ''}${j.vehicle_make}${j.vehicle_model ? ' ' + j.vehicle_model : ''}`.trim() : null);
-                  return (
-                    <div>
-                      <p className="font-black text-foreground">{custName || j.vehicle_rego || 'Unknown Vehicle'}</p>
-                      {carDesc && <p className="text-xs text-muted">{carDesc}</p>}
-                      {custName && (j.email || j.customer_email || j.customer_phone) && (
-                        <p className="text-[11px] text-muted">{j.email || j.customer_email || ''}{j.customer_phone ? ` · ${j.customer_phone}` : ''}</p>
-                      )}
+          <Card key={j.id} className={cn('p-4 sm:p-5 bg-card space-y-3', flag?.tone === 'red' ? 'border-torqued-red/50' : flag ? 'border-amber-500/50' : 'border-border')}>
+            {(() => {
+              const custName = j.customer_name && j.customer_name !== j.vehicle_rego ? j.customer_name : null;
+              const carDesc = j.vehicle_label || (j.vehicle_make ? `${j.vehicle_year ? j.vehicle_year + ' ' : ''}${j.vehicle_make}${j.vehicle_model ? ' ' + j.vehicle_model : ''}`.trim() : null);
+              const email = j.email || j.customer_email || '';
+              const jst = JOB_STATUS_META[j.status] || { label: String(j.status || '').replace(/_/g, ' '), cls: 'bg-background text-muted border-border' };
+              const paid = j.payment_status === 'confirmed' && !flag;
+              const ch = channelOf(j);
+              const summary = j.quote_items ? jobSummaryTitle(j) : (jobShape.services.join(', ') || jobSummaryTitle(j));
+              return (
+                <div className="flex items-start justify-between gap-3">
+                  <div className="min-w-0 space-y-1">
+                    <div className="flex items-center gap-2 flex-wrap">
+                      {j.vehicle_rego && <span className="torqued-badge text-[10px]">{j.vehicle_rego}</span>}
+                      <span className="inline-flex items-center gap-1 text-xs font-semibold text-muted"><span className={cn('w-2 h-2 rounded-full', CHANNEL_META[ch].dot)} />{CHANNEL_META[ch].label}</span>
+                      <span className={cn(PILL, jst.cls)}>{jst.label}</span>
+                      {paid && <span className={cn(PILL, 'bg-emerald-500/15 text-emerald-600 border-emerald-500/30')}>Paid</span>}
+                      {j.transaction_id && <span className={cn(PILL, 'bg-amber-500/10 text-amber-600 border-amber-500/30')}>Linked job</span>}
                     </div>
-                  );
-                })()}
-                <p className="text-xs text-muted">{j.quote_items ? jobSummaryTitle(j) : (jobShape.services.join(', ') || jobSummaryTitle(j))}</p>
-                <p className="text-[11px] text-muted flex items-center gap-1">
-                  {j.date || '—'} {j.status === 'completed' && <span className="text-emerald-600 font-bold">✓</span>} · <span className="uppercase font-bold">{j.status}</span> · {j.payment_status === 'confirmed' ? 'Paid' : (j.payment_status || 'unpaid')}
-                  {j.mileage_in ? ` · in ${Number(j.mileage_in).toLocaleString()}km` : ''}{j.mileage_out ? ` · out ${Number(j.mileage_out).toLocaleString()}km` : ''}
-                </p>
-                {j.description && j.description !== j.customer_name && <p className="text-xs text-muted italic mt-0.5">&ldquo;{j.description}&rdquo;</p>}
-              </div>
-              <div className="text-right shrink-0 space-y-1">
-                <span className="font-black text-torqued-red block">{formatCurrency(parseFloat(j.quoted_price ?? j.total_price) || 0)}</span>
-                {(j.customer_name || j.email) && (
-                  <button onClick={() => { setActiveTab('customers'); setCustSearch(j.customer_name || j.email || ''); }}
-                    className="text-[10px] text-torqued-red/70 hover:text-torqued-red underline underline-offset-2">View profile →</button>
-                )}
-              </div>
-            </div>
+                    <p className="font-bold text-foreground truncate">{custName || j.vehicle_rego || 'Customer'}</p>
+                    {(carDesc || j.customer_phone || email) && <p className="text-sm text-muted truncate">{[carDesc, j.customer_phone, email].filter(Boolean).join(' · ')}</p>}
+                    {summary && <p className="text-sm text-foreground/80">{summary}</p>}
+                    <p className="text-xs text-muted">
+                      {j.date ? `Drop-off ${fmtJobWhen(j.date)}` : 'No drop-off date'} · Ref {String(j.id).toUpperCase()}
+                      {j.mileage_in ? ` · in ${Number(j.mileage_in).toLocaleString()} km` : ''}{j.mileage_out ? ` · out ${Number(j.mileage_out).toLocaleString()} km` : ''}
+                    </p>
+                    {j.description && j.description !== j.customer_name && <p className="text-xs text-muted italic line-clamp-2">&ldquo;{j.description}&rdquo;</p>}
+                  </div>
+                  <div className="text-right shrink-0 space-y-0.5">
+                    <p className="font-bold text-lg text-torqued-red tabular-nums">{formatCurrency(parseFloat(j.quoted_price ?? j.total_price) || 0)}</p>
+                    <p className="text-[11px] text-muted">GST incl.</p>
+                    {(j.customer_name || email) && (
+                      <button onClick={() => { setActiveTab('customers'); setCustSearch(j.customer_name || email); }}
+                        className="text-xs font-semibold text-muted hover:text-torqued-red underline underline-offset-2">View customer</button>
+                    )}
+                  </div>
+                </div>
+              );
+            })()}
             {(flag || (!ps.online && ps.total > 0)) && (
               <div className={cn('rounded-xl border px-3 py-2.5 flex flex-wrap items-center gap-x-4 gap-y-1 text-xs', flag?.tone === 'red' ? 'border-torqued-red/40 bg-torqued-red/5' : flag ? 'border-amber-500/40 bg-amber-500/5' : 'border-border bg-background')}>
                 <span className={cn('font-bold', flag?.tone === 'red' ? 'text-torqued-red' : flag ? 'text-amber-600' : 'text-emerald-600')}>{flag ? flag.text : 'Paid in full'}</span>
                 {!ps.online && <span className="text-muted">Total {formatCurrency(ps.total)} · Paid {formatCurrency(ps.paid)}{ps.balance > 0 ? ` · Balance ${formatCurrency(ps.balance)}` : ''}</span>}
-                {!ps.online && ps.terms.require !== 'none' && <span className="text-muted">{PAY_REQ_LABEL[ps.terms.require] || ''}{ps.terms.require === 'deposit' && ps.depositRequired ? ` (${formatCurrency(ps.depositRequired)})` : ''}</span>}
+                {!ps.online && ps.billTo && <span className="text-muted">{billToWho(ps.billTo)} pays {formatCurrency(ps.accountShare)}{ps.billTo.reference ? ` (claim/PO ${ps.billTo.reference})` : ''} · customer {formatCurrency(ps.customerShare)}</span>}
+                {!ps.online && ps.terms.require !== 'none' && !(ps.billTo && !(ps.customerShare > 0)) && <span className="text-muted">{PAY_REQ_LABEL[ps.terms.require] || ''}{ps.terms.require === 'deposit' && ps.depositRequired ? ` (${formatCurrency(ps.depositRequired)})` : ''}</span>}
               </div>
             )}
             <div className="flex flex-wrap gap-2">
               {!ps.online && ps.balance > 0 && (
-                <Button size="sm" className={cn('text-white', flag?.tone === 'red' ? 'bg-torqued-red' : 'bg-emerald-600 hover:bg-emerald-700')} onClick={() => openPayModal(j)}>Record payment</Button>
+                <button type="button" className={actCls(flag?.tone === 'red' ? 'primary' : 'green')} onClick={() => openPayModal(j)}>Record payment</button>
               )}
               {!ps.online && ps.balance > 0 && ps.total > 0 && (
-                <Button size="sm" variant="outline" className="text-foreground border-border hover:bg-background" onClick={() => invoiceWithTorqued(j)}>Invoice with Torqued</Button>
+                <button type="button" className={actCls('plain')} onClick={() => invoiceWithTorqued(j)}>Invoice with Torqued</button>
               )}
               {j.is_cold_quote && (
-                <Button size="sm" variant="outline" className="text-foreground border-border hover:bg-background" onClick={() => setCustPanel(customerForRow(j))}>Payments & customer</Button>
+                <button type="button" className={actCls('plain')} onClick={() => setCustPanel(customerForRow(j))}>Payments & customer</button>
               )}
               {(j.service_ids || []).includes('ppi') && j.status !== 'completed' && (
-                <Button size="sm" className="bg-torqued-red text-white" onClick={() => {
+                <button type="button" className={actCls('primary')} onClick={() => {
                   setPpiPreloadRego(j.vehicle_rego || '');
                   setPpiPreloadName(j.customer_name && j.customer_name !== j.vehicle_rego ? j.customer_name : '');
                   setPpiPreloadEmail(j.email || j.customer_email || '');
                   setPpiPreloadMileage(j.mileage_in ? String(j.mileage_in) : '');
                   setActiveTab('health'); setHealthSubtab('ppi');
-                }}>Start PPI</Button>
+                }}>Start PPI</button>
               )}
               {(j.service_ids || []).includes('ppi') && j.status === 'completed' && (
-                <Button size="sm" variant="outline" className="text-foreground border-border hover:bg-background" onClick={() => {
+                <button type="button" className={actCls('plain')} onClick={() => {
                   setPpiPreloadRego(j.vehicle_rego || '');
                   setPpiPreloadName(j.customer_name && j.customer_name !== j.vehicle_rego ? j.customer_name : '');
                   setPpiPreloadEmail(j.email || j.customer_email || '');
                   setPpiPreloadMileage(j.mileage_out ? String(j.mileage_out) : j.mileage_in ? String(j.mileage_in) : '');
                   setActiveTab('health'); setHealthSubtab('ppi');
-                }}>Download PPI Report</Button>
+                }}>Download PPI report</button>
               )}
-              <Button size="sm" variant="outline" className="text-foreground border-border hover:bg-background" onClick={() => openQuoteEditor(jobShape)}>Edit / Build Quote</Button>
-              <Button size="sm" variant="outline" className="text-foreground border-border hover:bg-background" onClick={() => messageCustomer(jobShape)}>Message Customer</Button>
+              <button type="button" className={actCls('plain')} onClick={() => openQuoteEditor(jobShape)}>Edit quote</button>
+              <button type="button" className={actCls('plain')} onClick={() => messageCustomer(jobShape)}>Message customer</button>
               {j.status === 'in_progress' && (
-                <Button size="sm" variant="outline" className="text-blue-500 border-border hover:bg-background" onClick={() => { setRescheduleModal({ job: jobShape }); setRescheduleDate(''); setRescheduleComment(''); }}>Request Reschedule</Button>
+                <button type="button" className={actCls('blue')} onClick={() => { setRescheduleModal({ job: jobShape }); setRescheduleDate(''); setRescheduleComment(''); }}>Request reschedule</button>
               )}
-              <Button size="sm" variant="outline" className="text-foreground border-border hover:bg-background" onClick={() => recordMileage(jobShape, 'out')}>Check-out km</Button>
-              <Button size="sm" variant="outline" className="text-emerald-600 border-border hover:bg-background" onClick={() => exportInvoice(j)}>{j.payment_status === 'confirmed' ? 'Export invoice' : 'Download PDF'}</Button>
+              <button type="button" className={actCls('plain')} onClick={() => recordMileage(jobShape, 'out')}>Check-out km</button>
+              {ps.billTo && ps.accountShare > 0 && <button type="button" className={actCls(ps.accountBalance > 0 && j.status === 'completed' && !j.quote_items?.meta?.invoicedAt ? 'primary' : 'plain')} onClick={() => accountInvoice(j, true)}>{j.quote_items?.meta?.invoiceSentAt ? 'Re-send' : 'Email'} invoice to {billToWho(ps.billTo)}</button>}
+              <button type="button" className={actCls('plain')} onClick={() => ps.billTo ? accountInvoice(j, false) : exportInvoice(j)}>{ps.billTo || j.payment_status === 'confirmed' ? 'Invoice PDF' : 'Download PDF'}</button>
               {j.status === 'completed' && j.payment_status === 'confirmed' && j.quote_items?.meta?.paidVia !== 'ledger' && (
-                <Button size="sm" variant="outline" className="text-amber-500 border-border hover:bg-background" onClick={() => { setRefundModal({ job: j }); setRefundAmount(''); setRefundReason(''); }}>Refund</Button>
+                <button type="button" className={actCls('amber')} onClick={() => { setRefundModal({ job: j }); setRefundAmount(''); setRefundReason(''); }}>Refund</button>
               )}
-              <Button size="sm" variant="outline" className="text-foreground border-border hover:bg-background" onClick={() => jobNotes[j.id]?.open ? setJobNotes(p => ({...p, [j.id]: {...p[j.id], open: false}})) : openJobNotes(j.id)}>
-                📝 Notes {(jobNotes[j.id]?.notes?.length ?? 0) > 0 ? `(${jobNotes[j.id]!.notes.length})` : ''}
-              </Button>
-              <Button size="sm" variant="outline" className="text-foreground border-border hover:bg-background" onClick={() => vehiclePhotos[j.vehicle_rego]?.open ? setVehiclePhotos(p => ({...p, [j.vehicle_rego]: {...p[j.vehicle_rego], open: false}})) : openVehiclePhotos(j.vehicle_rego)}>
-                📷 Photos {(vehiclePhotos[j.vehicle_rego]?.photos?.length ?? 0) > 0 ? `(${vehiclePhotos[j.vehicle_rego]!.photos.length})` : ''}
-              </Button>
+              <button type="button" className={actCls('plain')} onClick={() => jobNotes[j.id]?.open ? setJobNotes(p => ({...p, [j.id]: {...p[j.id], open: false}})) : openJobNotes(j.id)}>
+                Notes {(jobNotes[j.id]?.notes?.length ?? 0) > 0 ? `(${jobNotes[j.id]!.notes.length})` : ''}
+              </button>
+              <button type="button" className={actCls('plain')} onClick={() => vehiclePhotos[j.vehicle_rego]?.open ? setVehiclePhotos(p => ({...p, [j.vehicle_rego]: {...p[j.vehicle_rego], open: false}})) : openVehiclePhotos(j.vehicle_rego)}>
+                Photos {(vehiclePhotos[j.vehicle_rego]?.photos?.length ?? 0) > 0 ? `(${vehiclePhotos[j.vehicle_rego]!.photos.length})` : ''}
+              </button>
             </div>
 
             {/* Job Notes Panel */}
             {jobNotes[j.id]?.open && (
               <div className="border-t border-border pt-3 space-y-3">
-                <p className="text-[10px] font-bold uppercase tracking-widest text-muted">Job Notes</p>
+                <p className="text-xs font-semibold text-muted">Job notes</p>
                 {jobNotes[j.id]?.loading && <p className="text-xs text-muted">Loading…</p>}
                 {(jobNotes[j.id]?.notes || []).map((n) => (
                   <div key={n.id} className="flex items-start gap-2 bg-background rounded-xl p-3">
@@ -3861,7 +3925,7 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                     onChange={e => setJobNotes(p => ({...p, [j.id]: {...p[j.id], input: e.target.value}}))}
                     onKeyDown={e => { if (e.key === 'Enter') addJobNote(j.id); }}
                   />
-                  <Button size="sm" className="bg-torqued-red text-white" onClick={() => addJobNote(j.id)}>Add</Button>
+                  <button type="button" className={actCls('primary')} onClick={() => addJobNote(j.id)}>Add</button>
                 </div>
               </div>
             )}
@@ -3869,7 +3933,7 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
             {/* Vehicle Photos Panel */}
             {vehiclePhotos[j.vehicle_rego]?.open && (
               <div className="border-t border-border pt-3 space-y-3">
-                <p className="text-[10px] font-bold uppercase tracking-widest text-muted">Photos — {j.vehicle_rego}</p>
+                <p className="text-xs font-semibold text-muted">Photos — {j.vehicle_rego}</p>
                 {vehiclePhotos[j.vehicle_rego]?.loading && <p className="text-xs text-muted">Loading…</p>}
                 <div className="flex flex-wrap gap-2">
                   {(vehiclePhotos[j.vehicle_rego]?.photos || []).map((photo) => (
@@ -3887,7 +3951,7 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                     onChange={e => setVehiclePhotos(p => ({...p, [j.vehicle_rego]: {...p[j.vehicle_rego], comment: e.target.value}}))}
                   />
                   <label className="flex items-center gap-2 cursor-pointer">
-                    <span className="text-xs font-bold text-torqued-red border border-torqued-red/30 rounded-lg px-3 py-1.5 hover:bg-torqued-red/5">📷 Upload photo</span>
+                    <span className="text-sm font-semibold text-torqued-red border border-torqued-red/30 rounded-xl px-3.5 h-9 inline-flex items-center hover:bg-torqued-red/5">Upload photo</span>
                     <input type="file" accept="image/*" className="hidden" onChange={e => { const f = e.target.files?.[0]; if (f) uploadVehiclePhoto(j.vehicle_rego, f, j.id); e.target.value = ''; }} />
                   </label>
                 </div>
@@ -3905,6 +3969,7 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
   const [quotesFilter, setQuotesFilter] = useState<'open' | 'needs' | 'draft' | 'not_sent' | 'sent' | 'booked' | 'all'>('open');
   const [quotesChannel, setQuotesChannel] = useState<'all' | 'online' | 'phone' | 'walk_in'>('all');
   const [quoteRowBusy, setQuoteRowBusy] = useState<string | null>(null);
+  const [jobsChannel, setJobsChannel] = useState<'all' | 'online' | 'phone' | 'walk_in'>('all');
   const quoteFilterMatch = (f: typeof quotesFilter, st: QuoteStatus, r?: any) =>
     f === 'all' ? true
     : st === 'cancelled' ? f === 'open' && !!r?.quote_items?.meta?.refundOwed   // cancelled with money to refund stays in Open
@@ -3953,7 +4018,7 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
       <div className="space-y-4 pb-12 font-raleway">
         <div className="flex items-start justify-between gap-3 flex-wrap">
           <p className="text-sm text-muted max-w-2xl">Every quote — online, phone or walk-in. Drafts save automatically as you type. Once a quote is paid or added to the calendar it moves to My Jobs.</p>
-          <Button size="sm" className="bg-torqued-red text-white shrink-0" onClick={newQuote}>+ New quote</Button>
+          <button type="button" className={cn(actCls('primary'), 'shrink-0')} onClick={newQuote}>+ New quote</button>
         </div>
         <div className="flex gap-2 flex-wrap" role="group" aria-label="How the quote came in">
           {channelChips.map(([id, label, dot]) => (
@@ -4014,12 +4079,12 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                 </div>
               </div>
               <div className="flex flex-wrap gap-2">
-                <Button size="sm" disabled={busy} className="bg-torqued-red text-white" onClick={() => openQuoteEditor(rowToJobShape(r), r)}>{st === 'needs_quote' ? 'Write quote' : st === 'draft' ? 'Continue draft' : 'Open quote'}</Button>
-                <Button size="sm" variant="outline" disabled={busy || !(total > 0)} className="text-foreground border-border hover:bg-background" onClick={() => downloadRow(r)}>{busy ? 'Working…' : 'Download PDF'}</Button>
-                {!booked && st !== 'cancelled' && <Button size="sm" variant="outline" disabled={busy || !email || !(total > 0)} title={!email ? 'No email address on file' : undefined} className="text-foreground border-border hover:bg-background" onClick={() => emailRow(r)}>{st === 'sent' ? 'Re-send email' : 'Email quote'}</Button>}
-                {r.is_cold_quote && st !== 'paid' && st !== 'cancelled' && <Button size="sm" variant="outline" disabled={busy} className="text-foreground border-border hover:bg-background" onClick={() => openPayModal(r, ps.depositOutstanding > 0 ? 'deposit' : 'credit')}>+ Deposit / credit</Button>}
-                {!r.is_cold_quote && isDiagRow(r) && incomingJobs.some(j => j.id === r.id) && <Button size="sm" variant="outline" className="text-foreground border-border hover:bg-background" onClick={() => setSelectedJobId(r.id)}>Diagnostic report</Button>}
-                {booked && <Button size="sm" variant="outline" className="text-foreground border-border hover:bg-background" onClick={() => { setActiveTab('jobs'); setJobsSubtab(r.status === 'completed' ? 'history' : paymentFlag(r) ? 'payments' : 'upcoming'); }}>View in My Jobs</Button>}
+                <button type="button" disabled={busy} className={actCls('primary')} onClick={() => openQuoteEditor(rowToJobShape(r), r)}>{st === 'needs_quote' ? 'Write quote' : st === 'draft' ? 'Continue draft' : 'Open quote'}</button>
+                <button type="button" disabled={busy || !(total > 0)} className={actCls('plain')} onClick={() => downloadRow(r)}>{busy ? 'Working…' : 'Download PDF'}</button>
+                {!booked && st !== 'cancelled' && <button type="button" disabled={busy || !email || !(total > 0)} title={!email ? 'No email address on file' : undefined} className={actCls('plain')} onClick={() => emailRow(r)}>{st === 'sent' ? 'Re-send email' : 'Email quote'}</button>}
+                {r.is_cold_quote && st !== 'paid' && st !== 'cancelled' && <button type="button" disabled={busy} className={actCls('plain')} onClick={() => openPayModal(r, ps.depositOutstanding > 0 ? 'deposit' : 'credit')}>+ Deposit / credit</button>}
+                {!r.is_cold_quote && isDiagRow(r) && incomingJobs.some(j => j.id === r.id) && <button type="button" className={actCls('plain')} onClick={() => setSelectedJobId(r.id)}>Diagnostic report</button>}
+                {booked && <button type="button" className={actCls('plain')} onClick={() => { setActiveTab('jobs'); setJobsSubtab(r.status === 'completed' ? 'history' : paymentFlag(r) ? 'payments' : 'upcoming'); }}>View in My Jobs</button>}
               </div>
             </Card>
           );
@@ -4033,7 +4098,8 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
     const when = (j: any) => j.date ? new Date(j.date).getTime() : Number.POSITIVE_INFINITY;
     // One list of jobs for every channel: online bookings once accepted, and phone /
     // walk-in quotes once paid or added to the calendar.
-    const jobs = allJobRows.filter(isJobRow);
+    const everyJob = allJobRows.filter(isJobRow);
+    const jobs = everyJob.filter((j: any) => channelMatch(jobsChannel, j));
     const active = jobs.filter((j: any) => j.status !== 'completed').sort((a: any, b: any) => when(a) - when(b));
     const todayJobs = active.filter((j: any) => when(j) <= endToday.getTime());
     const upcoming = active.filter((j: any) => when(j) > endToday.getTime());
@@ -4042,24 +4108,50 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
       .sort((a: any, b: any) => new Date(b.completed_at || b.date || b.created_at || 0).getTime() - new Date(a.completed_at || a.date || a.created_at || 0).getTime());
     const sub = jobsSubtab === 'cold' ? 'accept' : jobsSubtab;
     const subtabs = [
-      { id: 'accept' as const, label: 'To accept', n: incomingJobs.filter(j => !isDiagnosticJob(j)).length, alert: false },
+      { id: 'accept' as const, label: 'To accept', n: jobsChannel === 'all' || jobsChannel === 'online' ? incomingJobs.filter(j => !isDiagnosticJob(j)).length : 0, alert: false },
       { id: 'today' as const, label: 'Today', n: todayJobs.length, alert: false },
       { id: 'upcoming' as const, label: 'Upcoming', n: upcoming.length, alert: false },
       { id: 'payments' as const, label: 'Payment due', n: payDue.length, alert: payDue.length > 0 },
       { id: 'history' as const, label: 'History', n: history.length, alert: false },
     ];
+    // Channel counts follow the selected tab, like Quotes.
+    const inTab = (list: any[]) => (c: typeof jobsChannel) => list.filter((j: any) => channelMatch(c, j)).length;
+    const tabSource: Record<string, any[]> = {
+      today: everyJob.filter((j: any) => j.status !== 'completed' && when(j) <= endToday.getTime()),
+      upcoming: everyJob.filter((j: any) => j.status !== 'completed' && when(j) > endToday.getTime()),
+      payments: everyJob.filter((j: any) => !!paymentFlag(j)),
+      history: everyJob.filter((j: any) => j.status === 'completed'),
+    };
+    const acceptN = incomingJobs.filter(j => !isDiagnosticJob(j)).length;
+    const chCount = (c: typeof jobsChannel) => sub === 'accept' ? (c === 'all' || c === 'online' ? acceptN : 0) : inTab(tabSource[sub] || [])(c);
+    const channelChips: [typeof jobsChannel, string, string | null][] = [['all', 'All channels', null], ['online', 'Online', CHANNEL_META.online.dot], ['phone', 'Phone', CHANNEL_META.phone.dot], ['walk_in', 'Walk-in', CHANNEL_META.walk_in.dot]];
+    const intro: Record<string, string> = {
+      accept: 'New online bookings waiting for you to accept.',
+      today: "Everything booked in for today, plus anything overdue.",
+      upcoming: 'Booked jobs from tomorrow on — online, phone and walk-in.',
+      payments: 'Jobs with money still to collect. Record cash, EFTPOS, bank transfer or internal payments, or send a Torqued invoice the customer pays online.',
+      history: 'Completed jobs.',
+    };
     return (
-      <div className="space-y-5 pb-12">
-        <div className="flex gap-2 flex-wrap">
-          {subtabs.map(sb => (
-            <button key={sb.id} onClick={() => setJobsSubtab(sb.id)}
-              className={cn('px-4 h-9 rounded-xl text-xs font-black uppercase tracking-wider transition-all', sub === sb.id ? 'bg-torqued-red text-white' : sb.alert ? 'bg-torqued-red/10 border border-torqued-red/40 text-torqued-red' : 'bg-card border border-border text-muted hover:text-foreground')}>
-              {sb.label}{sb.n ? ` (${sb.n})` : ''}
+      <div className="space-y-4 pb-12 font-raleway">
+        <p className="text-sm text-muted max-w-2xl">{intro[sub]}</p>
+        <div className="flex gap-2 flex-wrap" role="group" aria-label="How the job came in">
+          {channelChips.map(([id, label, dot]) => (
+            <button key={id} aria-pressed={jobsChannel === id} onClick={() => setJobsChannel(id)}
+              className={cn('px-3.5 h-10 rounded-xl text-sm font-semibold inline-flex items-center gap-2 transition-all', jobsChannel === id ? 'bg-foreground text-background' : 'bg-card border border-border text-muted hover:text-foreground')}>
+              {dot && <span className={cn('w-2.5 h-2.5 rounded-full', dot)} />}{label}<span className="opacity-60 tabular-nums">{chCount(id)}</span>
             </button>
           ))}
         </div>
-        {sub === 'payments' && <p className="text-sm text-muted">Jobs with money still to collect. Record cash, EFTPOS, bank transfer or internal payments, or send a Torqued invoice the customer pays online.</p>}
-        {sub === 'accept' && renderIncomingJobs()}
+        <div className="flex gap-1.5 flex-wrap" role="group" aria-label="Job status">
+          {subtabs.map(sb => (
+            <button key={sb.id} aria-pressed={sub === sb.id} onClick={() => setJobsSubtab(sb.id)}
+              className={cn('px-3 h-8 rounded-lg text-xs font-semibold transition-all', sub === sb.id ? 'bg-torqued-red text-white' : sb.alert ? 'border border-torqued-red/40 bg-torqued-red/5 text-torqued-red' : 'border border-border text-muted hover:text-foreground')}>
+              {sb.label} <span className="opacity-70 tabular-nums">{sb.n}</span>
+            </button>
+          ))}
+        </div>
+        {sub === 'accept' && (jobsChannel === 'all' || jobsChannel === 'online' ? renderIncomingJobs() : <Card className="p-10 text-center text-muted bg-card border-border">Only online bookings need accepting.</Card>)}
         {sub === 'today' && renderJobList(todayJobs, 'Nothing booked in for today.')}
         {sub === 'upcoming' && renderJobList(upcoming, 'No upcoming jobs.')}
         {sub === 'payments' && renderJobList(payDue, 'Nothing owing — every job is paid up.')}
@@ -4068,69 +4160,134 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
     );
   };
 
+  // What an account is owed across its jobs (its share only).
+  const accountOwing = (accountId: string, exceptRowId?: string) => allJobRows
+    .filter((r: any) => r.id !== exceptRowId && r.quote_items?.meta?.billTo?.accountId === accountId && isJobRow(r))
+    .reduce((t: number, r: any) => t + paySummary(r).accountBalance, 0);
+  const custDisplayName = (c: any) => c.account?.customer_type === 'business' ? (c.account.company || c.account.legal_name || c.name) : (c.name || c.account?.name || '—');
   const renderCustomers = () => (
-    <div className="space-y-4 pb-12 max-w-3xl">
+    <div className="space-y-4 pb-12 max-w-3xl font-raleway">
       <div className="flex items-start justify-between gap-3 flex-wrap">
-        <div>
-          <p className="text-sm text-muted">Customers who've booked, been cold-quoted, or added by your workshop.</p>
-        </div>
-        <Button size="sm" className="bg-torqued-red text-white shrink-0" onClick={() => { setColdForm({ customerName: '', email: '', phone: '', rego: '', make: '', model: '', description: '', date: '', channel: 'walk_in' }); setShowColdQuote(true); }}>+ Add new customer</Button>
+        <p className="text-sm text-muted max-w-xl">Everyone who's booked, been quoted, or been added by your workshop — including business, fleet and insurance accounts.</p>
+        <button type="button" className={cn(actCls('primary'), 'shrink-0')} onClick={() => openEditCustomer({ isNew: true, regos: [] })}>+ Add customer</button>
       </div>
-      <input value={custSearch} onChange={e => setCustSearch(e.target.value)} placeholder="Search name, email, phone or rego…"
+      {!accountsReady && <Card className="p-4 bg-amber-500/5 border-amber-500/40 text-sm text-amber-700 dark:text-amber-400">Customer accounts (bill-to, payment terms, credit limits) need a one-off database update: run <code>072_customer_accounts.sql</code> in Supabase.</Card>}
+      <input value={custSearch} onChange={e => setCustSearch(e.target.value)} placeholder="Search name, business, email, phone or rego…"
         className="w-full bg-card border border-border rounded-xl px-4 h-11 text-sm text-foreground focus:outline-none focus:border-torqued-red" />
-      {customers.length === 0 && <Card className="p-10 text-center text-muted italic bg-card border-border">No customers yet.</Card>}
+      {customers.length === 0 && <Card className="p-10 text-center text-muted bg-card border-border">No customers yet.</Card>}
       {customers.filter(c => {
         const q = custSearch.toLowerCase().trim(); if (!q) return true;
-        return [c.name, c.email, c.phone, ...(c.regos || [])].join(' ').toLowerCase().includes(q);
-      }).map((c, i) => (
-        <Card key={i} className="p-4 bg-card border-border flex items-center justify-between gap-3">
-          <div>
-            <p className="font-bold text-foreground">{c.name || '—'}</p>
-            <p className="text-xs text-muted">{c.email || ''}{c.phone ? ` · ${c.phone}` : ''}{c.regos?.length ? ` · ${c.regos.join(', ')}` : ''}</p>
-          </div>
-          <div className="flex gap-2 shrink-0">
-            <Button size="sm" variant="outline" className="text-foreground border-border" onClick={() => setCustPanel(c)}>Transactions & credit</Button>
-            <Button size="sm" variant="outline" className="text-foreground border-border" onClick={() => openEditCustomer(c)}>Edit</Button>
-            <Button size="sm" variant="outline" className="text-foreground border-border" onClick={() => {
-              setColdForm({ customerName: c.name || '', email: c.email || '', phone: c.phone || '', rego: c.regos?.[0] || '', make: '', model: '', description: '', date: '', channel: 'walk_in' });
-              setShowColdQuote(true);
-            }}>New quote</Button>
-          </div>
-        </Card>
-      ))}
+        return [c.name, c.email, c.phone, c.account?.company, c.account?.legal_name, ...(c.regos || [])].join(' ').toLowerCase().includes(q);
+      }).map((c, i) => {
+        const a = c.account;
+        const owing = a ? accountOwing(a.id) : 0;
+        const lim = a?.credit_limit != null ? Number(a.credit_limit) : null;
+        return (
+          <Card key={a?.id || i} className="p-4 bg-card border-border flex items-start sm:items-center justify-between gap-3 flex-col sm:flex-row">
+            <div className="min-w-0 space-y-1">
+              <div className="flex items-center gap-2 flex-wrap">
+                <p className="font-bold text-foreground">{custDisplayName(c)}</p>
+                {a?.customer_type === 'business' && <span className={cn(PILL, 'bg-blue-500/10 text-blue-600 border-blue-500/30')}>Business</span>}
+                {a && a.payment_terms !== 'cash' && <span className={cn(PILL, 'bg-violet-500/10 text-violet-600 border-violet-500/30')}>{a.payment_terms === 'claim' ? 'Insurance / MBI' : 'On account'}</span>}
+              </div>
+              <p className="text-sm text-muted truncate">{[a?.customer_type === 'business' && c.name ? `Contact: ${c.name}` : null, c.email, c.phone, c.regos?.length ? c.regos.join(', ') : null].filter(Boolean).join(' · ')}</p>
+              {a && (owing > 0 || lim != null) && (
+                <p className={cn('text-xs font-semibold', lim != null && owing > lim ? 'text-torqued-red' : 'text-muted')}>
+                  {formatCurrency(owing)} owing{lim != null ? ` · credit limit ${formatCurrency(lim)}${owing > lim ? ` — over by ${formatCurrency(owing - lim)}` : ''}` : ''}
+                </p>
+              )}
+            </div>
+            <div className="flex gap-2 shrink-0 flex-wrap">
+              <button type="button" className={actCls('plain')} onClick={() => setCustPanel(c)}>Transactions & credit</button>
+              <button type="button" className={actCls('plain')} onClick={() => openEditCustomer(c)}>Edit</button>
+              <button type="button" className={actCls('plain')} onClick={() => {
+                setColdForm({ customerName: c.name || '', email: c.email || '', phone: c.phone || '', rego: c.regos?.[0] || '', make: '', model: '', description: '', date: '', channel: 'walk_in' });
+                setShowColdQuote(true);
+              }}>New quote</button>
+            </div>
+          </Card>
+        );
+      })}
 
-      {editCustomer && (
-        <div className="fixed inset-0 z-[200] flex items-center justify-center p-4 bg-foreground/30 backdrop-blur-sm" onClick={() => !editCustBusy && setEditCustomer(null)}>
-          <div onClick={e => e.stopPropagation()} className="bg-background border border-border rounded-2xl p-6 w-full max-w-md space-y-5 shadow-2xl">
-            <div className="flex justify-between items-center">
-              <h3 className="text-lg font-black text-foreground">Edit customer</h3>
-              <button onClick={() => setEditCustomer(null)} className="text-muted hover:text-foreground text-xl">✕</button>
-            </div>
-            {editCustomer.regos?.length ? <p className="text-xs text-muted">Vehicles: {editCustomer.regos.join(', ')}</p> : null}
-            <div className="space-y-3">
-              <div>
-                <label className="text-[10px] font-black uppercase tracking-widest text-muted block mb-1">Name</label>
-                <input value={editCustForm.name} onChange={e => setEditCustForm(f => ({ ...f, name: e.target.value }))} placeholder="Customer name"
-                  className="w-full bg-card border border-border rounded-xl px-3 py-2.5 text-sm text-foreground focus:outline-none focus:border-torqued-red" />
+      {editCustomer && (() => {
+        const f = editCustForm;
+        const set = (patch: Partial<typeof CUST_BLANK>) => setEditCustForm(prev => ({ ...prev, ...patch }));
+        const biz = f.type === 'business';
+        const canSave = biz ? !!(f.legalName.trim() || f.company.trim()) : !!f.name.trim();
+        const field = (id: string, label: string, el: React.ReactNode) => <div><label htmlFor={id} className={UI_LABEL}>{label}</label>{el}</div>;
+        return (
+          <div className="fixed inset-0 z-[200] flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm" onClick={() => !editCustBusy && setEditCustomer(null)}>
+            <div role="dialog" aria-modal="true" aria-label={editCustomer.isNew ? 'Add customer' : 'Edit customer'} onClick={e => e.stopPropagation()}
+              className="font-raleway bg-background border border-border rounded-3xl p-6 w-full max-w-xl max-h-[92vh] overflow-y-auto space-y-5 shadow-2xl">
+              <div className="flex justify-between items-start gap-3">
+                <div>
+                  <h3 className="text-xl tracking-tight">{editCustomer.isNew ? 'Add customer' : 'Edit customer'}</h3>
+                  {editCustomer.regos?.length ? <p className="text-sm text-muted">Vehicles: {editCustomer.regos.join(', ')}</p> : null}
+                </div>
+                <button onClick={() => setEditCustomer(null)} aria-label="Close" className="w-9 h-9 rounded-xl hover:bg-card flex items-center justify-center text-muted hover:text-foreground"><X size={20} /></button>
               </div>
               <div>
-                <label className="text-[10px] font-black uppercase tracking-widest text-muted block mb-1">Email</label>
-                <input type="email" value={editCustForm.email} onChange={e => setEditCustForm(f => ({ ...f, email: e.target.value }))} placeholder="email@example.com"
-                  className="w-full bg-card border border-border rounded-xl px-3 py-2.5 text-sm text-foreground focus:outline-none focus:border-torqued-red" />
+                <p className={UI_LABEL}>Type</p>
+                <div className="grid grid-cols-2 gap-2" role="radiogroup" aria-label="Customer type">
+                  {([['individual', 'Individual'], ['business', 'Business']] as const).map(([v, l]) => (
+                    <button key={v} type="button" role="radio" aria-checked={f.type === v} onClick={() => set({ type: v, hasAccount: v === 'business' ? true : f.hasAccount })}
+                      className={cn('h-11 rounded-xl border text-sm font-semibold transition-colors', f.type === v ? 'border-torqued-red bg-torqued-red/5 text-foreground' : 'border-border text-muted hover:text-foreground')}>{l}</button>
+                  ))}
+                </div>
               </div>
-              <div>
-                <label className="text-[10px] font-black uppercase tracking-widest text-muted block mb-1">Phone</label>
-                <input value={editCustForm.phone} onChange={e => setEditCustForm(f => ({ ...f, phone: e.target.value }))} placeholder="021 234 5678"
-                  className="w-full bg-card border border-border rounded-xl px-3 py-2.5 text-sm text-foreground focus:outline-none focus:border-torqued-red" />
+              {biz ? (
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  {field('c-legal', 'Legal name', <input id="c-legal" value={f.legalName} onChange={e => set({ legalName: e.target.value })} placeholder="e.g. Acme Insurance Limited" className={UI_INPUT} />)}
+                  {field('c-trading', 'Trading name', <input id="c-trading" value={f.company} onChange={e => set({ company: e.target.value })} placeholder="e.g. Acme Insurance" className={UI_INPUT} />)}
+                  {field('c-contact', 'Contact person', <input id="c-contact" value={f.name} onChange={e => set({ name: e.target.value })} placeholder="Best person to deal with" className={UI_INPUT} />)}
+                  {field('c-nzbn', 'NZBN', <input id="c-nzbn" inputMode="numeric" value={f.nzbn} onChange={e => set({ nzbn: e.target.value })} placeholder="13 digits" className={UI_INPUT} />)}
+                  {field('c-email', 'Contact / invoice email', <input id="c-email" type="email" value={f.email} onChange={e => set({ email: e.target.value })} placeholder="accounts@business.co.nz" className={UI_INPUT} />)}
+                  {field('c-phone', 'Contact phone', <input id="c-phone" value={f.phone} onChange={e => set({ phone: e.target.value })} placeholder="09 123 4567" className={UI_INPUT} />)}
+                </div>
+              ) : (
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  <div className="sm:col-span-2">{field('c-name', 'Name', <input id="c-name" value={f.name} onChange={e => set({ name: e.target.value })} placeholder="Customer name" className={UI_INPUT} />)}</div>
+                  {field('c-email', 'Email', <input id="c-email" type="email" value={f.email} onChange={e => set({ email: e.target.value })} placeholder="email@example.com" className={UI_INPUT} />)}
+                  {field('c-phone', 'Phone', <input id="c-phone" value={f.phone} onChange={e => set({ phone: e.target.value })} placeholder="021 234 5678" className={UI_INPUT} />)}
+                </div>
+              )}
+              {!biz && !editCustomer.isNew && (
+                <label className="flex items-start gap-3 text-sm cursor-pointer">
+                  <input type="checkbox" checked={f.hasAccount} onChange={e => set({ hasAccount: e.target.checked })} className="mt-0.5 w-4 h-4 accent-[#FF1800] shrink-0" />
+                  <span>Set up an account<span className="block text-xs text-muted">Billing address, payment terms and a credit limit.</span></span>
+                </label>
+              )}
+              {f.hasAccount && (
+                <div className="space-y-3 rounded-2xl border border-border bg-card p-4">
+                  {field('c-addr', biz ? 'Address (bill to)' : 'Billing address', <textarea id="c-addr" rows={3} value={f.address} onChange={e => set({ address: e.target.value })} placeholder={'Street\nSuburb, City 0000'} className={cn(UI_INPUT, 'h-auto py-2.5')} />)}
+                  <div>
+                    <p className={UI_LABEL}>Payment terms</p>
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-2" role="radiogroup" aria-label="Payment terms">
+                      {Object.entries(ACCOUNT_TERMS_LABEL).map(([v, l]) => (
+                        <button key={v} type="button" role="radio" aria-checked={f.terms === v} onClick={() => set({ terms: v })}
+                          className={cn('text-left rounded-xl border px-3 py-2.5 text-sm font-semibold transition-colors', f.terms === v ? 'border-torqued-red bg-torqued-red/5 text-foreground' : 'border-border text-muted hover:text-foreground')}>{l}</button>
+                      ))}
+                    </div>
+                  </div>
+                  {f.terms === 'custom_date' && field('c-due', 'Payment due (in full) on', <input id="c-due" type="date" value={f.dueDate} onChange={e => set({ dueDate: e.target.value })} className={UI_INPUT} />)}
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                    {field('c-limit', 'Credit limit ($, optional)', <input id="c-limit" type="number" min={0} step="1" value={f.creditLimit} onChange={e => set({ creditLimit: e.target.value })} placeholder="No limit" className={UI_INPUT} />)}
+                  </div>
+                  {field('c-terms', 'Other terms (printed on invoices)', <textarea id="c-terms" rows={2} value={f.manualTerms} onChange={e => set({ manualTerms: e.target.value })} placeholder="e.g. Quote claim number on remittance. Excess paid by the insured." className={cn(UI_INPUT, 'h-auto py-2.5')} />)}
+                  <label className="flex items-start gap-3 text-sm cursor-pointer">
+                    <input type="checkbox" checked={f.autoEmail} onChange={e => set({ autoEmail: e.target.checked })} className="mt-0.5 w-4 h-4 accent-[#FF1800] shrink-0" />
+                    <span>Email the tax invoice (PDF) automatically<span className="block text-xs text-muted">Sent when you check the job out. You can always send or download it from the job.</span></span>
+                  </label>
+                </div>
+              )}
+              <div className="flex gap-3">
+                <button type="button" className={cn(actCls('plain'), 'flex-1 justify-center h-11')} disabled={editCustBusy} onClick={() => setEditCustomer(null)}>Cancel</button>
+                <button type="button" className={cn(actCls('primary'), 'flex-1 justify-center h-11')} disabled={editCustBusy || !canSave} onClick={saveEditCustomer}>{editCustBusy ? 'Saving…' : editCustomer.isNew ? 'Add customer' : 'Save changes'}</button>
               </div>
-            </div>
-            <div className="flex gap-3">
-              <Button variant="outline" className="flex-1 border-border text-foreground" disabled={editCustBusy} onClick={() => setEditCustomer(null)}>Cancel</Button>
-              <Button className="flex-1 bg-torqued-red text-white" disabled={editCustBusy || !editCustForm.name.trim()} onClick={saveEditCustomer}>{editCustBusy ? 'Saving…' : 'Save changes'}</Button>
             </div>
           </div>
-        </div>
-      )}
+        );
+      })()}
     </div>
   );
 
@@ -5854,13 +6011,107 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                       </section>
                     )}
 
+                    {isManual && row && (() => {
+                      const bt = row.quote_items?.meta?.billTo || null;
+                      const accounts = customers.filter((c: any) => c.account).map((c: any) => c.account);
+                      const who = billToWho(bt);
+                      const share = bt ? (Number(bt.amount) > 0 ? Math.min(Number(bt.amount), qTotal) : qTotal) : 0;
+                      const owingElsewhere = bt?.accountId ? accountOwing(bt.accountId, row.id) : 0;
+                      const over = bt && bt.creditLimit != null ? r2(owingElsewhere + share - Number(bt.creditLimit)) : 0;
+                      const f = btForm;
+                      const setF = (patch: Partial<typeof BT_BLANK>) => setBtForm(prev => ({ ...prev, ...patch }));
+                      const isNewAcct = !f.accountId;
+                      const shareFields = (
+                        <div className="grid grid-cols-2 gap-2">
+                          <div><label htmlFor="bt-amt" className={UI_LABEL}>They pay ($)</label>
+                            <input id="bt-amt" type="number" min={0} step="0.01" value={f.amount} onChange={e => setF({ amount: e.target.value })} placeholder={`All — ${formatCurrency(qTotal)}`} className={UI_INPUT} /></div>
+                          <div><label htmlFor="bt-ref" className={UI_LABEL}>Claim / PO no.</label>
+                            <input id="bt-ref" value={f.reference} onChange={e => setF({ reference: e.target.value })} placeholder="Optional" className={UI_INPUT} /></div>
+                        </div>
+                      );
+                      return (
+                        <section className={UI_CARD} aria-label="Bill to">
+                          <div className="flex items-center justify-between gap-2">
+                            <h4 className={UI_HEAD}>Bill to</h4>
+                            {bt && !btOpen && <button type="button" className="text-xs font-semibold text-muted hover:text-foreground underline underline-offset-2" onClick={() => { setBtForm({ ...BT_BLANK, accountId: bt.accountId || '', amount: bt.amount != null ? String(bt.amount) : '', reference: bt.reference || '' }); setBtOpen(true); }}>Change</button>}
+                          </div>
+                          {bt && !btOpen ? (
+                            <div className="space-y-3 text-sm">
+                              <div className="space-y-0.5">
+                                <p className="font-bold text-foreground">{who}</p>
+                                {bt.legalName && bt.company && bt.legalName !== bt.company && <p className="text-xs text-muted">{bt.legalName}</p>}
+                                {bt.name && bt.name !== who && <p className="text-muted">Attn: {bt.name}</p>}
+                                {bt.address && <p className="text-muted whitespace-pre-line">{bt.address}</p>}
+                                {bt.email && <p className="text-muted truncate">{bt.email}</p>}
+                                {bt.nzbn && <p className="text-xs text-muted">NZBN {bt.nzbn}</p>}
+                              </div>
+                              <div className="rounded-xl bg-background border border-border p-3 space-y-1.5">
+                                {sumRow(`${who} pays${bt.reference ? ` · ${bt.reference}` : ''}`, formatCurrency(share))}
+                                {sumRow('Customer pays', formatCurrency(Math.max(0, qTotal - share)))}
+                                <p className="text-xs text-muted">{bt.termsLabel}{bt.manualTerms ? ` · ${bt.manualTerms}` : ''}</p>
+                              </div>
+                              {over > 0 && <p className="text-xs font-semibold text-torqued-red">This takes {who} {formatCurrency(over)} over their {formatCurrency(Number(bt.creditLimit))} credit limit.</p>}
+                              <div className="flex gap-2 flex-wrap">
+                                <button type="button" className={actCls('plain')} onClick={() => { const c = customers.find((x: any) => x.account?.id === bt.accountId); if (c) openEditCustomer(c); }}>Account & terms</button>
+                                <button type="button" className={actCls('muted')} disabled={btBusy} onClick={() => saveBillTo(row, { remove: true })}>Remove</button>
+                              </div>
+                            </div>
+                          ) : btOpen ? (
+                            <div className="space-y-3">
+                              {accounts.length > 0 && (
+                                <div><label htmlFor="bt-acct" className={UI_LABEL}>Account</label>
+                                  <select id="bt-acct" value={f.accountId} onChange={e => setF({ accountId: e.target.value })} className={UI_INPUT}>
+                                    <option value="">+ New customer / business</option>
+                                    {accounts.map((a: any) => <option key={a.id} value={a.id}>{a.company || a.legal_name || a.name}{a.payment_terms === 'claim' ? ' · insurance' : a.payment_terms !== 'cash' ? ' · on account' : ''}</option>)}
+                                  </select>
+                                </div>
+                              )}
+                              {isNewAcct && (<>
+                                <div className="grid grid-cols-2 gap-2" role="radiogroup" aria-label="Bill-to type">
+                                  {([['business', 'Business / insurer'], ['individual', 'Individual']] as const).map(([v, l]) => (
+                                    <button key={v} type="button" role="radio" aria-checked={f.type === v} onClick={() => setF({ type: v })}
+                                      className={cn('h-10 rounded-xl border text-sm font-semibold transition-colors', f.type === v ? 'border-torqued-red bg-torqued-red/5 text-foreground' : 'border-border text-muted hover:text-foreground')}>{l}</button>
+                                  ))}
+                                </div>
+                                {f.type === 'business' ? (<>
+                                  <input aria-label="Legal name" value={f.legalName} onChange={e => setF({ legalName: e.target.value })} placeholder="Legal name" className={UI_INPUT} />
+                                  <input aria-label="Trading name" value={f.company} onChange={e => setF({ company: e.target.value })} placeholder="Trading name" className={UI_INPUT} />
+                                  <input aria-label="Contact person" value={f.name} onChange={e => setF({ name: e.target.value })} placeholder="Contact person" className={UI_INPUT} />
+                                  <input aria-label="NZBN" inputMode="numeric" value={f.nzbn} onChange={e => setF({ nzbn: e.target.value })} placeholder="NZBN (optional)" className={UI_INPUT} />
+                                </>) : (
+                                  <input aria-label="Name" value={f.name} onChange={e => setF({ name: e.target.value })} placeholder="Name" className={UI_INPUT} />
+                                )}
+                                <input aria-label="Invoice email" type="email" value={f.email} onChange={e => setF({ email: e.target.value })} placeholder="Invoice email" className={UI_INPUT} />
+                                <input aria-label="Phone" value={f.phone} onChange={e => setF({ phone: e.target.value })} placeholder="Phone (optional)" className={UI_INPUT} />
+                                <textarea aria-label="Bill-to address" rows={3} value={f.address} onChange={e => setF({ address: e.target.value })} placeholder={'Bill-to address\nStreet, Suburb, City'} className={cn(UI_INPUT, 'h-auto py-2.5')} />
+                              </>)}
+                              {shareFields}
+                              <p className="text-xs text-muted">Leave "They pay" blank to bill the whole job. The customer pays the rest — e.g. the insurance excess.</p>
+                              <div className="grid grid-cols-2 gap-2">
+                                <button type="button" className={cn(actCls('plain'), 'justify-center')} disabled={btBusy} onClick={() => setBtOpen(false)}>Cancel</button>
+                                <button type="button" className={cn(actCls('primary'), 'justify-center')} disabled={btBusy}
+                                  onClick={() => saveBillTo(row, isNewAcct
+                                    ? { billTo: { type: f.type, legalName: f.legalName, company: f.company, name: f.name, email: f.email, phone: f.phone, nzbn: f.nzbn, address: f.address }, amount: f.amount, reference: f.reference }
+                                    : { accountId: f.accountId, amount: f.amount, reference: f.reference })}>{btBusy ? 'Saving…' : 'Save bill-to'}</button>
+                              </div>
+                            </div>
+                          ) : (
+                            <>
+                              <p className="text-sm text-muted">Optional — invoice a business, insurer or someone other than the driver, for all or part of the job. Saving creates a customer account.</p>
+                              <button type="button" className={actCls('plain')} onClick={() => { setBtForm(BT_BLANK); setBtOpen(true); }}>+ Add bill-to</button>
+                            </>
+                          )}
+                        </section>
+                      );
+                    })()}
+
                     {isManual && row && pay && (
                       <section className={UI_CARD} aria-label="Payment">
                         <h4 className={UI_HEAD}>Payment</h4>
                         <div>
                           <label htmlFor="q-terms" className={UI_LABEL}>Before work starts</label>
                           <select id="q-terms" value={qTerms.require} onChange={e => { const t = { ...qTerms, require: e.target.value }; setQTerms(t); saveSettings({ paymentTerms: t }); }} className={UI_INPUT}>
-                            {Object.entries(PAY_REQ_LABEL).map(([v, l]) => <option key={v} value={v}>{l}</option>)}
+                            {Object.entries(PAY_REQ_LABEL).filter(([v]) => v !== 'on_account' || !!row.quote_items?.meta?.billTo).map(([v, l]) => <option key={v} value={v}>{l}</option>)}
                           </select>
                         </div>
                         {qTerms.require === 'deposit' && (
@@ -6049,6 +6300,20 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                 <div><p className="text-xs text-muted">Balance</p><p className="font-bold tabular-nums">{ps.total > 0 ? formatCurrency(ps.balance) : '—'}</p></div>
               </div>
               {ps.depositOutstanding > 0 && <p className="text-sm font-semibold text-amber-600 -mt-2">Deposit of {formatCurrency(ps.depositOutstanding)} required before work starts.</p>}
+              {ps.billTo && (
+                <div>
+                  <p className={UI_LABEL}>Who paid</p>
+                  <div className="grid grid-cols-2 gap-2" role="radiogroup" aria-label="Who paid">
+                    {([['customer', 'Customer', ps.customerBalance], ['account', billToWho(ps.billTo), ps.accountBalance]] as const).map(([v, l, owing]) => (
+                      <button key={v} type="button" role="radio" aria-checked={payForm.payer === v}
+                        onClick={() => setPayForm(f => ({ ...f, payer: v, amount: owing > 0 ? owing.toFixed(2) : f.amount, method: v === 'account' ? 'bank_transfer' : f.method }))}
+                        className={cn('text-left rounded-xl border p-3 transition-colors', payForm.payer === v ? 'border-torqued-red bg-torqued-red/5' : 'border-border hover:bg-card')}>
+                        <span className="block text-sm font-bold truncate">{l}</span><span className="block text-xs text-muted">{owing > 0 ? `${formatCurrency(owing)} owing` : 'Nothing owing'}</span>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
               <div>
                 <p className={UI_LABEL}>Type</p>
                 <div className="grid grid-cols-3 gap-2" role="radiogroup" aria-label="Payment type">

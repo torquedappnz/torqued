@@ -1707,7 +1707,10 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
     const q = quoteReview;
     if (!q || q.cancelled || quoteManage) return quoteMsg ? <p className="text-sm text-torqued-red text-center font-semibold" role="alert">{quoteMsg}</p> : null;
     const money = (n: number) => `$${Number(n || 0).toFixed(2)}`;
-    const paidUp = q.paymentStatus === 'confirmed' || (q.isManual && q.total > 0 && !(q.balance > 0));
+    // Part (or all) of the job billed to an insurer / business: the customer sees and pays only their share.
+    const covered = q.isManual && Number(q.accountShare) > 0 && q.billToName;
+    const coveredAll = covered && !(Number(q.customerShare) > 0);
+    const paidUp = q.paymentStatus === 'confirmed' || (q.isManual && q.total > 0 && !(q.balance > 0) && !coveredAll);
     if (!q.isManual) {
       return q.paymentStatus === 'confirmed'
         ? <div className="text-center text-emerald-500 font-bold text-sm py-2">✓ This quote has already been paid.</div>
@@ -1715,16 +1718,25 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
     }
     const req = q.paymentRequirement || 'none';
     const depositDue = Number(q.depositOutstanding) || 0;
-    const canBookFree = q.allowBooking && (req === 'none' || req === 'on_collection');
+    const canBookFree = q.allowBooking && (req === 'none' || req === 'on_collection' || req === 'on_account' || coveredAll);
     return (
       <div className="space-y-3">
+        {covered && (
+          <div className="rounded-xl border border-border bg-background p-3 space-y-1 text-sm">
+            <div className="flex justify-between gap-3"><span className="text-muted">Covered by {q.billToName}</span><span className="font-bold">{money(q.accountShare)}</span></div>
+            <div className="flex justify-between gap-3"><span className="text-muted">Your share</span><span className="font-bold">{money(q.customerShare)}</span></div>
+          </div>
+        )}
         {q.paid > 0 && (
           <div className="rounded-xl border border-border bg-background p-3 space-y-1 text-sm">
             <div className="flex justify-between"><span className="text-muted">Paid so far</span><span className="font-bold">{money(q.paid)}</span></div>
             <div className="flex justify-between"><span className="text-muted">Balance</span><span className="font-bold">{money(q.balance)}</span></div>
           </div>
         )}
-        {paidUp ? <div className="text-center text-emerald-500 font-bold text-sm py-1">✓ Paid in full.</div> : (<>
+        {coveredAll ? (<>
+          <p className="text-sm text-center text-muted">This job is billed to {q.billToName} — nothing for you to pay here.</p>
+          {canBookFree && <Button fullWidth size="lg" className="bg-torqued-red text-white" disabled={quotePaying} onClick={bookQuote}>{quotePaying ? 'Booking…' : 'Book it in'}</Button>}
+        </>) : paidUp ? <div className="text-center text-emerald-500 font-bold text-sm py-1">✓ {covered ? 'Your share is paid.' : 'Paid in full.'}</div> : (<>
           {req === 'deposit' && depositDue > 0 && <p className="text-xs text-muted text-center">The workshop asks for a {money(depositDue)} deposit {q.allowBooking ? 'to confirm your booking' : 'before work starts'}.</p>}
           {req === 'full_before' && <p className="text-xs text-muted text-center">Payment is needed before work starts.</p>}
           {req === 'on_collection' && <p className="text-xs text-muted text-center">Pay now, or when you collect your car.</p>}
@@ -1734,7 +1746,8 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
           </>) : (
             <Button fullWidth size="lg" className="bg-torqued-red text-white" disabled={quotePaying || !(q.balance > 0)} onClick={() => payQuote('full')}>{quotePaying ? 'Opening secure checkout…' : `Pay ${money(q.balance)} securely`}</Button>
           )}
-          {canBookFree && <Button fullWidth variant="outline" className="border-border text-foreground" disabled={quotePaying} onClick={bookQuote}>Book now, pay at collection</Button>}
+          {req === 'on_account' && q.accountTerms && <p className="text-xs text-muted text-center">On account — {q.accountTerms}.</p>}
+          {canBookFree && <Button fullWidth variant="outline" className="border-border text-foreground" disabled={quotePaying} onClick={bookQuote}>{req === 'on_account' ? 'Book now, charge to account' : 'Book now, pay at collection'}</Button>}
         </>)}
         {quoteMsg && <p className="text-sm text-torqued-red text-center font-semibold" role="alert">{quoteMsg}</p>}
       </div>
