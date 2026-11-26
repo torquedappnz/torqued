@@ -9842,11 +9842,19 @@ app.post('/api/email/send-test-single', async (req, res) => {
 // ─────────────────────────────────────────────────────────────────────────────
 
 // ── Service-history access via a 12-HOUR LINK (replaces the one-time code) ──────
-// POST /api/mechanic/request-history-link — email the owner a link they tap to grant
-// this workshop 12 hours of access to their vehicle's service history.
+// 6-digit code for a history-access request, derived from its secret link token (so
+// nothing extra is stored). The owner reads it to the workshop instead of tapping the link.
+function historyLinkCode(token: string): string {
+  const h = crypto.createHmac('sha256', MAGIC_SECRET).update(`hist-code:${token}`).digest();
+  return String(h.readUInt32BE(0) % 1_000_000).padStart(6, '0');
+}
+const histResendAt = new Map<string, number>();
+
+// POST /api/mechanic/request-history-link — email the owner a link they tap (or a 6-digit
+// code they read out) to grant this workshop 12 hours of access to the service history.
 app.post('/api/mechanic/request-history-link', async (req, res) => {
   try {
-    const { mechanicId, rego, customerEmail } = req.body;
+    const { mechanicId, rego, customerEmail, resend } = req.body;
     if (!mechanicId || !rego) return res.status(400).json({ error: 'mechanicId and rego required' });
     const formattedRego = String(rego).toUpperCase().trim();
     const supabase = getSupabaseAdmin();
@@ -9870,8 +9878,12 @@ app.post('/api/mechanic/request-history-link', async (req, res) => {
     if (prior && prior.length) return res.json({ hasAccount: true, priorBooking: true });
 
     // Reuse a still-valid pending link rather than spamming the owner.
-    const { data: existing } = await supabase.from('history_access_links').select('token, expires_at').eq('mechanic_id', mechanicId).eq('rego', formattedRego).gt('expires_at', new Date().toISOString()).order('created_at', { ascending: false }).maybeSingle();
-    if (existing) return res.json({ hasAccount: true, linkSent: true, alreadySent: true, expiresAt: existing.expires_at });
+    const { data: existingRows } = await supabase.from('history_access_links').select('token, expires_at, granted').eq('mechanic_id', mechanicId).eq('rego', formattedRego).gt('expires_at', new Date().toISOString()).order('created_at', { ascending: false }).limit(1);
+    const existing = existingRows?.[0] || null;
+    // Re-send the same request (same link + code) at most every 2 minutes.
+    const resendKey = `${mechanicId}:${formattedRego}`;
+    const canResend = !!resend && !!existing && !existing.granted && Date.now() - (histResendAt.get(resendKey) || 0) > 2 * 60 * 1000;
+    if (existing && !canResend) return res.json({ hasAccount: true, linkSent: true, alreadySent: true, expiresAt: existing.expires_at });
 
     if (!ownerEmail && ownerId) {
       const { data: profile } = await supabase.from('profiles').select('email').eq('id', ownerId).single();
@@ -9880,10 +9892,16 @@ app.post('/api/mechanic/request-history-link', async (req, res) => {
     if (!ownerEmail) return res.json({ hasAccount: true, noEmail: true });
     const { data: mechProfile } = await supabase.from('profiles').select('name').eq('id', mechanicId).single();
 
-    const token = crypto.randomBytes(24).toString('base64url');
-    const expiresAt = new Date(Date.now() + 12 * 60 * 60 * 1000).toISOString();
-    const { error: insErr } = await supabase.from('history_access_links').insert({ token, mechanic_id: mechanicId, rego: formattedRego, owner_id: ownerId, granted: false, expires_at: expiresAt });
-    if (insErr) { console.error('[request-history-link] insert:', insErr.message); return res.status(500).json({ error: 'Could not create access link.' }); }
+    let token: string; let expiresAt: string;
+    if (existing && canResend) { token = existing.token; expiresAt = existing.expires_at; }
+    else {
+      token = crypto.randomBytes(24).toString('base64url');
+      expiresAt = new Date(Date.now() + 12 * 60 * 60 * 1000).toISOString();
+      const { error: insErr } = await supabase.from('history_access_links').insert({ token, mechanic_id: mechanicId, rego: formattedRego, owner_id: ownerId, granted: false, expires_at: expiresAt });
+      if (insErr) { console.error('[request-history-link] insert:', insErr.message); return res.status(500).json({ error: 'Could not create access link.' }); }
+    }
+    histResendAt.set(resendKey, Date.now());
+    const code = historyLinkCode(token);
 
     const origin = getOrigin(req);
     const link = `${origin}/customer?grant_history=${encodeURIComponent(token)}`;
@@ -9901,11 +9919,15 @@ ${emailPara(`<strong>${mechName}</strong> would like to view the Torqued service
 <table width="100%" cellpadding="0" cellspacing="0" style="margin:18px 0;"><tr><td>
   <a href="${link}" style="display:inline-block;background:${EMAIL_RED};color:#fff;font-family:${EMAIL_BODY_FONT};font-size:12px;font-weight:900;text-transform:uppercase;letter-spacing:1px;text-decoration:none;padding:13px 28px;border-radius:10px;">Grant 12-hour access</a>
 </td></tr></table>
-${emailPara('This link is valid for 12 hours. If you did not expect this request, you can ignore this email — no access is granted unless you tap the button.')}
+${emailPara(`<strong>At the workshop or on the phone?</strong> Read them this code instead:`)}
+<table width="100%" cellpadding="0" cellspacing="0" style="margin:10px 0 18px;"><tr><td style="background:#f7f4f0;border-radius:12px;padding:16px;text-align:center;">
+  <span style="font-family:monospace;font-size:32px;font-weight:900;letter-spacing:8px;color:${EMAIL_DARK};">${code.slice(0, 3)} ${code.slice(3)}</span>
+</td></tr></table>
+${emailPara('The link and code are valid for 12 hours. Only share the code with the workshop named above. If you did not expect this request, ignore this email — no access is granted without the button or the code.')}
 </td></tr>`),
       }).catch(e => console.warn('History link email failed:', e?.message));
     }
-    return res.json({ hasAccount: true, linkSent: true, expiresAt });
+    return res.json({ hasAccount: true, linkSent: true, resent: !!(existing && canResend), expiresAt });
   } catch (err) {
     console.error('[request-history-link]', err);
     res.status(500).json({ error: 'Server error' });
@@ -9995,6 +10017,45 @@ app.post('/api/customer/history-requests/respond', async (req, res) => {
   } catch (err) {
     console.error('[customer/history-requests/respond]', err);
     res.status(500).json({ error: 'Could not update the request' });
+  }
+});
+
+// POST /api/mechanic/verify-history-code { mechanicId, rego, code } — the owner read the
+// 6-digit code to the workshop. Grants the 12-hour access; 5 wrong codes cancel the request.
+const histCodeGuesses = new Map<string, { n: number; resetAt: number }>();
+app.post('/api/mechanic/verify-history-code', async (req, res) => {
+  try {
+    const { mechanicId, rego, code } = req.body || {};
+    const formattedRego = String(rego || '').toUpperCase().trim();
+    const digits = String(code || '').replace(/\D/g, '');
+    if (!mechanicId || !formattedRego || digits.length !== 6) return res.status(400).json({ error: 'Enter the 6-digit code from the owner\'s email.' });
+    const supabase = getSupabaseAdmin();
+    if (!supabase) return res.status(500).json({ error: 'DB not configured' });
+    const key = `${mechanicId}:${formattedRego}`;
+    const { data: links } = await supabase.from('history_access_links').select('token, granted').eq('mechanic_id', mechanicId).eq('rego', formattedRego).gt('expires_at', new Date().toISOString());
+    if (!links?.length) return res.status(404).json({ error: 'No active request for this vehicle — send a new one.' });
+    const match = links.find((l: any) => crypto.timingSafeEqual(Buffer.from(historyLinkCode(l.token)), Buffer.from(digits)));
+    if (!match) {
+      const g = histCodeGuesses.get(key);
+      const n = !g || Date.now() >= g.resetAt ? 1 : g.n + 1;
+      histCodeGuesses.set(key, { n, resetAt: Date.now() + 15 * 60 * 1000 });
+      if (n >= 5) {
+        await supabase.from('history_access_links').delete().eq('mechanic_id', mechanicId).eq('rego', formattedRego).eq('granted', false);
+        histCodeGuesses.delete(key);
+        return res.status(429).json({ error: 'Too many wrong codes — the request was cancelled. Send a new one.', cancelled: true });
+      }
+      return res.status(401).json({ error: `That code doesn't match. ${5 - n} tr${5 - n === 1 ? 'y' : 'ies'} left.` });
+    }
+    histCodeGuesses.delete(key);
+    if (!match.granted) await supabase.from('history_access_links').update({ granted: true }).eq('token', match.token);
+    const [{ data: imported }, { data: jobs }] = await Promise.all([
+      supabase.from('vehicle_history').select('service_date, work_done, provider, mileage, price, notes, source').eq('rego', formattedRego).order('service_date', { ascending: false }),
+      supabase.from('bookings').select('date, completed_at, service_ids, quote_items, description, total_price, mileage_out, status').eq('vehicle_rego', formattedRego).eq('status', 'completed').order('completed_at', { ascending: false }),
+    ]);
+    res.json({ granted: true, imported: imported ?? [], jobs: dropPpiBookingDuplicates(jobs ?? [], imported ?? []) });
+  } catch (err) {
+    console.error('[verify-history-code]', err);
+    res.status(500).json({ error: 'Could not check the code' });
   }
 });
 

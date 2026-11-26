@@ -1543,6 +1543,37 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
   const [unlockedHistory, setUnlockedHistory] = useState<{ imported: any[]; torquedJobs: any[] } | null>(null);
   const [coldRegoLookedUp, setColdRegoLookedUp] = useState(false);
 
+  // The owner reads the 6-digit code from their email → unlock straight away.
+  const unlockHistoryWithCode = async () => {
+    if (!user?.id || !coldForm.rego || histOtpInput.replace(/\D/g, '').length !== 6) return;
+    setHistAccessState('verifying'); setHistAccessMsg(null);
+    try {
+      const r = await fetch('/api/mechanic/verify-history-code', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ mechanicId: user.id, rego: coldForm.rego, code: histOtpInput }),
+      });
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok || !d.granted) {
+        setHistAccessState(d.cancelled ? 'error' : 'otp_sent');
+        setHistAccessMsg(d.error || 'That code didn\'t work.');
+        return;
+      }
+      setUnlockedHistory({ imported: d.imported || [], torquedJobs: d.jobs || [] });
+      setHistAccessState('granted'); setHistOtpInput(''); setHistAccessMsg(null);
+    } catch { setHistAccessState('otp_sent'); setHistAccessMsg('Could not connect. Please try again.'); }
+  };
+  const resendHistoryRequest = async () => {
+    if (!user?.id || !coldForm.rego) return;
+    try {
+      const r = await fetch('/api/mechanic/request-history-link', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ mechanicId: user.id, rego: coldForm.rego, customerEmail: coldForm.email || undefined, resend: true }),
+      });
+      const d = await r.json().catch(() => ({}));
+      setHistAccessMsg(d.resent ? 'Sent again — same code and link.' : d.alreadySent ? 'Already sent in the last couple of minutes — ask them to check their inbox (and spam).' : d.error || 'Could not resend.');
+    } catch { setHistAccessMsg('Could not connect. Please try again.'); }
+  };
+
   const checkHistoryAccess = async (plateRego: string) => {
     if (!user?.id || !plateRego) return;
     setHistAccessState('checking');
@@ -5685,22 +5716,28 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                     <p className="text-xs text-foreground">
                       {histAccessState === 'already_sent'
                         ? 'An access request has already been sent to the vehicle owner (email + their My Garage).'
-                        : 'A 12-hour access request has been sent to the vehicle owner (email + their My Garage).'}
+                        : 'We\'ve emailed the vehicle owner a 12-hour access request with a link and a 6-digit code (also in their My Garage).'}
                       {histOtpExpiry && <span className="text-muted"> Valid until {new Date(histOtpExpiry).toLocaleString('en-NZ', { weekday: 'short', hour: 'numeric', minute: '2-digit' })}.</span>}
                     </p>
-                    <p className="text-[11px] text-muted">Once they've approved it (in My Garage or via the email link), check for access:</p>
+                    <p className="text-xs text-muted">Ask them for the 6-digit code in that email:</p>
                     <div className="flex gap-2">
+                      <input
+                        value={histOtpInput}
+                        onChange={e => setHistOtpInput(e.target.value.replace(/\D/g, '').slice(0, 6))}
+                        onKeyDown={e => { if (e.key === 'Enter') unlockHistoryWithCode(); }}
+                        inputMode="numeric" autoComplete="one-time-code" placeholder="123456" aria-label="6-digit code"
+                        className="w-32 bg-background border border-border rounded-lg px-3 h-9 text-sm font-mono tracking-[0.3em] text-foreground focus:outline-none focus:border-torqued-red" />
                       <button
-                        onClick={verifyHistOtp}
-                        className="text-xs font-bold bg-torqued-red text-white px-4 py-2 rounded-lg hover:bg-torqued-red/80 transition-colors">
-                        {histAccessState === 'verifying' ? 'Checking…' : 'Check access'}
-                      </button>
-                      <button
-                        onClick={() => checkHistoryAccess(coldForm.rego)}
-                        className="text-xs font-bold border border-border text-foreground px-4 py-2 rounded-lg hover:bg-card transition-colors">
-                        Resend link
+                        onClick={unlockHistoryWithCode}
+                        disabled={histOtpInput.length !== 6}
+                        className="text-sm font-semibold bg-torqued-red text-white px-4 h-9 rounded-lg hover:bg-torqued-red/80 disabled:opacity-50 transition-colors">
+                        Unlock history
                       </button>
                     </div>
+                    <p className="text-xs text-muted">
+                      Approved by link or in My Garage instead? <button onClick={verifyHistOtp} className="font-semibold text-foreground underline underline-offset-2">Check access</button>
+                      {' · '}<button onClick={resendHistoryRequest} className="font-semibold text-foreground underline underline-offset-2">Resend email</button>
+                    </p>
                     {histAccessMsg && <p className="text-xs text-amber-500 font-bold">{histAccessMsg}</p>}
                   </div>
                 )}
