@@ -44,6 +44,10 @@ function getStripe(): Stripe | null {
 // invocations: serverless functions freeze between requests, which severs any
 // kept-alive SMTP connection and makes the next send fail. `pool` still lets the
 // booking flow reuse one connection for its several sends within a single request.
+// One sender for every email. Set SMTP_FROM (e.g. Torqued <no-reply@torqued.site>); the
+// domain must be verified with the email provider (Resend: resend.com/domains).
+const MAIL_FROM = () => process.env.SMTP_FROM || 'Torqued <no-reply@torqued.site>';
+
 function getMailTransporter() {
   const host = process.env.SMTP_HOST;
   const port = process.env.SMTP_PORT ? parseInt(process.env.SMTP_PORT) : 465;
@@ -62,8 +66,8 @@ function getMailTransporter() {
       greetingTimeout: 10000,
     });
     // Default reply-to for all automated mail (verification, receipts, reminders,
-    // document requests, etc). Sends still go out from SMTP_FROM (the gmail
-    // account) — this only changes where replies land. Calls that set their own
+    // document requests, etc). Sends still go out from SMTP_FROM — this only
+    // changes where replies land. Calls that set their own
     // replyTo (e.g. routing a reply between a customer and their mechanic)
     // override this default.
     return {
@@ -324,7 +328,7 @@ async function sendMagicLink(rego: string, email: string, origin: string, custom
   if (transporter) {
     try {
       await transporter.sendMail({
-        from: process.env.SMTP_FROM || '"Torqued" <torquedapp.nz@gmail.com>',
+        from: MAIL_FROM(),
         to: email,
         subject: `Verify your vehicle on Torqued`,
         html: generateMagicEmailHtml(rego, link, appLink, customerName),
@@ -673,7 +677,7 @@ async function sweepAbandonedDrafts(): Promise<{ sent: number; scanned: number; 
     const link = `https://torqued.site/customer?vt=${makeMagicToken(d.rego, 7 * 24 * 60 * 60 * 1000, { resumeDraftId: d.id })}`;
     try {
       await transporter.sendMail({
-        from: process.env.SMTP_FROM || '"Torqued" <torquedapp.nz@gmail.com>',
+        from: MAIL_FROM(),
         to: d.customer_email,
         replyTo: 'hello@torqued.site',
         subject: `${firstName}, Secure your service with ${mechName} today!`,
@@ -2039,7 +2043,7 @@ app.post('/api/customer/check-plate', async (req, res) => {
     const transporter = getMailTransporter();
     if (transporter) {
       await transporter.sendMail({
-        from: process.env.SMTP_FROM || '"Torqued" <torquedapp.nz@gmail.com>',
+        from: MAIL_FROM(),
         to: ownerEmail,
         subject: `${code} is your Torqued verification code`,
         html: generateOtpEmailHtml(formattedRego, code),
@@ -2305,7 +2309,7 @@ async function sendOtpCode(supabase: any, rego: string, email: string, customerN
   if (transporter) {
     try {
       await transporter.sendMail({
-        from: process.env.SMTP_FROM || '"Torqued" <torquedapp.nz@gmail.com>',
+        from: MAIL_FROM(),
         to: email, subject: `${code} is your Torqued verification code`,
         html: generateOtpEmailHtml(rego, code, customerName),
       });
@@ -2349,7 +2353,7 @@ app.post('/api/customer/send-code', async (req, res) => {
     const transporter = getMailTransporter();
     if (transporter) {
       await transporter.sendMail({
-        from: process.env.SMTP_FROM || '"Torqued" <torquedapp.nz@gmail.com>',
+        from: MAIL_FROM(),
         to: ownerEmail, subject: `${code} is your Torqued verification code`,
         html: generateOtpEmailHtml(rego, code),
       }).catch(e => console.warn('OTP email failed:', e?.message));
@@ -2666,7 +2670,7 @@ app.post('/api/mechanic/email-trial', async (req, res) => {
 </div></div>`;
 
     await transporter.sendMail({
-      from: process.env.SMTP_FROM || '"Torqued" <torquedapp.nz@gmail.com>',
+      from: MAIL_FROM(),
       to: email,
       subject: 'Your Torqued 30-day trial code: sritorqued',
       html,
@@ -2773,7 +2777,7 @@ async function sendBookingConfirmationEmails(bookingId: string) {
 
   const transporter = getMailTransporter();
   if (!transporter) { console.log('[booking-email] no SMTP transporter; skipped for', bookingId); return; }
-  const fromAddress = process.env.SMTP_FROM || '"Torqued NZ" <no-reply@torqued.nz>';
+  const fromAddress = MAIL_FROM();
   try {
     await transporter.sendMail({
       from: fromAddress, to: b.email,
@@ -2860,7 +2864,7 @@ app.post('/api/customer/reply', async (req, res) => {
     if (transporter) {
       const safe = String(message).replace(/</g, '&lt;').replace(/\n/g, '<br/>');
       await transporter.sendMail({
-        from: process.env.SMTP_FROM || '"Torqued" <torquedapp.nz@gmail.com>',
+        from: MAIL_FROM(),
         replyTo: ctx.email || undefined,
         to: ctx.mechanicEmail,
         subject: `Reply from ${ctx.custName || 'your customer'} · ${ctx.vehicleLabel || ''}`,
@@ -2973,7 +2977,7 @@ ${emailPara(`<span style="color:#999;">Kind regards,<br/>${ctx.mechanicName || '
 </td></tr>`);
     // Reply routes to the mechanic if they have an email on file; otherwise a no-reply address
     await transporter.sendMail({
-      from: process.env.SMTP_FROM || '"Torqued" <torquedapp.nz@gmail.com>',
+      from: MAIL_FROM(),
       replyTo: ctx.mechanicEmail || 'do-not-reply@torqued.nz',
       to: ctx.email,
       subject: `Message about your ${ctx.vehicleLabel || 'vehicle'} — Torqued`,
@@ -3005,7 +3009,7 @@ app.post('/api/mechanic/update-quote', async (req, res) => {
     const transporter = getMailTransporter();
     if (ctx.email && transporter && quotedPrice != null) {
       await transporter.sendMail({
-        from: process.env.SMTP_FROM || '"Torqued" <torquedapp.nz@gmail.com>',
+        from: MAIL_FROM(),
         to: ctx.email,
         subject: `Your Torqued quote for your ${ctx.vehicleLabel || 'vehicle'} is ready`,
         html: quoteReadyEmailHtml(ctx.custName, ctx.vehicleLabel, ctx.mechanicName, bookingId),
@@ -3421,7 +3425,7 @@ async function sendTaxInvoice(supabase: any, row: any, opts: { email: boolean })
     else {
       try {
         await transporter.sendMail({
-          from: process.env.SMTP_FROM || '"Torqued" <torquedapp.nz@gmail.com>',
+          from: MAIL_FROM(),
           to, replyTo: mech?.email || undefined,
           subject: `Invoice ${invoiceNo} from ${mech?.name || 'your workshop'}`,
           html: accountInvoiceEmailHtml({ name: snap?.name || snap?.company || ctx.custName, mechanicName: mech?.name || '', vehicleLabel: ctx.vehicleLabel, invoiceNo, amountDue: billTo ? s.accountBalance : s.balance, dueDate, termsLabel: [snap?.reference ? `Claim / PO ${snap.reference}` : '', snap?.termsLabel || ''].filter(Boolean).join(' · '), bookingId: row.id, payOnline: !billTo }),
@@ -3496,7 +3500,7 @@ app.post('/api/mechanic/invoice-torqued', async (req, res) => {
     else {
       try {
         await transporter.sendMail({
-          from: process.env.SMTP_FROM || '"Torqued" <torquedapp.nz@gmail.com>',
+          from: MAIL_FROM(),
           to: ctx.email,
           subject: `Your invoice for your ${ctx.vehicleLabel || 'vehicle'} — Torqued`,
           html: invoiceEmailHtml(ctx.custName, ctx.vehicleLabel, ctx.mechanicName, row.id, s.balance),
@@ -3690,7 +3694,7 @@ async function sendQuoteBookedEmail(supabase: any, bookingId: string, reschedule
       bookingId, date: String(row.date).slice(0, 16), ready: row.quote_items?.meta?.estimatedReady || null, rescheduled,
     });
     await transporter.sendMail({
-      from: process.env.SMTP_FROM || '"Torqued" <torquedapp.nz@gmail.com>', to: ctx.email,
+      from: MAIL_FROM(), to: ctx.email,
       subject: rescheduled ? `New drop-off time for your ${ctx.vehicleLabel || 'vehicle'}` : `You're booked in — ${ctx.vehicleLabel || 'your vehicle'}`,
       html,
     });
@@ -3705,7 +3709,7 @@ async function notifyWorkshopOfChange(supabase: any, bookingId: string, what: st
     const transporter = getMailTransporter();
     if (!ctx.mechanicEmail || !transporter) return;
     await transporter.sendMail({
-      from: process.env.SMTP_FROM || '"Torqued" <torquedapp.nz@gmail.com>', to: ctx.mechanicEmail,
+      from: MAIL_FROM(), to: ctx.mechanicEmail,
       subject: `${ctx.custName || 'A customer'} ${what} — ${ctx.vehicleLabel || bookingId}`,
       html: emailWrap(`<tr><td style="padding:36px 32px;">${emailTitle('Booking change')}${emailPara(`<strong>${ctx.custName || 'Your customer'}</strong> ${what} for their <strong>${ctx.vehicleLabel || 'vehicle'}</strong> (ref ${bookingId}). It's updated in your diary and My Jobs.`)}</td></tr>`),
     });
@@ -3926,7 +3930,7 @@ app.post('/api/mechanic/send-quote-pdf', async (req, res) => {
     const html = quoteReadyEmailHtml(ctx.custName, ctx.vehicleLabel, ctx.mechanicName, bookingId || '');
     try {
       await transporter.sendMail({
-        from: process.env.SMTP_FROM || '"Torqued" <torquedapp.nz@gmail.com>',
+        from: MAIL_FROM(),
         to: email,
         subject: `Your Torqued quote for your ${ctx.vehicleLabel || 'vehicle'} is ready`,
         html,
@@ -4105,7 +4109,7 @@ ${notesHtml}
 <a href="${getOrigin(req)}/customer?review_booking=${bookingId}&m=${booking.mechanic_id}" style="display:inline-block;background:#FF1800;color:#fff;font-weight:900;text-transform:uppercase;font-size:12px;letter-spacing:1px;text-decoration:none;padding:14px 28px;border-radius:10px;margin-top:20px">Rate your experience →</a>
 </div></div>`;
       await transporter.sendMail({
-        from: process.env.SMTP_FROM || '"Torqued" <torquedapp.nz@gmail.com>',
+        from: MAIL_FROM(),
         to, subject: `Your ${vLabel} is ready for collection`,
         html,
       }).catch(() => {});
@@ -4153,7 +4157,7 @@ ${emailPara(`Thanks for booking your <strong>${vehicleLabel}</strong> with Torqu
   </td></tr>
 </table>
 </td></tr>`);
-      await transporter.sendMail({ from: process.env.SMTP_FROM || '"Torqued" <torquedapp.nz@gmail.com>', to, subject: `Rate your experience with ${mechName}`, html }).catch(()=>{});
+      await transporter.sendMail({ from: MAIL_FROM(), to, subject: `Rate your experience with ${mechName}`, html }).catch(()=>{});
     }
     await notify({ bookingId, rego: booking.vehicle_rego, ownerId: booking.customer_id, type: 'review_reminder',
       title: `Rate your experience with ${mechName}`,
@@ -4276,7 +4280,7 @@ ${emailPara("You've been granted admin access to the Torqued back-office. Set yo
 </table>
 ${emailPara(`Link expires in 24 hours. Or paste: <a href="${link}" style="color:${EMAIL_MUTED};word-break:break-all;font-size:11px;">${link}</a>`)}
 </td></tr>`);
-      await transporter.sendMail({ from: process.env.SMTP_FROM || '"Torqued" <torquedapp.nz@gmail.com>', to: email, subject: 'Set your Torqued admin password', html });
+      await transporter.sendMail({ from: MAIL_FROM(), to: email, subject: 'Set your Torqued admin password', html });
     }
     res.json({ sent: true });
   } catch (err) {
@@ -4401,7 +4405,7 @@ ${emailPara("You've been granted admin access to the Torqued back-office.")}
 </td></tr>`);
 
     await transporter.sendMail({
-      from: process.env.SMTP_FROM || '"Torqued" <torquedapp.nz@gmail.com>',
+      from: MAIL_FROM(),
       to: email,
       subject: 'Your Torqued admin access — set your password',
       html,
@@ -4612,7 +4616,7 @@ app.post('/api/admin/reset-password', async (req, res) => {
     const transporter = getMailTransporter();
     if (transporter) {
       await transporter.sendMail({
-        from: process.env.SMTP_FROM || '"Torqued" <torquedapp.nz@gmail.com>',
+        from: MAIL_FROM(),
         to: email,
         subject: 'Reset your Torqued password',
         html: emailWrap(`<tr><td style="padding:36px 32px;">
@@ -4653,7 +4657,7 @@ app.post('/api/mechanic/forgot-password', async (req, res) => {
     const transporter = getMailTransporter();
     if (transporter) {
       await transporter.sendMail({
-        from: process.env.SMTP_FROM || '"Torqued" <torquedapp.nz@gmail.com>',
+        from: MAIL_FROM(),
         to: email,
         subject: 'Reset your Torqued password',
         html: emailWrap(`<tr><td style="padding:36px 32px;">
@@ -4806,7 +4810,7 @@ ${steps.join('\n')}
 ${emailPara('Need a hand? Just reply to this email and our team will help you get set up.')}
 </td></tr>`);
       await transporter.sendMail({
-        from: process.env.SMTP_FROM || '"Torqued" <torquedapp.nz@gmail.com>',
+        from: MAIL_FROM(),
         to: profile.email,
         subject: 'Finish setting up your Torqued Mechanic account',
         html,
@@ -4974,7 +4978,7 @@ ${emailPara("So we can get you on Torqued soon, please reply to this email with 
 ${emailPara("Just hit reply and attach them — our team will take care of the rest. Ngā mihi, The Torqued Team.")}
 </td></tr>`);
       await transporter.sendMail({
-        from: process.env.SMTP_FROM || '"Torqued" <torquedapp.nz@gmail.com>',
+        from: MAIL_FROM(),
         to: profile.email,
         subject: 'Torqued — documents needed to get you set up',
         html,
@@ -5150,7 +5154,7 @@ ${steps.join('\n')}
 ${emailPara('Need a hand? Just reply to this email and our team will help you get set up.')}
 </td></tr>`);
       await transporter.sendMail({
-        from: process.env.SMTP_FROM || '"Torqued" <torquedapp.nz@gmail.com>',
+        from: MAIL_FROM(),
         to: email,
         subject: `Welcome to Torqued — ${compActivate ? 3 : 4} steps to go live`,
         html,
@@ -5287,7 +5291,7 @@ app.post('/api/mechanic/send-email-otp', async (req, res) => {
         </td></tr>
       `);
       await transporter.sendMail({
-        from: `"Torqued" <${process.env.SMTP_USER}>`,
+        from: MAIL_FROM(),
         to: email,
         subject: 'Your Torqued Verification Code',
         html,
@@ -5482,7 +5486,7 @@ app.post('/api/mechanic/resend', async (req, res) => {
     const transporter = getMailTransporter();
     if (transporter) {
       await transporter.sendMail({
-        from: process.env.SMTP_FROM || '"Torqued" <torquedapp.nz@gmail.com>',
+        from: MAIL_FROM(),
         to: email,
         subject: 'Your Torqued sign-in link',
         html: generateMechanicConfirmEmailHtml(name, linkData.properties.action_link),
@@ -7371,7 +7375,7 @@ app.post('/api/mechanic/ppi', async (req, res) => {
             });
           }
           await transporter.sendMail({
-            from: process.env.SMTP_FROM || '"Torqued" <torquedapp.nz@gmail.com>',
+            from: MAIL_FROM(),
             to: customerEmail,
             subject: `Your Pre-Purchase Inspection Report — ${String(rego).toUpperCase()}`,
             attachments,
@@ -8129,7 +8133,7 @@ app.post('/api/customer/request-cancellation', async (req, res) => {
       try {
         const t = getMailTransporter();
         if (t) await t.sendMail({
-          from: process.env.SMTP_FROM || '"Torqued NZ" <no-reply@torqued.nz>',
+          from: MAIL_FROM(),
           to: ctx.mechanicEmail, replyTo: ctx.email || undefined,
           subject: `Booking cancelled: Ref #${bookingId} (${ctx.vehicleLabel})`,
           html: `<p>${ctx.custName || 'A customer'} cancelled their booking for <b>${ctx.vehicleLabel}</b>.</p>
@@ -8162,7 +8166,7 @@ ${refundLine}
 ${emailPara(`Changed your mind? You can re-book anytime at <a href="https://torqued.site" style="color:${EMAIL_RED};">torqued.site</a>.`)}
 </td></tr>`);
           await t.sendMail({
-            from: process.env.SMTP_FROM || '"Torqued NZ" <no-reply@torqued.nz>',
+            from: MAIL_FROM(),
             to: custTo, subject: `Your Torqued booking was cancelled (Ref #${bookingId})`, html,
           });
         }
@@ -8197,7 +8201,7 @@ app.post('/api/customer/reschedule', async (req, res) => {
       try {
         const t = getMailTransporter();
         if (t) await t.sendMail({
-          from: process.env.SMTP_FROM || '"Torqued NZ" <no-reply@torqued.nz>',
+          from: MAIL_FROM(),
           to: ctx.mechanicEmail, replyTo: ctx.email || undefined,
           subject: `Booking rescheduled: Ref #${bookingId} (${ctx.vehicleLabel})`,
           html: `<p>${ctx.custName || 'A customer'} rescheduled their booking for <b>${ctx.vehicleLabel}</b> to <b>${when.toLocaleString('en-NZ')}</b>.</p>`,
@@ -8254,7 +8258,7 @@ ${emailPara('If you are happy with this new time, click below to confirm. Otherw
       try {
         const t = getMailTransporter();
         if (t) await t.sendMail({
-          from: process.env.SMTP_FROM || '"Torqued NZ" <no-reply@torqued.nz>',
+          from: MAIL_FROM(),
           to: ctx.email,
           subject: `Reschedule Request for Booking #${bookingId} — ${mech}`,
           html,
@@ -8301,7 +8305,7 @@ ${emailPara('The booking date has been updated. No further action needed.')}
 </td></tr>`);
         try {
           await t.sendMail({
-            from: process.env.SMTP_FROM || '"Torqued NZ" <no-reply@torqued.nz>',
+            from: MAIL_FROM(),
             to: ctx.mechanicEmail,
             subject: `Reschedule Confirmed — Booking #${bookingId}`,
             html,
@@ -8436,7 +8440,7 @@ app.post('/api/otp/send', async (req, res) => {
     const transporter = getMailTransporter();
     if (transporter) {
       await transporter.sendMail({
-        from: process.env.SMTP_FROM || '"Torqued" <torquedapp.nz@gmail.com>',
+        from: MAIL_FROM(),
         to: ownerEmail,
         subject: `${code} is your Torqued verification code`,
         html: generateOtpEmailHtml(formattedRego, code),
@@ -8723,7 +8727,7 @@ ${emailPara('Tap below to create your free Torqued account and claim the vehicle
 <a href="${claimUrl}" style="display:inline-block;background:${EMAIL_RED};color:#fff;font-family:${EMAIL_TITLE_FONT};font-size:13px;font-weight:900;text-transform:uppercase;letter-spacing:1px;text-decoration:none;padding:14px 34px;border-radius:12px;">Claim My Vehicle →</a>
 </td></tr>`);
         await transporter.sendMail({
-          from: process.env.SMTP_FROM || '"Torqued" <torquedapp.nz@gmail.com>',
+          from: MAIL_FROM(),
           to: normalEmail,
           subject: `${senderName} sent you a vehicle on Torqued — claim it here`,
           html,
@@ -8756,7 +8760,7 @@ ${emailPara('You can now view its complete service history, get quotes, and book
 <a href="https://torqued.site/customer" style="display:inline-block;background:${EMAIL_RED};color:#fff;font-family:${EMAIL_TITLE_FONT};font-size:13px;font-weight:900;text-transform:uppercase;letter-spacing:1px;text-decoration:none;padding:14px 34px;border-radius:12px;">View My Vehicle</a>
 </td></tr>`);
       await transporter.sendMail({
-        from: process.env.SMTP_FROM || '"Torqued" <torquedapp.nz@gmail.com>',
+        from: MAIL_FROM(),
         to: recipientProfile.email,
         subject: `${senderName} transferred ${formattedRego} to you on Torqued`,
         html,
@@ -9642,7 +9646,7 @@ app.post('/api/email/confirm-booking', async (req, res) => {
 
     if (transporter) {
       try {
-        const fromAddress = process.env.SMTP_FROM || '"Torqued NZ" <no-reply@torqued.nz>';
+        const fromAddress = MAIL_FROM();
         
         const custSubject = data.isQuoteRequest
           ? `Quote Requested: Ref #${data.bookingId} (${data.vehicle})`
@@ -9799,7 +9803,7 @@ app.post('/api/email/send-test-single', async (req, res) => {
 
     if (transporter) {
       try {
-        const fromAddress = process.env.SMTP_FROM || '"Torqued NZ" <no-reply@torqued.nz>';
+        const fromAddress = MAIL_FROM();
         await transporter.sendMail({
           from: fromAddress,
           to: recipient,
@@ -9897,7 +9901,7 @@ app.post('/api/mechanic/request-history-link', async (req, res) => {
     const mailer = getMailTransporter();
     if (mailer) {
       await mailer.sendMail({
-        from: process.env.SMTP_FROM || '"Torqued" <torquedapp.nz@gmail.com>',
+        from: MAIL_FROM(),
         to: ownerEmail,
         subject: 'A workshop is requesting your vehicle service history',
         html: emailWrap(`<tr><td style="padding:36px 32px;">
@@ -10147,7 +10151,7 @@ app.post('/api/mechanic/request-history-access', async (req, res) => {
     if (mailer) {
       const mechName = mechProfile?.name || 'A mechanic';
       await mailer.sendMail({
-        from: process.env.SMTP_FROM || '"Torqued" <torquedapp.nz@gmail.com>',
+        from: MAIL_FROM(),
         to: profile.email,
         subject: 'Someone is requesting access to your vehicle\'s service history',
         html: `
@@ -10242,7 +10246,7 @@ app.post('/api/mechanic/verify-history-otp', async (req, res) => {
       const mailer = getMailTransporter();
       if (mailer) {
         await mailer.sendMail({
-          from: process.env.SMTP_FROM || '"Torqued" <torquedapp.nz@gmail.com>',
+          from: MAIL_FROM(),
           to: profile.email,
           subject: 'Your vehicle service history was accessed on Torqued',
           html: `
@@ -10770,7 +10774,7 @@ app.post('/api/admin/privacy-request', async (req, res) => {
         const transporter = getMailTransporter();
         if (transporter) {
           await transporter.sendMail({
-            from: process.env.SMTP_FROM || '"Torqued" <torquedapp.nz@gmail.com>',
+            from: MAIL_FROM(),
             to: emailLower,
             subject: isWorkshop ? 'Your Torqued workshop data export' : 'Your Torqued data export',
             html: isWorkshop
@@ -10872,7 +10876,7 @@ app.post('/api/admin/toggle-customer-ai', async (req, res) => {
     const mailer = getMailTransporter();
     if (mailer && !isBan) {
       await mailer.sendMail({
-        from: process.env.SMTP_FROM || '"Torqued" <torquedapp.nz@gmail.com>',
+        from: MAIL_FROM(),
         to: profile.email,
         subject: disabled
           ? 'Your AI features on Torqued have been paused'
