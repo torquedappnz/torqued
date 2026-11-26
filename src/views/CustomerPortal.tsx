@@ -6915,21 +6915,6 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
             })()}
           </section>
 
-          {/* Ask Torqued AI — customer diagnostic assistant */}
-          <section className="space-y-4">
-            <Card className="p-6 bg-gradient-to-br from-torqued-red/10 to-card border-torqued-red/20 flex items-center gap-4 cursor-pointer hover:border-torqued-red/40 transition-all"
-              onClick={() => setChatOpen(true)}>
-              <div className="w-12 h-12 rounded-2xl bg-torqued-red/15 flex items-center justify-center shrink-0">
-                <Sparkles size={22} className="text-torqued-red" />
-              </div>
-              <div className="flex-1 min-w-0">
-                <h4 className="text-lg font-bold">Ask Torqued AI</h4>
-                <p className="text-sm text-muted">Not sure what's wrong? Describe it and get tailored help, then book.</p>
-              </div>
-              <ChevronRight size={20} className="text-muted shrink-0" />
-            </Card>
-          </section>
-
           {/* Pre-Purchase Inspection — routes into the standard quote flow */}
           {ppiWorkshops.length > 0 && (
             <section className="space-y-4">
