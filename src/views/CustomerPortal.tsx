@@ -99,6 +99,19 @@ function pruneHealthCache(rego: string, currentVersion: number) {
 }
 
 // Map a health-insight title to a bookable SERVICES id (best-effort).
+// Vehicle health rows: a one-line description and a status tag.
+function shortInsight(detail: any): string {
+  const d = String(detail || '').replace(/\s+/g, ' ').trim();
+  const first = (d.split(/(?<=[.!?])\s+/).find(x => !/^recommend/i.test(x)) || d).trim();
+  return first.length > 140 ? first.slice(0, 137).replace(/\s+\S*$/, '') + '…' : first;
+}
+function insightPill(severity: string): { t: string; c: string } {
+  return severity === 'overdue' ? { t: 'Overdue', c: 'bg-torqued-red/10 text-torqued-red border-torqued-red/30' }
+    : severity === 'due' ? { t: 'Due soon', c: 'bg-amber-500/10 text-amber-600 border-amber-500/30' }
+    : severity === 'good' ? { t: 'Up to date', c: 'bg-emerald-500/10 text-emerald-600 border-emerald-500/30' }
+    : { t: 'Note', c: 'bg-background text-muted border-border' };
+}
+
 function insightToServiceId(title: string): string | null {
   const t = title.toLowerCase();
   if (t.includes('spark plug') || t.includes('ignition coil')) return 'spark_plugs';
@@ -4066,61 +4079,56 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                     </div>
                   )}
 
-                  {/* AI Recommendations inline — shown when health insights are available */}
+                  {/* Scheduled maintenance from the maker's schedule + mileage + service history */}
                   {(healthInsights.length > 0 || healthLoading) && garageUnlocked && (
                     <div className="space-y-3 pt-4 border-t border-border">
-                      <div className="flex items-center justify-between gap-2">
-                        <p className="text-xs font-black uppercase tracking-widest text-muted">Vehicle Health</p>
-                        <button
-                          onClick={() => setShowHistorySheet(true)}
-                          className="text-xs text-torqued-red font-bold hover:underline"
-                        >Review / Edit →</button>
+                      <div className="flex items-start justify-between gap-3">
+                        <div>
+                          <p className="text-lg font-bold text-foreground normal-case">Recommended for your {vehicle?.make || 'vehicle'}</p>
+                          <p className="text-sm text-muted">From {vehicle?.make ? `${vehicle.make}'s` : 'the'} service schedule{(mileage || vehicle?.mileage) ? ` at ${Number(String(mileage || vehicle?.mileage).replace(/[^\d]/g, '')).toLocaleString()} km` : ''} and your service history.</p>
+                        </div>
+                        <button onClick={() => setShowHistorySheet(true)}
+                          className="h-9 px-3.5 rounded-xl border border-border text-foreground text-sm font-semibold hover:border-foreground/30 transition-colors shrink-0">Service history</button>
                       </div>
 
-                      {/* AI insight cards */}
                       {healthLoading ? (
-                        <div className="flex items-center gap-3 py-3 px-3 bg-background rounded-xl border border-border">
+                        <div className="flex items-center gap-3 py-3 px-4 bg-card rounded-2xl border border-border">
                           <div className="w-4 h-4 border-2 border-torqued-red/30 border-t-torqued-red rounded-full animate-spin shrink-0" />
-                          <p className="text-xs text-muted font-bold">Analysing your vehicle history…</p>
+                          <p className="text-sm text-muted">Checking your service schedule…</p>
                         </div>
-                      ) : (
-                        <div className="space-y-2">
-                          {healthInsights.filter(ins => ins.severity !== 'good').map((insight, i) => {
-                            const sid = insightToServiceId(insight.title);
-                            const isAdded = sid ? selectedServices.includes(sid) : false;
-                            return (
-                              <div key={i} className={cn(
-                                "flex items-start gap-3 p-3 rounded-xl border",
-                                insight.severity === 'overdue' ? "border-torqued-red/30 bg-torqued-red/5" : "border-amber-500/20 bg-amber-500/5"
-                              )}>
-                                <div className="flex-1 min-w-0">
-                                  <p className={cn("text-xs font-bold", insight.severity === 'overdue' ? "text-torqued-red" : "text-amber-400")}>{insight.title}</p>
-                                  <p className="text-[10px] text-muted mt-0.5 leading-snug">{insight.detail}</p>
+                      ) : (() => {
+                        const order: Record<string, number> = { overdue: 0, due: 1, info: 2, good: 3 };
+                        const rows = [...healthInsights].sort((x, y) => (order[x.severity] ?? 2) - (order[y.severity] ?? 2));
+                        return (<>
+                          <div className="bg-card border border-border rounded-3xl divide-y divide-border overflow-hidden">
+                            {rows.map((insight, i) => {
+                              const sid = insightToServiceId(insight.title);
+                              const isAdded = sid ? selectedServices.includes(sid) : false;
+                              const pill = insightPill(insight.severity);
+                              const actionable = insight.severity === 'due' || insight.severity === 'overdue';
+                              return (
+                                <div key={i} className="px-4 sm:px-5 py-4 flex items-start gap-3">
+                                  <div className="min-w-0 flex-1 space-y-1">
+                                    <div className="flex items-center gap-2 flex-wrap">
+                                      <span className={cn('text-[11px] font-semibold px-2 py-0.5 rounded-md border shrink-0', pill.c)}>{pill.t}</span>
+                                      <p className="text-sm font-semibold text-foreground leading-snug">{insight.title}</p>
+                                    </div>
+                                    <p className="text-sm text-muted leading-snug">{shortInsight(insight.detail)}</p>
+                                  </div>
+                                  {sid && actionable && (
+                                    <button
+                                      onClick={() => setSelectedServices(prev => isAdded ? prev.filter(s => s !== sid) : [...prev, sid])}
+                                      className={cn('shrink-0 h-9 px-3.5 rounded-xl border text-sm font-semibold transition-colors',
+                                        isAdded ? 'border-emerald-500/40 bg-emerald-500/10 text-emerald-600' : 'border-torqued-red/30 text-torqued-red hover:bg-torqued-red/5')}
+                                    >{isAdded ? '✓ Added' : 'Add'}</button>
+                                  )}
                                 </div>
-                                {sid && (
-                                  <button
-                                    onClick={() => setSelectedServices(prev => isAdded ? prev.filter(s => s !== sid) : [...prev, sid])}
-                                    className={cn(
-                                      "shrink-0 px-2.5 py-1 rounded-lg text-[10px] font-black uppercase tracking-widest transition-all",
-                                      isAdded ? "bg-emerald-500/20 text-emerald-400" : "bg-torqued-red text-white hover:bg-red-600"
-                                    )}
-                                  >
-                                    {isAdded ? '✓ Added' : '+ Add'}
-                                  </button>
-                                )}
-                              </div>
-                            );
-                          })}
-                          {selectedServices.length > 0 && (
-                            <button
-                              onClick={() => setStep(2)}
-                              className="w-full mt-1 py-2 text-xs font-black uppercase tracking-widest text-torqued-red border border-torqued-red/40 rounded-xl hover:bg-torqued-red/5 transition-all"
-                            >
-                              Review Work Order ({selectedServices.length} item{selectedServices.length !== 1 ? 's' : ''}) →
-                            </button>
-                          )}
-                        </div>
-                      )}
+                              );
+                            })}
+                          </div>
+                          <p className="text-xs text-muted">Generated by AI from your service records and may not be fully accurate.</p>
+                        </>);
+                      })()}
                     </div>
                   )}
 
@@ -6314,7 +6322,7 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                 <div className="flex justify-between items-center gap-3">
                   <div>
                     <h3 className="text-2xl font-bold tracking-tight normal-case">Vehicle health</h3>
-                    {vehicle && <p className="text-xs text-muted mt-0.5">{vehicle.year} {vehicle.make} {vehicle.model}</p>}
+                    {vehicle && <p className="text-sm text-muted mt-0.5">{vehicle.make}'s service schedule for your {vehicle.year} {vehicle.model}{vehicle.mileage ? ` at ${Number(vehicle.mileage).toLocaleString()} km` : ''}, checked against your service history.</p>}
                   </div>
                   <div className="flex gap-2">
                     <input id="history-upload-input" type="file" accept="image/*,application/pdf" multiple className="hidden"
@@ -6361,16 +6369,8 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                             const isGood     = insight.severity === 'good';
                             const isDue      = insight.severity === 'due';
                             const isOverdue  = insight.severity === 'overdue';
-                            // Short description only: the first sentence, without the "Recommend…" advice.
-                            const short = (() => {
-                              const d = String(insight.detail || '').replace(/\s+/g, ' ').trim();
-                              const first = (d.split(/(?<=[.!?])\s+/).find(x => !/^recommend/i.test(x)) || d).trim();
-                              return first.length > 140 ? first.slice(0, 137).replace(/\s+\S*$/, '') + '…' : first;
-                            })();
-                            const pill = isOverdue ? { t: 'Overdue', c: 'bg-torqued-red/10 text-torqued-red border-torqued-red/30' }
-                              : isDue ? { t: 'Due soon', c: 'bg-amber-500/10 text-amber-600 border-amber-500/30' }
-                              : isGood ? { t: 'Up to date', c: 'bg-emerald-500/10 text-emerald-600 border-emerald-500/30' }
-                              : { t: 'Note', c: 'bg-background text-muted border-border' };
+                            const short = shortInsight(insight.detail);
+                            const pill = insightPill(insight.severity);
                             return (
                               <div key={i} className="px-4 sm:px-5 py-4 flex items-start gap-3">
                                 <div className="min-w-0 flex-1 space-y-1">

@@ -7184,7 +7184,7 @@ app.post('/api/ai/health-insights', async (req, res) => {
     const hasHistory = history.length > 0;
 
     // Return cached insights if mileage + history count unchanged
-    const cacheKey = `v2|${formattedRego}|${resolvedMileage ?? 0}|${history.length}`;
+    const cacheKey = `v3|${formattedRego}|${resolvedMileage ?? 0}|${history.length}`;
     const cached = _aiInsightCache.get(cacheKey);
     if (cached && Date.now() - cached.ts < AI_INSIGHT_TTL) {
       return res.json({ insights: cached.insights, hasHistory: cached.hasHistory, cached: true });
@@ -7218,23 +7218,14 @@ ${annualKmLine}
 
 ${historyText}
 
-Your job: produce ONLY genuine, vehicle-specific service recommendations. Rules:
-1. Read the service history carefully. If a service was completed recently, mark it "good" — do NOT suggest it is due unless the interval has genuinely been exceeded.
-2. ALWAYS use the estimated annual mileage to calculate realistic time-to-next-service. If annual mileage is low (e.g. <8,000 km/yr) and the km interval is far away, do NOT mark a service as "due" solely because of time elapsed — use km progress as the primary signal.
-3. Only include a service if it is relevant to this specific vehicle:
-   - EVs and PHEVs do not need cambelt or transmission fluid services in the same way.
-   - Chain-driven engines need no cambelt — skip or use "info" only.
-   - PHEVs may have extended oil intervals.
-4. NZ service intervals (use these — do not substitute longer intervals unless manufacturer-specific):
-   - Oil & Filter: every 10,000 km or 12 months, whichever comes first
-   - Cambelt: 100,000 km or 5 years (belt-driven only)
-   - Transmission fluid: 60,000 km or 4 years — only flag as "due" if genuinely approaching by km
-   - Brakes: inspect every 20,000 km or 12 months
-   - Spark plugs: 40,000–100,000 km depending on type
-   - Coolant: 60,000 km or 3–5 years
-5. Return 3–6 insights. Only include services that are actually due, overdue, or approaching due based on real evidence.
-6. Km calculations: km_since_last = current_km − km_at_last_service. Only mark "overdue" if km_since_last ≥ interval OR time interval is clearly exceeded AND annual mileage confirms the vehicle is actually near the km interval.
-7. Entries starting "Pre-purchase inspection" are independent workshop INSPECTIONS, not services performed. Never treat a "pass" in one as evidence a service was done (e.g. "engine oil condition: pass" is NOT an oil change). DO use their FAIL/Attention findings as known issues at that date and odometer: surface them (e.g. brakes, tyres, rust, leaks, suspension, battery) as due/overdue unless a LATER history entry shows the work was carried out. Mention that the finding comes from the inspection.
+Your job: list the SCHEDULED MAINTENANCE this ${resolvedMake || 'vehicle'} needs, based on the manufacturer's service schedule for this model and engine, its current mileage, and the known service history above. Rules:
+1. Scheduled maintenance only: engine oil & filter, air / cabin / fuel filters, spark plugs, brake fluid, coolant, transmission / DSG / Haldex / diff fluids, timing belt (belt-driven engines only), and the periodic inspections in the maker's schedule. Do NOT list faults, repairs or inspection findings (e.g. washer pumps, sensors, leaks, rust, worn parts) — those are not part of this list.
+2. Use the maker's intervals for this make / model / engine where known (e.g. VW/Audi DSG fluid 60,000 km, Haldex 60,000 km, brake fluid every 2 years). Otherwise use these NZ defaults: oil & filter 10,000 km or 12 months; brake fluid 2 years; coolant 60,000 km or 3–5 years; spark plugs 40,000–100,000 km by type; transmission fluid 60,000 km or 4 years; timing belt 100,000 km or 5 years.
+3. Read the service history carefully. A service done within its interval is "good" — never mark it due unless the interval has genuinely been exceeded. km_since_last = current km − km at last service.
+4. Use the estimated annual mileage for time-to-next-service. With low annual mileage, use km progress as the main signal; only use time if the maker specifies a time interval (e.g. brake fluid, oil 12 months) and it has passed.
+5. Skip items that don't apply (EVs/PHEVs, chain-driven engines have no timing belt).
+6. Entries starting "Pre-purchase inspection" are inspections, not services: they never count as a service being done.
+7. Return 3–6 items, most urgent first.
 
 Severity:
   "good"    = confirmed recently done, clearly within interval
@@ -7242,7 +7233,7 @@ Severity:
   "overdue" = interval genuinely exceeded by km or time
   "info"    = not applicable to this vehicle, or general advisory
 
-Writing style: "title" is a short label (max 6 words). "detail" is ONE short plain sentence (max 16 words) describing the vehicle's state with the key km/date fact — e.g. "Slow coolant leak found at the October inspection; flush overdue." No advice, no "Recommend…", no reasoning.
+Writing style: "title" is the service name only (max 5 words), e.g. "Engine oil & filter", "Brake fluid", "Spark plugs", "Coolant flush", "DSG fluid", "Timing belt". "detail" is ONE short plain sentence (max 16 words) with the schedule and history fact — e.g. "Last done at 82,000 km; due every 15,000 km." or "No record on file; due every 2 years." No advice, no "Recommend…".
 
 Return ONLY valid JSON (no markdown): {"insights":[{"title":"short label","detail":"one short sentence","severity":"good|due|overdue|info"}]}`;
 
