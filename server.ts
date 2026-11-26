@@ -1545,233 +1545,313 @@ app.get('/api/mechanic/customer-lookup', async (req, res) => {
 });
 
 // ── Passkeys (WebAuthn) ─────────────────────────────────────
-const RP_ID = 'torqued.site';
-const RP_ORIGIN = 'https://torqued.site';
+// Cross-platform / cross-device:
+//  • One relying party (torqued.site) for web, www, and the native apps (iOS via
+//    associated domains, Android via assetlinks) — see /.well-known routes below.
+//  • Discoverable credentials (residentKey: required) so iCloud Keychain, Google
+//    Password Manager, 1Password, Windows Hello and security keys all work, and a
+//    passkey on a phone can sign in on a laptop via the QR / "use a phone" option.
+//  • allowCredentials never carries stored transports (they can hide the QR option).
+//  • Each account type gets its own user handle, so a person who is both a customer
+//    and a workshop never has one passkey overwrite the other.
+//  • Adding / listing / removing passkeys needs proof of sign-in: a Supabase session
+//    (mechanics), the admin session key (admins) or a short-lived grant issued after
+//    the customer verified their email code or signed in with a passkey.
 const RP_NAME = 'Torqued';
+const PASSKEY_RP = (process.env.PASSKEY_RP_ID || 'torqued.site').toLowerCase();
+type PasskeyActor = 'customer' | 'mechanic' | 'admin';
+const PASSKEY_ACTORS: PasskeyActor[] = ['customer', 'mechanic', 'admin'];
 
-// GET /api/passkey/has — does this actor already have a passkey registered?
+function passkeyRp(req: express.Request): { rpID: string; origins: string[] } | null {
+  const host = String(req.headers['x-forwarded-host'] || req.headers.host || '').split(',')[0].split(':')[0].trim().toLowerCase();
+  if (host === PASSKEY_RP || host.endsWith(`.${PASSKEY_RP}`)) {
+    // Extra origins, e.g. Android apps: android:apk-key-hash:<base64url sha256 of signing cert>
+    const extra = String(process.env.PASSKEY_EXTRA_ORIGINS || '').split(',').map(s => s.trim()).filter(Boolean);
+    return { rpID: PASSKEY_RP, origins: [`https://${PASSKEY_RP}`, `https://www.${PASSKEY_RP}`, ...extra] };
+  }
+  const isProd = process.env.VERCEL_ENV === 'production' || process.env.NODE_ENV === 'production';
+  if (!isProd && (host === 'localhost' || host === '127.0.0.1')) {
+    return { rpID: 'localhost', origins: ['http://localhost:3000', 'http://localhost:5173', 'http://127.0.0.1:3000'] };
+  }
+  return null;
+}
+const PASSKEY_WRONG_HOST = `Passkeys work on ${PASSKEY_RP} — open the site there to use one.`;
+const normRef = (actorType: string, ref: any) => String(ref || '').trim().toLowerCase();
+const passkeyUserHandle = (actorType: string, ref: string) =>
+  new Uint8Array(crypto.createHash('sha256').update(`torqued:${actorType}:${ref}`).digest());
+
+// A customer proved who they are (email code / passkey) → may manage passkeys for 48h.
+function customerPasskeyGrant(email: string | null | undefined): string | null {
+  if (!email || !String(email).includes('@')) return null;
+  return signAdmin({ kind: 'pk-grant', actorType: 'customer', ownerRef: normRef('customer', email) }, 48 * 60 * 60 * 1000);
+}
+
+// Who is asking? Returns the verified owner_ref for this actor, or null.
+async function passkeyCaller(req: express.Request, actorType: string): Promise<string | null> {
+  const grant = String(req.body?.grant || req.headers['x-passkey-grant'] || '');
+  if (actorType === 'customer' || actorType === 'admin') {
+    const g = grant ? readSigned(grant) : null;
+    if (actorType === 'customer' && g?.kind === 'pk-grant' && g.actorType === 'customer' && g.ownerRef) return String(g.ownerRef);
+    if (actorType === 'admin' && g?.kind === 'admin-session' && g.email) return normRef('admin', g.email);
+    return null;
+  }
+  if (actorType === 'mechanic') {
+    const m = String(req.headers.authorization || '').match(/^Bearer\s+(.+)$/i);
+    const supabase = getSupabaseAdmin();
+    if (!m || !supabase) return null;
+    try {
+      const { data } = await supabase.auth.getUser(m[1]);
+      return data?.user?.email ? normRef('mechanic', data.user.email) : null;
+    } catch { return null; }
+  }
+  return null;
+}
+
+// Every owner_ref a sign-in attempt could match. Customers may type a plate:
+// resolve it to the owner's email (current keying) and keep the plate (legacy keying).
+async function passkeyRefsFor(supabase: any, actorType: string, ownerRef: any): Promise<string[]> {
+  const ref = normRef(actorType, ownerRef);
+  if (!ref) return [];
+  if (actorType !== 'customer' || ref.includes('@')) return [ref];
+  const plate = ref.toUpperCase().replace(/\s+/g, '');
+  const refs = [plate.toLowerCase()];
+  const { data: v } = await supabase.from('vehicles').select('owner_id').eq('rego', plate).maybeSingle();
+  if (v?.owner_id) {
+    const { data: p } = await supabase.from('profiles').select('email').eq('id', v.owner_id).maybeSingle();
+    if (p?.email) refs.push(normRef('customer', p.email));
+  }
+  return refs;
+}
+
+// GET /api/passkey/has — does this account (email, or a customer's plate) have a passkey?
 app.get('/api/passkey/has', async (req, res) => {
   try {
-    const actorType = req.query.actorType as string;
-    const ownerRef = req.query.ownerRef as string;
-    if (!actorType || !ownerRef) return res.json({ has: false });
+    const actorType = String(req.query.actorType || '');
     const supabase = getSupabaseAdmin();
-    if (!supabase) return res.json({ has: false });
-    const { data } = await supabase.from('webauthn_credentials')
-      .select('credential_id').eq('actor_type', actorType).eq('owner_ref', String(ownerRef).toLowerCase()).limit(1);
+    if (!supabase || !PASSKEY_ACTORS.includes(actorType as PasskeyActor) || !req.query.ownerRef) return res.json({ has: false });
+    const refs = await passkeyRefsFor(supabase, actorType, req.query.ownerRef);
+    if (!refs.length) return res.json({ has: false });
+    const { data } = await supabase.from('webauthn_credentials').select('credential_id').eq('actor_type', actorType).in('owner_ref', refs).limit(1);
     res.json({ has: !!(data && data.length) });
   } catch { res.json({ has: false }); }
 });
 
-// POST /api/passkey/register-options — begin passkey registration
+// POST /api/passkey/register-options — begin adding a passkey (signed-in callers only)
 app.post('/api/passkey/register-options', async (req, res) => {
   try {
-    const { actorType, ownerRef } = req.body;
-    if (!actorType || !ownerRef) return res.status(400).json({ error: 'actorType and ownerRef required' });
+    const { actorType, displayName } = req.body || {};
+    if (!PASSKEY_ACTORS.includes(actorType)) return res.status(400).json({ error: 'Unknown account type' });
+    const rp = passkeyRp(req);
+    if (!rp) return res.status(400).json({ error: PASSKEY_WRONG_HOST });
+    const owner = await passkeyCaller(req, actorType);
+    if (!owner) return res.status(401).json({ error: actorType === 'customer' ? 'Verify your email code first, then add a passkey.' : 'Please sign in again, then add a passkey.' });
+    if (req.body?.ownerRef && normRef(actorType, req.body.ownerRef) !== owner) return res.status(403).json({ error: 'You can only add a passkey to your own account.' });
     const supabase = getSupabaseAdmin();
     if (!supabase) return res.status(500).json({ error: 'Database not configured' });
     const { generateRegistrationOptions } = await import('@simplewebauthn/server');
-
     const { data: existing } = await supabase.from('webauthn_credentials')
-      .select('credential_id, transports').eq('actor_type', actorType).eq('owner_ref', String(ownerRef).toLowerCase());
-
+      .select('credential_id, transports').eq('actor_type', actorType).eq('owner_ref', owner);
+    const role = actorType === 'mechanic' ? 'Workshop' : actorType === 'admin' ? 'Admin' : 'My Garage';
     const options = await generateRegistrationOptions({
-      rpName: RP_NAME, rpID: RP_ID,
-      userName: String(ownerRef), userID: new TextEncoder().encode(String(ownerRef).toLowerCase()),
+      rpName: RP_NAME, rpID: rp.rpID,
+      userName: owner,
+      userID: passkeyUserHandle(actorType, owner),
+      userDisplayName: `${String(displayName || owner).slice(0, 60)} · Torqued ${role}`,
       attestationType: 'none',
       excludeCredentials: (existing ?? []).map((c: any) => ({ id: c.credential_id, transports: c.transports || undefined })),
-      authenticatorSelection: { residentKey: 'preferred', userVerification: 'preferred' },
+      authenticatorSelection: { residentKey: 'required', userVerification: 'preferred' },
+      supportedAlgorithmIDs: [-7, -257],
+      timeout: 120000,
     });
-    const challengeToken = signAdmin({ kind: 'pk-reg', actorType, ownerRef: String(ownerRef).toLowerCase(), challenge: options.challenge }, 5 * 60 * 1000);
+    const challengeToken = signAdmin({ kind: 'pk-reg', actorType, ownerRef: owner, challenge: options.challenge, rpID: rp.rpID }, 5 * 60 * 1000);
     res.json({ options, challengeToken });
   } catch (err) {
     console.error('[passkey/register-options]', err);
-    res.status(500).json({ error: 'Could not start registration' });
+    res.status(500).json({ error: 'Could not start passkey setup' });
   }
 });
 
-// POST /api/passkey/register-verify — finish registration, store credential
+// POST /api/passkey/register-verify — finish adding a passkey, store the credential
 app.post('/api/passkey/register-verify', async (req, res) => {
   try {
-    const { challengeToken, response } = req.body;
+    const { challengeToken, response } = req.body || {};
     const data = challengeToken ? readSigned(challengeToken) : null;
-    if (!data || data.kind !== 'pk-reg') return res.status(400).json({ error: 'Registration session expired.' });
+    if (!data || data.kind !== 'pk-reg') return res.status(400).json({ error: 'Passkey setup timed out — please try again.' });
+    const rp = passkeyRp(req);
+    if (!rp || rp.rpID !== data.rpID) return res.status(400).json({ error: PASSKEY_WRONG_HOST });
     const { verifyRegistrationResponse } = await import('@simplewebauthn/server');
-    const reqOrigin = getOrigin(req);
     const verification = await verifyRegistrationResponse({
-      response, expectedChallenge: data.challenge,
-      expectedOrigin: reqOrigin && reqOrigin !== RP_ORIGIN ? [RP_ORIGIN, reqOrigin] : RP_ORIGIN,
-      expectedRPID: RP_ID,
+      response, expectedChallenge: data.challenge, expectedOrigin: rp.origins, expectedRPID: rp.rpID, requireUserVerification: false,
     });
-    if (!verification.verified || !verification.registrationInfo) return res.status(400).json({ error: 'Verification failed' });
-    const cred = verification.registrationInfo.credential;
+    if (!verification.verified || !verification.registrationInfo) return res.status(400).json({ error: 'Passkey could not be verified.' });
+    const info: any = verification.registrationInfo;
+    const cred = info.credential;
     const supabase = getSupabaseAdmin();
     if (!supabase) return res.status(500).json({ error: 'Database not configured' });
-    await supabase.from('webauthn_credentials').insert({
-      actor_type: data.actorType, owner_ref: data.ownerRef,
-      credential_id: cred.id,
-      public_key: Buffer.from(cred.publicKey).toString('base64url'),
-      counter: cred.counter || 0,
-      transports: cred.transports || null,
-    });
-    // Best-effort: store device label — silently skipped if device_name column doesn't exist yet
-    try {
-      const ua = req.headers['user-agent'] || '';
-      const deviceName = parseUADeviceName(ua);
-      if (deviceName) {
-        await supabase.from('webauthn_credentials')
-          .update({ device_name: deviceName } as any)
-          .eq('credential_id', cred.id)
-          .eq('owner_ref', String(data.ownerRef).toLowerCase());
-      }
-    } catch { /* column not yet added — ignore */ }
-    res.json({ success: true });
-  } catch (err) {
-    console.error('[passkey/register-verify]', err);
-    res.status(500).json({ error: 'Could not save passkey' });
+    const base = {
+      actor_type: data.actorType, owner_ref: data.ownerRef, credential_id: cred.id,
+      public_key: Buffer.from(cred.publicKey).toString('base64url'), counter: cred.counter || 0, transports: cred.transports || null,
+    };
+    const extra = { device_name: parseUADeviceName(String(req.headers['user-agent'] || '')), backed_up: !!info.credentialBackedUp, rp_id: rp.rpID, last_used_at: new Date().toISOString() };
+    let { error } = await supabase.from('webauthn_credentials').insert({ ...base, ...extra });
+    if (error && /column/i.test(error.message)) ({ error } = await supabase.from('webauthn_credentials').insert(base));   // before migration 073
+    if (error) return res.status(error.code === '23505' ? 409 : 500).json({ error: error.code === '23505' ? 'This passkey is already saved.' : 'Could not save passkey' });
+    res.json({ success: true, synced: !!info.credentialBackedUp });
+  } catch (err: any) {
+    console.error('[passkey/register-verify]', err?.message || err);
+    res.status(400).json({ error: 'Passkey could not be verified — please try again.' });
   }
 });
 
-// POST /api/passkey/auth-options — begin passkey authentication
+// POST /api/passkey/auth-options — begin sign-in. With an email (or a customer's plate)
+// we list that account's passkeys; otherwise (or if none are known) it's usernameless,
+// so any synced Torqued passkey on this device — or a nearby phone — can be used.
 app.post('/api/passkey/auth-options', async (req, res) => {
   try {
-    const { actorType, ownerRef } = req.body;
+    const { actorType, ownerRef } = req.body || {};
+    if (!PASSKEY_ACTORS.includes(actorType)) return res.status(400).json({ error: 'Unknown account type' });
+    const rp = passkeyRp(req);
+    if (!rp) return res.status(400).json({ error: PASSKEY_WRONG_HOST });
     const supabase = getSupabaseAdmin();
     if (!supabase) return res.status(500).json({ error: 'Database not configured' });
     const { generateAuthenticationOptions } = await import('@simplewebauthn/server');
-    let allow: any[] | undefined;
+    let allow: { id: string }[] | undefined;
     if (ownerRef) {
-      const { data: creds } = await supabase.from('webauthn_credentials')
-        .select('credential_id, transports').eq('actor_type', actorType).eq('owner_ref', String(ownerRef).toLowerCase());
-      if (!creds || creds.length === 0) return res.status(404).json({ error: 'No passkey registered for this account.' });
-      allow = creds.map((c: any) => ({ id: c.credential_id, transports: c.transports || undefined }));
+      const refs = await passkeyRefsFor(supabase, actorType, ownerRef);
+      if (refs.length) {
+        const { data: creds } = await supabase.from('webauthn_credentials').select('credential_id').eq('actor_type', actorType).in('owner_ref', refs);
+        if (creds?.length) allow = creds.map((c: any) => ({ id: c.credential_id }));
+      }
     }
-    const options = await generateAuthenticationOptions({ rpID: RP_ID, userVerification: 'preferred', allowCredentials: allow });
-    const challengeToken = signAdmin({ kind: 'pk-auth', actorType, ownerRef: ownerRef ? String(ownerRef).toLowerCase() : null, challenge: options.challenge }, 5 * 60 * 1000);
-    res.json({ options, challengeToken });
+    const options = await generateAuthenticationOptions({ rpID: rp.rpID, userVerification: 'preferred', allowCredentials: allow, timeout: 120000 });
+    const challengeToken = signAdmin({ kind: 'pk-auth', actorType, challenge: options.challenge, rpID: rp.rpID }, 5 * 60 * 1000);
+    res.json({ options, challengeToken, known: !!allow });
   } catch (err) {
     console.error('[passkey/auth-options]', err);
-    res.status(500).json({ error: 'Could not start sign-in' });
+    res.status(500).json({ error: 'Could not start passkey sign-in' });
   }
 });
 
-// POST /api/passkey/auth-verify — finish authentication, return a session for the actor
+// POST /api/passkey/auth-verify — finish sign-in, return a session for the account type
 app.post('/api/passkey/auth-verify', async (req, res) => {
   try {
-    const { challengeToken, response } = req.body;
+    const { challengeToken, response } = req.body || {};
     const data = challengeToken ? readSigned(challengeToken) : null;
-    if (!data || data.kind !== 'pk-auth') return res.status(400).json({ error: 'Sign-in session expired.' });
+    if (!data || data.kind !== 'pk-auth') return res.status(400).json({ error: 'Passkey sign-in timed out — please try again.' });
+    const rp = passkeyRp(req);
+    if (!rp || rp.rpID !== data.rpID) return res.status(400).json({ error: PASSKEY_WRONG_HOST });
     const supabase = getSupabaseAdmin();
     if (!supabase) return res.status(500).json({ error: 'Database not configured' });
 
-    const { data: cred } = await supabase.from('webauthn_credentials').select('*').eq('credential_id', response.id).single();
-    if (!cred) return res.status(404).json({ error: 'Passkey not recognised.' });
+    const { data: cred } = await supabase.from('webauthn_credentials').select('*').eq('credential_id', response?.id).maybeSingle();
+    if (!cred) return res.status(404).json({ error: 'This passkey isn\'t recognised any more. Sign in another way, then add a new passkey.' });
+    if (cred.actor_type !== data.actorType) {
+      const where = cred.actor_type === 'mechanic' ? 'the workshop login' : cred.actor_type === 'admin' ? 'the admin login' : 'My Garage';
+      return res.status(400).json({ error: `That passkey is for ${where}. Pick your ${data.actorType === 'mechanic' ? 'workshop' : data.actorType === 'admin' ? 'admin' : 'My Garage'} passkey instead.` });
+    }
 
     const { verifyAuthenticationResponse } = await import('@simplewebauthn/server');
-    const authReqOrigin = getOrigin(req);
     const verification = await verifyAuthenticationResponse({
-      response, expectedChallenge: data.challenge,
-      expectedOrigin: authReqOrigin && authReqOrigin !== RP_ORIGIN ? [RP_ORIGIN, authReqOrigin] : RP_ORIGIN,
-      expectedRPID: RP_ID,
-      credential: { id: cred.credential_id, publicKey: Buffer.from(cred.public_key, 'base64url'), counter: Number(cred.counter) || 0 },
+      response, expectedChallenge: data.challenge, expectedOrigin: rp.origins, expectedRPID: rp.rpID, requireUserVerification: false,
+      credential: { id: cred.credential_id, publicKey: Buffer.from(cred.public_key, 'base64url'), counter: Number(cred.counter) || 0, transports: cred.transports || undefined },
     });
-    if (!verification.verified) return res.status(400).json({ error: 'Verification failed' });
+    if (!verification.verified) return res.status(400).json({ error: 'Passkey could not be verified.' });
     await supabase.from('webauthn_credentials').update({ counter: verification.authenticationInfo.newCounter }).eq('id', cred.id);
+    try { await supabase.from('webauthn_credentials').update({ last_used_at: new Date().toISOString() } as any).eq('id', cred.id); } catch { /* before migration 073 */ }
 
-    // Issue the right kind of session for the actor
     if (cred.actor_type === 'admin') {
       return res.json({ success: true, actorType: 'admin', key: signAdmin({ kind: 'admin-session', email: cred.owner_ref }, 12 * 60 * 60 * 1000) });
     }
     if (cred.actor_type === 'mechanic') {
-      // Mint a Supabase session without password via a magiclink token_hash (client calls verifyOtp)
-      const { data: link } = await supabase.auth.admin.generateLink({ type: 'magiclink', email: cred.owner_ref });
-      return res.json({ success: true, actorType: 'mechanic', email: cred.owner_ref, tokenHash: link?.properties?.hashed_token || null });
+      // A Supabase session without a password: a magic-link token hash (no email is sent);
+      // the client exchanges it with supabase.auth.verifyOtp.
+      const { data: link, error: linkErr } = await supabase.auth.admin.generateLink({ type: 'magiclink', email: cred.owner_ref });
+      if (linkErr || !link?.properties?.hashed_token) return res.status(500).json({ error: 'Signed in with your passkey, but the session could not be started — use your password this time.' });
+      return res.json({ success: true, actorType: 'mechanic', email: cred.owner_ref, tokenHash: link.properties.hashed_token });
     }
-    // customer: owner_ref is now the customer's email address (supports multiple vehicles)
-    // Legacy: if owner_ref looks like a rego (no @), fall back to rego-based lookup
-    let email: string | null = null, ownerId: string | null = null, vehicles: any[] = [], rego: string = '';
-    const ownerRef = cred.owner_ref as string;
+    // customer — keyed by email (current) or plate (legacy)
+    let email: string | null = null, ownerId: string | null = null, vehicles: any[] = [], rego = '';
+    const ownerRef = String(cred.owner_ref);
     if (ownerRef.includes('@')) {
-      // Email-keyed passkey — look up profile by email
       const { data: profile } = await supabase.from('profiles').select('id, email').ilike('email', ownerRef).maybeSingle();
-      if (profile) {
-        ownerId = profile.id;
-        email = profile.email;
-        const { data: rows } = await supabase.from('vehicles').select('rego, make, model, year, variant, mileage, thumbnail').eq('owner_id', ownerId);
-        vehicles = rows ?? [];
-        rego = vehicles[0]?.rego ?? '';
-      }
+      if (profile) { ownerId = profile.id; email = profile.email; }
     } else {
-      // Legacy rego-keyed passkey — resolve via vehicle
+      const { data: vehicle } = await supabase.from('vehicles').select('owner_id').eq('rego', ownerRef.toUpperCase()).maybeSingle();
       rego = ownerRef.toUpperCase();
-      const { data: vehicle } = await supabase.from('vehicles').select('owner_id').eq('rego', rego).single();
       if (vehicle?.owner_id) {
         ownerId = vehicle.owner_id;
-        const { data: p } = await supabase.from('profiles').select('email').eq('id', ownerId).single();
+        const { data: p } = await supabase.from('profiles').select('email').eq('id', ownerId).maybeSingle();
         email = p?.email ?? null;
-        const { data: rows } = await supabase.from('vehicles').select('rego, make, model, year, variant, mileage, thumbnail').eq('owner_id', ownerId);
-        vehicles = rows ?? [];
-        rego = vehicles[0]?.rego ?? rego;
       }
     }
-    // vt: short-lived signed token so the native app can complete sign-in after web passkey auth
-    res.json({ success: true, actorType: 'customer', rego, email, ownerId, vehicles, vt: rego ? makeMagicToken(rego) : null });
-  } catch (err) {
-    console.error('[passkey/auth-verify]', err);
-    res.status(500).json({ error: 'Sign-in failed' });
+    if (ownerId) {
+      const { data: rows } = await supabase.from('vehicles').select('rego, make, model, year, variant, mileage, thumbnail').eq('owner_id', ownerId);
+      vehicles = rows ?? [];
+      rego = vehicles[0]?.rego ?? rego;
+    }
+    // vt: short-lived token so the native app can finish signing in after web passkey auth
+    res.json({ success: true, actorType: 'customer', rego, email, ownerId, vehicles, vt: rego ? makeMagicToken(rego) : null, pkGrant: customerPasskeyGrant(email) });
+  } catch (err: any) {
+    console.error('[passkey/auth-verify]', err?.message || err);
+    res.status(400).json({ error: 'Passkey sign-in failed — please try again.' });
   }
 });
 
-// GET /api/passkey/list — list all passkeys for a given actor
+// GET /api/passkey/list — the signed-in caller's passkeys
 app.get('/api/passkey/list', async (req, res) => {
   try {
-    const { actorType, ownerRef } = req.query as { actorType: string; ownerRef: string };
-    if (!actorType || !ownerRef) return res.status(400).json({ error: 'Missing actorType or ownerRef' });
+    const actorType = String(req.query.actorType || '');
+    if (!PASSKEY_ACTORS.includes(actorType as PasskeyActor)) return res.status(400).json({ error: 'Unknown account type' });
+    const owner = await passkeyCaller(req, actorType);
+    if (!owner) return res.status(401).json({ error: 'Please sign in again.' });
     const supabase = getSupabaseAdmin();
     if (!supabase) return res.status(500).json({ error: 'Database not configured' });
-    let rows: any[] | null = null;
-    const q1 = await supabase.from('webauthn_credentials')
-      .select('id, credential_id, created_at, transports, device_name')
-      .eq('actor_type', actorType)
-      .eq('owner_ref', String(ownerRef).toLowerCase())
-      .order('created_at', { ascending: false });
-    if (!q1.error) {
-      rows = q1.data;
-    } else {
-      // device_name column not yet added — fall back without it
-      const q2 = await supabase.from('webauthn_credentials')
-        .select('id, credential_id, created_at, transports')
-        .eq('actor_type', actorType)
-        .eq('owner_ref', String(ownerRef).toLowerCase())
-        .order('created_at', { ascending: false });
-      if (q2.error) return res.status(500).json({ error: q2.error.message });
-      rows = q2.data;
-    }
-    res.json({ passkeys: rows || [] });
+    let q = await supabase.from('webauthn_credentials').select('id, created_at, transports, device_name, backed_up, last_used_at')
+      .eq('actor_type', actorType).eq('owner_ref', owner).order('created_at', { ascending: false });
+    if (q.error) q = await supabase.from('webauthn_credentials').select('id, created_at, transports')
+      .eq('actor_type', actorType).eq('owner_ref', owner).order('created_at', { ascending: false }) as any;
+    if (q.error) return res.status(500).json({ error: q.error.message });
+    res.json({ passkeys: q.data || [] });
   } catch (err) {
     console.error('[passkey/list]', err);
     res.status(500).json({ error: 'Could not list passkeys' });
   }
 });
 
-// DELETE /api/passkey/delete — remove a specific passkey by row id
+// DELETE /api/passkey/delete — remove one of the signed-in caller's passkeys
 app.delete('/api/passkey/delete', async (req, res) => {
   try {
-    const { id, actorType, ownerRef } = req.body;
-    if (!id || !actorType || !ownerRef) return res.status(400).json({ error: 'Missing fields' });
+    const { id, actorType } = req.body || {};
+    if (!id || !PASSKEY_ACTORS.includes(actorType)) return res.status(400).json({ error: 'Missing fields' });
+    const owner = await passkeyCaller(req, actorType);
+    if (!owner) return res.status(401).json({ error: 'Please sign in again.' });
     const supabase = getSupabaseAdmin();
     if (!supabase) return res.status(500).json({ error: 'Database not configured' });
-    const { error } = await supabase.from('webauthn_credentials')
-      .delete()
-      .eq('id', id)
-      .eq('actor_type', actorType)
-      .eq('owner_ref', String(ownerRef).toLowerCase());
+    const { error } = await supabase.from('webauthn_credentials').delete().eq('id', id).eq('actor_type', actorType).eq('owner_ref', owner);
     if (error) return res.status(500).json({ error: error.message });
     res.json({ success: true });
   } catch (err) {
     console.error('[passkey/delete]', err);
     res.status(500).json({ error: 'Could not delete passkey' });
   }
+});
+
+// Native apps share the website's passkeys:
+//  • iOS: Associated Domains → webcredentials:torqued.site; APPLE_APP_IDS="TEAMID.nz.torqued.garage"
+//  • Android: ANDROID_APP_PACKAGE + ANDROID_CERT_SHA256 (colon-separated SHA-256 fingerprints, comma list)
+app.get(['/.well-known/apple-app-site-association', '/apple-app-site-association'], (_req, res) => {
+  const apps = String(process.env.APPLE_APP_IDS || '').split(',').map(s => s.trim()).filter(Boolean);
+  res.setHeader('Cache-Control', 'public, max-age=3600');
+  res.type('application/json').send(JSON.stringify({ webcredentials: { apps } }));
+});
+app.get('/.well-known/assetlinks.json', (_req, res) => {
+  const pkg = String(process.env.ANDROID_APP_PACKAGE || '').trim();
+  const fps = String(process.env.ANDROID_CERT_SHA256 || '').split(',').map(s => s.trim()).filter(Boolean);
+  res.setHeader('Cache-Control', 'public, max-age=3600');
+  res.json(pkg && fps.length ? [{
+    relation: ['delegate_permission/common.handle_all_urls', 'delegate_permission/common.get_login_creds'],
+    target: { namespace: 'android_app', package_name: pkg, sha256_cert_fingerprints: fps },
+  }] : []);
 });
 
 // ── Carjam ABCD API helper ───────────────────────────────────────────────────
@@ -8468,7 +8548,7 @@ app.post('/api/otp/verify', async (req, res) => {
     vehicles = rows ?? [];
   }
 
-  res.json({ success: true, email, ownerId, vehicles });
+  res.json({ success: true, email, ownerId, vehicles, pkGrant: customerPasskeyGrant(email) });
 });
 
 // POST /api/customer/add-vehicle — claim/add a plate to an existing customer's garage

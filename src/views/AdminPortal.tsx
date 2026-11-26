@@ -81,10 +81,10 @@ export const AdminPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) => {
     if (passkeysSupported() && email && !(await hasPasskey('admin', email))) {
       try {
         if (window.confirm('Set up a passkey for faster sign-in next time? You\'ll use Face ID / Touch ID instead of a password.')) {
-          await registerPasskey('admin', email);
-          window.alert('Passkey added. Next time, tap "Sign in with passkey".');
+          const r = await registerPasskey('admin', email, { adminKey: d.key });
+          window.alert(r.alreadyRegistered ? 'This device already has your admin passkey.' : 'Passkey added. Next time, tap "Sign in with passkey".');
         }
-      } catch { }
+      } catch (e: any) { window.alert(e?.message || 'Could not add a passkey.'); }
     }
   };
 

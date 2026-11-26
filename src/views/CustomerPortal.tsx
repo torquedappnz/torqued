@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
-import { Search, MapPin, ChevronRight, Info, Lock, CheckCircle2, Star, Calendar, CreditCard, Car, History, Wrench, AlertTriangle, Plus, Edit2, ArrowLeft, Clock, Sun, Moon, Monitor, Download, Ticket, Mail, Send, Smartphone, X, Upload, Sparkles, Camera, Settings, Trash2, Repeat } from 'lucide-react';
+import { KeyRound, Search, MapPin, ChevronRight, Info, Lock, CheckCircle2, Star, Calendar, CreditCard, Car, History, Wrench, AlertTriangle, Plus, Edit2, ArrowLeft, Clock, Sun, Moon, Monitor, Download, Ticket, Mail, Send, Smartphone, X, Upload, Sparkles, Camera, Settings, Trash2, Repeat } from 'lucide-react';
 import { jsPDF } from 'jspdf';
 import { Logo } from '../components/Logo';
 import { Button } from '../components/Button';
@@ -13,7 +13,7 @@ import { useTheme } from '../context/ThemeContext';
 
 import { useAuth } from '../context/AuthContext';
 import { supabase } from '../lib/supabase';
-import { authPasskey, registerPasskey, passkeysSupported, hasPasskey } from '../lib/passkey';
+import { authPasskey, registerPasskey, passkeysSupported, hasPasskey, listPasskeys, deletePasskey, describePasskey } from '../lib/passkey';
 
 const BRAND_LOGOS: Record<string, string> = {
   volkswagen: 'https://upload.wikimedia.org/wikipedia/commons/thumb/6/6d/Volkswagen_logo_2019.svg/120px-Volkswagen_logo_2019.svg.png',
@@ -296,6 +296,7 @@ const ProfileView: React.FC<ProfileViewProps> = (props) => {
   const [saving, setSaving] = React.useState(false);
   const [saved, setSaved] = React.useState(false);
   const [passkeys, setPasskeys] = React.useState<any[]>([]);
+  const customerCanAddPasskey = () => { try { const v = JSON.parse(localStorage.getItem('torqued_customer_session') || 'null'); return !!(v?.pkGrant && v?.email); } catch { return false; } };
   const [passkeysLoading, setPasskeysLoading] = React.useState(false);
   const [removingId, setRemovingId] = React.useState<string | null>(null);
   const [locating, setLocating] = React.useState(false);
@@ -326,32 +327,26 @@ const ProfileView: React.FC<ProfileViewProps> = (props) => {
 
   React.useEffect(() => {
     if (!customerEmail) return;
+    if (!customerCanAddPasskey()) { setPasskeys([]); return; }
     setPasskeysLoading(true);
-    fetch(`/api/passkey/list?actorType=customer&ownerRef=${encodeURIComponent(customerEmail)}`)
-      .then(r => r.json()).then(d => setPasskeys(d.passkeys || [])).catch(() => {}).finally(() => setPasskeysLoading(false));
+    listPasskeys('customer').then(setPasskeys).catch(() => setPasskeys([])).finally(() => setPasskeysLoading(false));
   }, [customerEmail]);
 
   const removePasskey = async (id: string) => {
     if (!customerEmail) return;
     setRemovingId(id);
-    await fetch('/api/passkey/delete', { method: 'DELETE', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ id, actorType: 'customer', ownerRef: customerEmail }) });
-    setPasskeys(prev => prev.filter(p => p.id !== id));
+    try { await deletePasskey('customer', id); setPasskeys(prev => prev.filter(p => p.id !== id)); }
+    catch (e: any) { alert(e?.message || 'Could not remove the passkey.'); }
     setRemovingId(null);
   };
 
   const addPasskey = async () => {
-    const plate = (rego || vehicle?.rego || garageVehicles[0]?.rego || '').toUpperCase();
-    if (!plate) return;
+    if (!customerEmail) return;
     setPasskeyCardState('adding');
     try {
-      await registerPasskey('customer', customerEmail || plate);
+      await registerPasskey('customer', customerEmail, { displayName: userName || customerEmail });
       setPasskeyCardState('added');
-      // Re-fetch list
-      if (customerEmail) {
-        const d = await fetch(`/api/passkey/list?actorType=customer&ownerRef=${encodeURIComponent(customerEmail)}`).then(r => r.json());
-        setPasskeys(d.passkeys || []);
-      }
+      setPasskeys(await listPasskeys('customer'));
     } catch { setPasskeyCardState('error'); }
   };
 
@@ -438,7 +433,8 @@ const ProfileView: React.FC<ProfileViewProps> = (props) => {
             <p className="text-[10px] font-black uppercase tracking-widest text-muted">Passkeys</p>
             <button
               onClick={addPasskey}
-              disabled={passkeyCardState === 'adding'}
+              disabled={passkeyCardState === 'adding' || !customerCanAddPasskey()}
+              title={!customerCanAddPasskey() ? 'Verify with an emailed code first' : undefined}
               className="text-[10px] font-black uppercase tracking-widest text-torqued-red hover:opacity-70 disabled:opacity-40 transition-all"
             >
               {passkeyCardState === 'adding' ? 'Adding…' : '+ Add Passkey'}
@@ -459,7 +455,7 @@ const ProfileView: React.FC<ProfileViewProps> = (props) => {
                 <div key={pk.id} className="flex items-center justify-between p-3 bg-background border border-border rounded-xl">
                   <div className="space-y-0.5">
                     <p className="text-sm font-bold">🔑 {pk.device_name || 'Passkey'}</p>
-                    <p className="text-[10px] text-muted">Added {new Date(pk.created_at).toLocaleDateString('en-NZ')}</p>
+                    <p className="text-[10px] text-muted">{describePasskey(pk)}</p>
                   </div>
                   <button
                     onClick={() => removePasskey(pk.id)}
@@ -1017,10 +1013,30 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
   const SESSION_TTL = 48 * 60 * 60 * 1000;
   const [customerVerifiedAt, setCustomerVerifiedAt] = useState<number | null>(null);
   const garageUnlocked = customerVerifiedAt != null && (Date.now() - customerVerifiedAt) < SESSION_TTL;
-  const persistCustomerSession = (s: { ownerId: string | null; email: string; rego: string; vehicles: any[] }) => {
+  const persistCustomerSession = (s: { ownerId: string | null; email: string; rego: string; vehicles: any[]; pkGrant?: string | null }) => {
     const at = Date.now();
     setCustomerVerifiedAt(at);
-    try { localStorage.setItem(SESSION_KEY, JSON.stringify({ ...s, verifiedAt: at })); } catch {}
+    try {
+      // Keep the passkey grant from an earlier verification unless a new one was issued.
+      const prev = JSON.parse(localStorage.getItem(SESSION_KEY) || 'null');
+      const pkGrant = s.pkGrant || (prev?.email && prev.email === s.email ? prev.pkGrant : null) || null;
+      localStorage.setItem(SESSION_KEY, JSON.stringify({ ...s, pkGrant, verifiedAt: at }));
+    } catch {}
+  };
+  // A customer can add a passkey once they've verified their email code (or used a passkey).
+  const customerCanAddPasskey = () => {
+    try { const v = JSON.parse(localStorage.getItem(SESSION_KEY) || 'null'); return !!(v?.pkGrant && v?.email); } catch { return false; }
+  };
+  const [offerPasskey, setOfferPasskey] = useState<null | 'ask' | 'adding' | 'done' | 'error'>(null);
+  const [offerPasskeyMsg, setOfferPasskeyMsg] = useState<string | null>(null);
+  const addCustomerPasskey = async () => {
+    if (!customerEmail) return;
+    setOfferPasskey('adding'); setOfferPasskeyMsg(null);
+    try {
+      const r = await registerPasskey('customer', customerEmail, { displayName: userName || customerEmail });
+      setOfferPasskey('done');
+      setOfferPasskeyMsg(r.alreadyRegistered ? 'This device already has your passkey — you\'re all set.' : r.synced ? 'Passkey saved and synced to your other devices.' : 'Passkey saved on this device.');
+    } catch (e: any) { setOfferPasskey('error'); setOfferPasskeyMsg(e?.message || 'Could not add a passkey.'); }
   };
   const clearCustomerSession = () => {
     setCustomerVerifiedAt(null); setCustomerOwnerId(null); setCustomerEmail(''); setGarageVehicles([]);
@@ -1768,11 +1784,12 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
         setGarageVehicles(r.vehicles.map((v: any) => ({ id: v.rego, rego: v.rego, make: v.make, model: v.model, year: v.year, variant: v.variant ?? undefined, mileage: v.mileage ?? 0, thumbnail: v.thumbnail ?? undefined })));
       }
       setRego((r.rego || plate));
-      persistCustomerSession({ ownerId: r.ownerId ?? null, email: r.email ?? '', rego: r.rego || plate, vehicles: r.vehicles ?? [] });
+      persistCustomerSession({ ownerId: r.ownerId ?? null, email: r.email ?? '', rego: r.rego || plate, vehicles: r.vehicles ?? [], pkGrant: r.pkGrant ?? null });
+      setShowOTPModal(false); setOtpCode(''); setOtpVerificationError('');
       setView('dashboard');
       await loadVehicleByRego(r.rego || plate);
     } catch (e: any) {
-      setPasskeyError(e?.message?.toLowerCase().includes('passkey') ? 'No passkey on this device — use “Email me a verification code” above instead.' : (e?.message || 'Passkey sign-in failed — use the verification code instead.'));
+      setPasskeyError(e?.message || 'Passkey sign-in failed — use the emailed code instead.');
     } finally {
       setMagicVerifying(false);
     }
@@ -1792,11 +1809,9 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
     setPkPrompted(true);
     const t = setTimeout(async () => {
       try {
-        if (await hasPasskey('customer', customerEmail || plate)) return; // already has one
-        if (window.confirm('Booking confirmed! 🎉\n\nWant faster access next time? Create a passkey to sign in with passkey — no email link needed.')) {
-          await registerPasskey('customer', customerEmail || plate);
-          window.alert('Passkey created. Next time you enter your plate, just tap "Verify with passkey".');
-        }
+        if (!customerEmail || !customerCanAddPasskey()) return;   // needs a verified email first
+        if (await hasPasskey('customer', customerEmail)) return; // already has one
+        setOfferPasskey('ask');
       } catch { /* cancelled — magic link still works */ }
     }, 1200);
     return () => clearTimeout(t);
@@ -2383,7 +2398,8 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
       }
       // Unlock the garage: this sets customerVerifiedAt (→ garageUnlocked) and a 48h
       // session. Without it the gate just re-renders and the user "goes back a step".
-      persistCustomerSession({ ownerId: verifiedOwnerId, email: verifiedEmail, rego: formattedRego, vehicles: verifiedVehicles });
+      persistCustomerSession({ ownerId: verifiedOwnerId, email: verifiedEmail, rego: formattedRego, vehicles: verifiedVehicles, pkGrant: verifyData.pkGrant || null });
+      if (passkeysSupported() && verifiedEmail && verifyData.pkGrant && !(await hasPasskey('customer', verifiedEmail))) setOfferPasskey('ask');
     } catch {
       setOtpVerificationError('Verification failed. Please try again.');
       return;
@@ -5996,7 +6012,7 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                   onClick={() => verifyWithPasskey(rego.toUpperCase().trim())}
                   className="w-full text-xs font-bold text-muted hover:text-foreground py-2 disabled:opacity-40"
                 >
-                  {magicVerifying ? 'Checking passkey…' : '🔑 Or sign in with a passkey'}
+                  {magicVerifying ? 'Waiting for your passkey…' : 'Or sign in with a passkey (Face ID, Touch ID or your phone)'}
                 </button>
               )}
               {passkeyError && <p className="text-xs text-torqued-red font-bold">{passkeyError}</p>}
@@ -6130,21 +6146,12 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                   </Button>
 
                   {/* Passkey */}
-                  {passkeysSupported() && passkeyCardState !== 'added' && (
-                    <div className="border-t border-border pt-5 space-y-3">
-                      <p className="text-[10px] font-black uppercase text-muted tracking-widest">Security</p>
+                  {passkeysSupported() && customerEmail && (
+                    <div className="border-t border-border pt-5 space-y-2 font-raleway">
+                      <p className="text-xs font-semibold text-muted">Passkey</p>
                       <div className="flex items-center justify-between gap-4">
-                        <div>
-                          <p className="text-sm font-bold">🔑 Passkey (passkey)</p>
-                          <p className="text-xs text-muted mt-0.5">{passkeyCardState === 'error' ? 'Could not add — try again.' : 'Skip the email link next time.'}</p>
-                        </div>
-                        <Button size="sm" className="bg-torqued-red text-white shrink-0" disabled={passkeyCardState === 'adding'} onClick={async () => {
-                          const plate = (rego || vehicle?.rego || garageVehicles[0]?.rego || '').toUpperCase();
-                          if (!plate) return;
-                          setPasskeyCardState('adding');
-                          try { await registerPasskey('customer', customerEmail || plate); setPasskeyCardState('added'); }
-                          catch { setPasskeyCardState('error'); }
-                        }}>{passkeyCardState === 'adding' ? 'Adding…' : 'Add passkey'}</Button>
+                        <p className="text-xs text-muted">{customerCanAddPasskey() ? 'Sign in with Face ID, Touch ID or your phone — no code needed. Manage passkeys in Profile.' : 'Verify with an emailed code first, then add a passkey.'}</p>
+                        <Button size="sm" className="bg-torqued-red text-white shrink-0 normal-case tracking-normal" disabled={!customerCanAddPasskey()} onClick={() => setOfferPasskey('ask')}>Add passkey</Button>
                       </div>
                     </div>
                   )}
@@ -7939,6 +7946,28 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
           </div>
         )}
 
+        {offerPasskey && (
+          <div className="fixed inset-0 z-[120] flex items-center justify-center p-4 bg-background/80 backdrop-blur-sm" onClick={() => offerPasskey !== 'adding' && setOfferPasskey(null)}>
+            <div role="dialog" aria-modal="true" aria-label="Add a passkey" onClick={e => e.stopPropagation()}
+              className="font-raleway w-full max-w-sm bg-card border border-border rounded-3xl p-6 space-y-4 shadow-2xl text-center">
+              <div className="w-14 h-14 rounded-2xl bg-torqued-red/10 text-torqued-red flex items-center justify-center mx-auto"><KeyRound size={28} /></div>
+              {offerPasskey === 'done' ? (<>
+                <p className="text-lg font-bold text-foreground">You're set</p>
+                <p className="text-sm text-muted">{offerPasskeyMsg} Next time, tap “Sign in with a passkey”.</p>
+                <Button fullWidth className="bg-torqued-red text-white normal-case tracking-normal" onClick={() => setOfferPasskey(null)}>Done</Button>
+              </>) : (<>
+                <p className="text-lg font-bold text-foreground">Skip the code next time?</p>
+                <p className="text-sm text-muted">Add a passkey and sign in with Face ID, Touch ID or your phone's screen lock. It syncs to your other devices, and works on a computer by scanning a QR code with your phone.</p>
+                {offerPasskey === 'error' && offerPasskeyMsg && <p className="text-xs font-semibold text-torqued-red" role="alert">{offerPasskeyMsg}</p>}
+                <div className="grid grid-cols-2 gap-2">
+                  <Button variant="outline" className="border-border text-foreground normal-case tracking-normal" disabled={offerPasskey === 'adding'} onClick={() => setOfferPasskey(null)}>Not now</Button>
+                  <Button className="bg-torqued-red text-white normal-case tracking-normal" disabled={offerPasskey === 'adding'} onClick={addCustomerPasskey}>{offerPasskey === 'adding' ? 'Adding…' : 'Add passkey'}</Button>
+                </div>
+              </>)}
+            </div>
+          </div>
+        )}
+
         {showOTPModal && (
           <div className="fixed inset-0 z-[110] flex items-center justify-center p-4">
             <motion.div
@@ -7962,6 +7991,25 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                 <h3 className="text-2xl font-black tracking-tighter leading-tight text-foreground">
                   {returningCustomerName ? `Welcome back, ${returningCustomerName} 👋` : 'Check Your Email 🔐'}
                 </h3>
+              </div>
+
+              {passkeysSupported() && (
+                <div className="space-y-2 font-raleway">
+                  <button
+                    type="button"
+                    disabled={magicVerifying}
+                    onClick={() => verifyWithPasskey(rego.toUpperCase().trim())}
+                    className="w-full h-12 rounded-xl bg-foreground text-background font-semibold text-sm inline-flex items-center justify-center gap-2 hover:opacity-90 disabled:opacity-50 transition-opacity"
+                  >
+                    <KeyRound size={18} aria-hidden /> {magicVerifying ? 'Waiting for your passkey…' : 'Sign in with a passkey'}
+                  </button>
+                  <p className="text-xs text-muted">Face ID, Touch ID, Windows Hello — or scan a QR code with your phone.</p>
+                  {passkeyError && <p className="text-xs font-semibold text-torqued-red" role="alert">{passkeyError}</p>}
+                  <div className="flex items-center gap-3 pt-2 text-[11px] text-muted"><span className="h-px flex-1 bg-border" />or use the emailed code<span className="h-px flex-1 bg-border" /></div>
+                </div>
+              )}
+
+              <div className="space-y-2">
                 <p className="text-xs text-muted leading-relaxed">
                   We sent a 6-digit verification code to
                 </p>

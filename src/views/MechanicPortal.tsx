@@ -54,7 +54,7 @@ import { useTheme } from '../context/ThemeContext';
 import { useAuth } from '../context/AuthContext';
 import { useEffect } from 'react';
 import { supabase } from '../lib/supabase';
-import { authPasskey, registerPasskey, passkeysSupported, hasPasskey } from '../lib/passkey';
+import { authPasskey, registerPasskey, passkeysSupported, hasPasskey, listPasskeys, deletePasskey, describePasskey, passkeyAutofillSupported, cancelPasskeyRequest, type PasskeyRow } from '../lib/passkey';
 import { SERVICES } from '../constants';
 import {
   InventoryPart,
@@ -200,6 +200,39 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
   const [mechName, setMechName] = useState('');
   const [mechAuthError, setMechAuthError] = useState<string | null>(null);
   const [mechAuthLoading, setMechAuthLoading] = useState(false);
+  // Passkeys: sign in (button or the email field's autofill list) and manage them in Profile.
+  const signInWithMechanicPasskey = async (autofill = false) => {
+    if (!autofill) { setMechAuthError(null); setMechAuthLoading(true); }
+    try {
+      const r = await authPasskey('mechanic', autofill ? undefined : (mechEmail || undefined), { autofill });
+      if (!r.tokenHash) throw new Error('Could not start your session — use your password this time.');
+      if (autofill) setMechAuthLoading(true);
+      const { error } = await supabase.auth.verifyOtp({ type: 'magiclink', token_hash: r.tokenHash });
+      if (error) throw new Error(error.message);
+      // AuthContext picks up the session via onAuthStateChange
+    } catch (e: any) {
+      if (!e?.aborted) setMechAuthError(e?.message || 'Passkey sign-in failed');
+    } finally { setMechAuthLoading(false); }
+  };
+  // Signed out: offer saved passkeys in the email field's autofill list (conditional UI).
+  useEffect(() => {
+    if (!isAuthReady || user) return;
+    let live = true;
+    passkeyAutofillSupported().then(ok => { if (ok && live) signInWithMechanicPasskey(true); });
+    return () => { live = false; cancelPasskeyRequest(); };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isAuthReady, user?.id]);
+  const [mechPasskeys, setMechPasskeys] = useState<PasskeyRow[] | null>(null);
+  const [mechPasskeyBusy, setMechPasskeyBusy] = useState(false);
+  const addMechanicPasskey = async (email: string) => {
+    setMechPasskeyBusy(true);
+    try {
+      const r = await registerPasskey('mechanic', email, { displayName: (userProfile as any)?.name || email });
+      alert(r.alreadyRegistered ? 'This device already has a passkey for your workshop login.' : r.synced ? 'Passkey added and synced to your other devices. Next time, tap "Sign in with passkey" — or pick it from the email field.' : 'Passkey added on this device.');
+      setMechPasskeys(await listPasskeys('mechanic'));
+    } catch (e: any) { alert(e?.message || 'Could not add a passkey.'); }
+    finally { setMechPasskeyBusy(false); }
+  };
   const [mechSignupSent, setMechSignupSent] = useState(false);
   const [showSignupModal, setShowSignupModal] = useState(false);
   const [subPromo, setSubPromo] = useState('');
@@ -2631,13 +2664,25 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
             <Card className="p-6 space-y-4 bg-card border-border">
               <div className="flex items-center gap-2 border-b border-border pb-4">
                 <CreditCard size={20} className="text-torqued-red" />
-                <h3 className="text-xl text-foreground">Security · Passkey</h3>
+                <h3 className="text-xl text-foreground">Security · Passkeys</h3>
               </div>
-              <p className="text-sm text-muted">Sign in with passkey instead of your password. Your password still works as a fallback.</p>
-              <Button variant="outline" className="text-foreground border-border" onClick={async () => {
-                try { await registerPasskey('mechanic', user!.email!); alert('Passkey added. Next time, tap "Sign in with passkey".'); }
-                catch (e: any) { alert(e?.message || 'Could not add passkey.'); }
-              }}>🔑 Add a passkey</Button>
+              <p className="text-sm text-muted">Sign in with Face ID, Touch ID, Windows Hello or your phone instead of your password. Passkeys saved to iCloud Keychain, Google Password Manager or 1Password sync to your other devices; on a computer without one, choose “Use a phone or tablet” and scan the QR code. Your password still works.</p>
+              {mechPasskeys === null ? (
+                <button type="button" className="text-sm font-semibold text-muted underline underline-offset-2" onClick={() => listPasskeys('mechanic').then(setMechPasskeys).catch(e => alert(e.message))}>Show my passkeys</button>
+              ) : mechPasskeys.length === 0 ? <p className="text-sm text-muted">No passkeys yet.</p> : (
+                <ul className="divide-y divide-border rounded-xl border border-border">
+                  {mechPasskeys.map(pk => (
+                    <li key={pk.id} className="flex items-center justify-between gap-3 px-3 py-2.5 text-sm">
+                      <span className="min-w-0 truncate">{describePasskey(pk)}</span>
+                      <button type="button" className="text-xs font-semibold text-muted hover:text-torqued-red shrink-0" onClick={async () => {
+                        if (!confirm('Remove this passkey? You can still sign in with your password.')) return;
+                        try { await deletePasskey('mechanic', pk.id); setMechPasskeys(prev => (prev || []).filter(x => x.id !== pk.id)); } catch (e: any) { alert(e?.message || 'Could not remove it.'); }
+                      }}>Remove</button>
+                    </li>
+                  ))}
+                </ul>
+              )}
+              <Button variant="outline" className="text-foreground border-border" disabled={mechPasskeyBusy} onClick={() => addMechanicPasskey(user!.email!)}>{mechPasskeyBusy ? 'Adding…' : mechPasskeys?.length ? 'Add a passkey on this device' : 'Add a passkey'}</Button>
             </Card>
           )}
 
@@ -5120,6 +5165,7 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                     <input
                       type="email"
                       placeholder="Email address"
+                      autoComplete="username webauthn"
                       value={mechEmail}
                       onChange={e => setMechEmail(e.target.value)}
                       className="w-full bg-card border border-border rounded-xl px-4 h-12 text-sm text-foreground placeholder:text-muted focus:outline-none focus:border-torqued-red"
@@ -5173,8 +5219,8 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                       try {
                         await loginMechanic(mechEmail, mechPassword);
                         // Offer a passkey only if this account doesn't already have one.
-                        if (passkeysSupported() && mechEmail && !(await hasPasskey('mechanic', mechEmail)) && window.confirm('Set up a passkey for faster sign-in? You\'ll use passkey instead of your password next time.')) {
-                          try { await registerPasskey('mechanic', mechEmail); window.alert('Passkey added.'); } catch {}
+                        if (passkeysSupported() && mechEmail && !(await hasPasskey('mechanic', mechEmail)) && window.confirm('Sign in faster next time? Add a passkey and use Face ID, Touch ID, Windows Hello or your phone instead of your password.')) {
+                          try { const r = await registerPasskey('mechanic', mechEmail); window.alert(r.alreadyRegistered ? 'This device already has your passkey.' : 'Passkey added.'); } catch (e: any) { window.alert(e?.message || 'Could not add a passkey.'); }
                         }
                       } catch (e: any) {
                         setMechAuthError(e.message || 'Authentication failed');
@@ -5188,18 +5234,8 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
 
                   {passkeysSupported() && (
                     <button
-                      onClick={async () => {
-                        setMechAuthError(null); setMechAuthLoading(true);
-                        try {
-                          const r = await authPasskey('mechanic', mechEmail || undefined);
-                          if (!r.tokenHash) throw new Error('Could not establish session — use password.');
-                          const { error } = await supabase.auth.verifyOtp({ type: 'magiclink', token_hash: r.tokenHash });
-                          if (error) throw new Error(error.message);
-                          // AuthContext picks up the session via onAuthStateChange
-                        } catch (e: any) {
-                          setMechAuthError(e?.message || 'Passkey sign-in failed');
-                        } finally { setMechAuthLoading(false); }
-                      }}
+                      onClick={() => signInWithMechanicPasskey(false)}
+                      disabled={mechAuthLoading}
                       className="w-full text-xs font-bold text-muted hover:text-foreground border border-border rounded-xl h-12 flex items-center justify-center gap-2"
                     >
                       <span aria-hidden>🔑</span> Sign in with passkey
