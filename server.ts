@@ -7075,6 +7075,34 @@ How to respond:
   }
 });
 
+// POST /api/ai/ppi-comments — draft the inspector's comments for a pre-purchase
+// inspection from the results ticked on the checklist (status + notes per item).
+app.post('/api/ai/ppi-comments', async (req, res) => {
+  try {
+    const { mechanicId, vehicle, mileage, items } = req.body || {};
+    if (!mechanicId) return res.status(400).json({ error: 'mechanicId required' });
+    const list = (Array.isArray(items) ? items : []).slice(0, 80)
+      .map((c: any) => ({ category: String(c.category || '').slice(0, 60), item: String(c.item || '').slice(0, 120), status: String(c.status || '').slice(0, 12), note: String(c.note || '').slice(0, 300), noteType: c.noteType === 'recommendation' ? 'recommendation' : 'note' }))
+      .filter((c: any) => c.status && c.status !== 'N/A' || c.note);
+    if (!list.length) return res.status(400).json({ error: 'Mark some checklist items first.' });
+    const v = vehicle && typeof vehicle === 'object' ? [vehicle.year, vehicle.make, vehicle.model, vehicle.submodel].filter(Boolean).join(' ') : '';
+    const lines = list.map((c: any) => `- [${c.status}] ${c.category} › ${c.item}${c.note ? ` — ${c.noteType === 'recommendation' ? 'recommendation' : 'note'}: ${c.note}` : ''}`).join('\n');
+    const prompt = `You are a New Zealand vehicle inspector writing the "Inspector's comments" section of a pre-purchase inspection report for a buyer.
+
+Vehicle: ${v || 'unknown'}${mileage ? `, odometer ${Number(String(mileage).replace(/[^\d]/g, '')).toLocaleString()} km` : ''}.
+Checklist results (Pass / Attention / Fail, with the inspector's own notes):
+${lines}
+
+Write 3–5 plain sentences in NZ English: start with the overall condition, then the Fail items, then the Attention items, then any useful positives. Use only the facts above — never invent faults, prices, measurements, or judgements about WOF / roadworthiness / safety that the notes don't state. Mention the inspector's recommendations briefly where they matter. No headings, no bullet points, no greeting or sign-off.`;
+    const text = (await callClaudeChat([{ role: 'user', content: prompt }], 400, false, false)).trim();
+    if (!text) return res.status(502).json({ error: 'The AI returned nothing — try again.' });
+    res.json({ comments: text });
+  } catch (err: any) {
+    console.error('[ai/ppi-comments]', err?.message || err);
+    res.status(500).json({ error: /ANTHROPIC_API_KEY/.test(err?.message || '') ? 'AI is not set up on the server.' : 'Could not draft comments — try again.' });
+  }
+});
+
 // POST /api/ai/health-insights — live vehicle health insights from real mileage + history.
 // Also accepts ?mechanic_id=<uuid> to restrict to vehicles that have come through that mechanic.
 app.post('/api/ai/health-insights', async (req, res) => {

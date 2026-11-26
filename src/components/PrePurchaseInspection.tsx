@@ -27,7 +27,6 @@ const CHECKLIST: { category: string; items: string[] }[] = [
   { category: 'Brakes & Suspension', items: [
     'Brake pad thickness',
     'Brake rotor thickness',
-    'Brake fluid moisture content',
     'Shock absorber condition',
     'Bushes, ball joints, wheel bearings, CV joints',
     'Steering rack play & boots',
@@ -86,6 +85,8 @@ export const PrePurchaseInspection: React.FC<{
   const [savedMsg, setSavedMsg] = useState<string | null>(null);
   const [started, setStarted] = useState(false);
   const [mileageRequired, setMileageRequired] = useState(false);
+  const [drafting, setDrafting] = useState(false);
+  const [draftErr, setDraftErr] = useState<string | null>(null);
 
   useEffect(() => {
     if (initialRego) lookup(initialRego);
@@ -128,6 +129,23 @@ export const PrePurchaseInspection: React.FC<{
   const recommendationsText = () => {
     const itemRecs = buildChecklist().filter(c => c.note.trim() && c.noteType === 'recommendation').map(c => `• ${c.item}: ${c.note.trim()}`);
     return [recommendations.trim(), ...itemRecs].filter(Boolean).join('\n');
+  };
+
+  // Draft the inspector's comments from the ticked results and notes (AI).
+  const markedCount = Object.values(statuses).filter(s => s && s !== 'na').length;
+  const draftComments = async () => {
+    if (comments.trim() && !window.confirm('Replace your current comments with an AI draft?')) return;
+    setDrafting(true); setDraftErr(null);
+    try {
+      const r = await fetch('/api/ai/ppi-comments', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ mechanicId, vehicle, mileage, items: buildChecklist() }),
+      });
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok || !d.comments) throw new Error(d.error || 'Could not draft comments.');
+      setComments(d.comments);
+    } catch (e: any) { setDraftErr(e?.message || 'Could not draft comments.'); }
+    finally { setDrafting(false); }
   };
 
   const save = async (complete: boolean) => {
@@ -340,10 +358,17 @@ export const PrePurchaseInspection: React.FC<{
           ))}
 
           <Card className="p-5 bg-card border-border space-y-3">
-            <h4 className="text-sm font-black uppercase tracking-widest text-torqued-red">Inspector's Comments</h4>
-            <textarea value={comments} onChange={e => setComments(e.target.value)} rows={4} placeholder="Overall condition, anything notable about the vehicle…" className={`${inp} min-h-[90px]`} />
-            <h4 className="text-sm font-black uppercase tracking-widest text-torqued-red pt-2">Recommendations</h4>
-            <textarea value={recommendations} onChange={e => setRecommendations(e.target.value)} rows={4} placeholder="What the buyer should address / budget for…" className={`${inp} min-h-[90px]`} />
+            <div className="flex items-center justify-between gap-3 flex-wrap">
+              <h4 className="text-sm font-black uppercase tracking-widest text-torqued-red">Inspector's Comments</h4>
+              <button type="button" onClick={draftComments} disabled={drafting || markedCount === 0}
+                title={markedCount === 0 ? 'Mark some checklist items first' : undefined}
+                className="h-9 px-3.5 rounded-xl border border-border text-sm font-semibold text-foreground hover:border-torqued-red/40 disabled:opacity-40 transition-colors">
+                {drafting ? 'Drafting…' : comments.trim() ? 'Redraft with AI' : 'Draft with AI'}
+              </button>
+            </div>
+            <textarea value={comments} onChange={e => setComments(e.target.value)} rows={5} placeholder="Overall condition, anything notable about the vehicle… or tap “Draft with AI” to write this from the results above." className={`${inp} min-h-[110px]`} />
+            {draftErr && <p className="text-xs font-semibold text-torqued-red" role="alert">{draftErr}</p>}
+            <p className="text-xs text-muted">AI drafts from your Pass / Attention / Fail results and notes — check it before completing. Items marked “Recommend” are listed under Recommendations in the report automatically.</p>
           </Card>
 
           {savedMsg && <p className={cn('text-sm font-bold', savedMsg.startsWith('✓') ? 'text-emerald-500' : 'text-torqued-red')}>{savedMsg}</p>}
