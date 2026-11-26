@@ -2798,6 +2798,34 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
     } finally { setJobBusy(null); }
   };
 
+  // Reschedule / Cancel buttons in the booking confirmation email land here:
+  // /customer?manage_booking=<id>&action=reschedule|cancel. The customer verifies first
+  // (passkey or emailed code), then the booking opens with the workshop's policy applied.
+  const [manageLink] = useState<{ id: string; action: 'reschedule' | 'cancel' } | null>(() => {
+    try {
+      const sp = new URLSearchParams(window.location.search);
+      const id = sp.get('manage_booking');
+      return id ? { id, action: sp.get('action') === 'cancel' ? 'cancel' : 'reschedule' } : null;
+    } catch { return null; }
+  });
+  const manageHandled = useRef(false);
+  useEffect(() => { if (manageLink) setView('dashboard'); }, []);   // show the garage (or its verify step)
+  useEffect(() => {
+    if (!manageLink || manageHandled.current || !garageUnlocked) return;
+    const job = activeJobs.find(j => j.id === manageLink.id);
+    if (!job) return;
+    manageHandled.current = true;
+    window.history.replaceState({}, document.title, window.location.pathname);
+    (async () => {
+      const r = String((job as any).vehicle_rego || job.vehicleId || '').toUpperCase();
+      setJobsView('active');
+      if (r && vehicle?.rego?.toUpperCase() !== r) await loadVehicleByRego(r);
+      if (manageLink.action === 'cancel') cancelJob(job);
+      else { setReschedJob(job.id); setReschedDate((job.date || '').slice(0, 10)); loadJobDetail(job); }
+      setTimeout(() => document.getElementById(`job-${job.id}`)?.scrollIntoView({ behavior: 'smooth', block: 'center' }), 500);
+    })();
+  }, [manageLink, garageUnlocked, activeJobs]);
+
   const saveReschedule = async (job: Job) => {
     if (!reschedDate) return;
     setJobBusy(job.id);
@@ -5003,37 +5031,35 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                   animate={{ opacity: 1, y: 0 }}
                   transition={{ delay: idx * 0.1 }}
                 >
-                  <Card className="p-6 space-y-6 relative bg-card border-border shadow-md hover:shadow-xl transition-all group/card">
-                    {mechanic.isFeatured && (
-                      <div className="absolute top-0 right-0 bg-torqued-red text-white text-[10px] font-bold px-4 py-1.5 rounded-bl-2xl uppercase tracking-widest flex items-center gap-1.5 shadow-lg">
-                        <Star size={12} className="fill-current" /> Trusted Match
-                      </div>
-                    )}
+                  <Card className="p-5 sm:p-6 space-y-5 relative bg-card border-border rounded-3xl hover:border-torqued-red/30 transition-colors group/card">
                     <div className="flex flex-col sm:flex-row gap-6">
                       <div className="flex gap-4 flex-1 min-w-0">
                         <div className="relative">
-                          <img src={mechanic.logo} alt={mechanic.name} className="w-16 h-16 sm:w-20 sm:h-20 rounded-2xl object-cover ring-1 ring-border group-hover/card:ring-torqued-red/30 transition-all" />
+                          <img src={mechanic.logo} alt={mechanic.name} className="w-14 h-14 sm:w-16 sm:h-16 rounded-2xl object-cover ring-1 ring-border" />
                         </div>
                         <div className="flex-1 min-w-0 space-y-1">
-                          <h3 className="text-xl sm:text-2xl leading-tight tracking-tight font-black truncate">{mechanic.name}</h3>
+                          <div className="flex items-center gap-2 flex-wrap">
+                            <h3 className="text-lg sm:text-xl leading-tight font-bold normal-case tracking-tight truncate">{mechanic.name}</h3>
+                            {mechanic.isFeatured && <span className="inline-flex items-center gap-1 text-[11px] font-semibold px-2 py-0.5 rounded-md border bg-torqued-red/10 text-torqued-red border-torqued-red/30"><Star size={11} className="fill-current" /> Trusted match</span>}
+                          </div>
                           {customerCoords && mechanic.latitude && mechanic.longitude && mechanic.distance < 900 && (
                             <div className="flex items-center gap-1.5 text-xs text-muted font-medium">
                               <MapPin size={12} className="text-torqued-red" />
                               <span>{mechanic.distance.toFixed(1)} km away</span>
                             </div>
                           )}
-                          <div className="flex items-center gap-1.5 mt-2">
-                            <Star size={12} className="text-yellow-400 fill-current" />
-                            <span className="text-sm font-bold">{mechanic.rating}</span>
-                            <span className="text-xs text-muted">({mechanic.reviews} reviews)</span>
+                          <div className="flex items-center gap-1.5 text-sm">
+                            <Star size={13} className="text-yellow-400 fill-current" />
+                            <span className="font-semibold">{mechanic.rating}</span>
+                            <span className="text-muted">({mechanic.reviews} review{mechanic.reviews === 1 ? '' : 's'})</span>
                           </div>
                         </div>
                       </div>
                       <div className="flex sm:flex-col justify-between sm:justify-center items-center sm:items-end gap-1.5 border-t sm:border-t-0 border-border pt-4 sm:pt-0 shrink-0">
-                        <p className="text-[10px] font-bold uppercase text-muted tracking-widest whitespace-nowrap">Est. Quote</p>
-                        <p className="text-2xl sm:text-3xl font-black text-torqued-red tracking-tight whitespace-nowrap">${(mechanicPrices[mechanic.id] ?? totalPrice).toLocaleString()}</p>
+                        <p className="text-xs font-semibold text-muted whitespace-nowrap">Estimated quote</p>
+                        <p className="text-2xl font-bold text-torqued-red tabular-nums whitespace-nowrap">${(mechanicPrices[mechanic.id] ?? totalPrice).toLocaleString()}</p>
                         {mechanic.labourRate ? (
-                          <p className="text-[10px] font-bold text-muted whitespace-nowrap">Labour rate: ${mechanic.labourRate}/hr</p>
+                          <p className="text-xs text-muted whitespace-nowrap">Labour ${mechanic.labourRate}/hr</p>
                         ) : null}
                       </div>
                     </div>
@@ -5043,14 +5069,12 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                         href={mechanic.mapsUrl} 
                         target="_blank" 
                         rel="noopener noreferrer"
-                        className="flex items-center gap-3 p-4 bg-background border border-border rounded-2xl hover:bg-torqued-red/5 hover:border-torqued-red/20 transition-all group/loc"
+                        className="flex items-center gap-3 px-4 py-3 bg-background border border-border rounded-2xl hover:border-torqued-red/30 transition-colors group/loc"
                       >
-                        <div className="w-10 h-10 bg-card rounded-xl flex items-center justify-center border border-border shadow-sm group-hover/loc:bg-torqued-red group-hover/loc:text-white transition-all">
-                          <MapPin size={18} />
-                        </div>
-                        <div className="flex-1">
-                          <p className="text-[10px] font-bold uppercase text-muted leading-none mb-1.5 tracking-widest">Workshop Address</p>
-                          <p className="text-sm font-medium text-foreground truncate">{mechanic.address}</p>
+                        <MapPin size={18} className="text-muted group-hover/loc:text-torqued-red shrink-0" />
+                        <div className="flex-1 min-w-0">
+                          <p className="text-sm text-foreground truncate">{mechanic.address}</p>
+                          <p className="text-xs text-muted">Open in Maps</p>
                         </div>
                         <ChevronRight size={18} className="text-muted group-hover/loc:text-torqued-red transition-all" />
                       </a>
@@ -5067,7 +5091,7 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                             )}
                             <div className="grid sm:grid-cols-2 gap-3">
                               <div>
-                                <p className="text-[10px] font-bold uppercase text-muted tracking-widest mb-1">Hours</p>
+                                <p className="text-xs font-semibold text-muted mb-1">Hours</p>
                                 {mechanicDetails[mechanic.id]?.slots?.length ? (
                                   <ul className="text-xs text-foreground space-y-0.5">
                                     {mechanicDetails[mechanic.id]!.slots.map(s => (
@@ -5079,7 +5103,7 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                                 )}
                               </div>
                               <div>
-                                <p className="text-[10px] font-bold uppercase text-muted tracking-widest mb-1">Phone</p>
+                                <p className="text-xs font-semibold text-muted mb-1">Phone</p>
                                 <p className="text-xs text-foreground">{mechanicDetails[mechanic.id]?.phone || 'Not listed'}</p>
                               </div>
                             </div>
@@ -5089,13 +5113,13 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                     )}
 
                     <div className="flex flex-col sm:flex-row items-center justify-between pt-4 border-t border-border gap-4">
-                      <div className="flex items-center gap-2 text-emerald-500 w-full sm:w-auto">
-                        <div className="w-2 h-2 bg-emerald-500 rounded-full animate-pulse shadow-[0_0_8px_rgba(16,185,129,0.5)]" />
-                        <span className="text-xs font-bold uppercase tracking-widest">Next Available: {mechanic.nextAvailable}</span>
+                      <div className="flex items-center gap-2 w-full sm:w-auto text-sm">
+                        <span className="w-2 h-2 bg-emerald-500 rounded-full shrink-0" />
+                        <span className="text-muted">Next available <span className="font-semibold text-foreground">{String(mechanic.nextAvailable || '').replace(/^./, c => c.toLowerCase())}</span></span>
                       </div>
                       <div className="flex gap-2 w-full sm:w-auto">
-                        <Button variant="outline" size="sm" className="flex-1 sm:flex-initial border-border text-foreground hover:bg-card h-10 px-6 font-bold uppercase tracking-widest text-[10px]" onClick={() => toggleMechanicDetails(mechanic.id)}>{expandedMechanicId === mechanic.id ? 'Hide' : 'Learn more'}</Button>
-                        <Button size="sm" className="flex-[2] sm:flex-initial bg-torqued-red hover:bg-red-700 text-white h-10 px-8 font-bold uppercase tracking-widest text-[10px] shadow-lg shadow-torqued-red/20" onClick={() => chooseMechanic(mechanic)}>{selectedServices.includes('diag_inspection') ? 'Book Diagnostic' : 'Select & Schedule'}</Button>
+                        <Button variant="outline" size="sm" className="flex-1 sm:flex-initial border-border text-foreground hover:bg-background h-10 px-5 text-sm" onClick={() => toggleMechanicDetails(mechanic.id)}>{expandedMechanicId === mechanic.id ? 'Hide details' : 'Learn more'}</Button>
+                        <Button size="sm" className="flex-[2] sm:flex-initial bg-torqued-red hover:bg-red-700 text-white h-10 px-6 text-sm" onClick={() => chooseMechanic(mechanic)}>{selectedServices.includes('diag_inspection') ? 'Book diagnostic' : 'Choose & pick a time'}</Button>
                       </div>
                     </div>
                   </Card>
@@ -5339,14 +5363,14 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
             </div>
 
             <div className="space-y-8">
-              <Card className="p-8 bg-card border-border shadow-xl space-y-8">
-                <div className="flex justify-between items-center border-b border-border pb-6">
-                  <span className="text-[10px] font-black uppercase text-muted tracking-widest">Vehicle</span>
-                  <span className="text-lg font-black text-foreground">{vehicle?.year} {vehicle?.make} {vehicle?.model}</span>
+              <Card className="p-5 sm:p-8 bg-card border-border rounded-3xl space-y-6">
+                <div className="flex justify-between items-center gap-4 border-b border-border pb-5">
+                  <span className="text-sm font-semibold text-muted">Vehicle</span>
+                  <span className="text-base sm:text-lg font-bold text-foreground text-right">{vehicle?.year} {vehicle?.make} {vehicle?.model}{vehicle?.rego ? <span className="text-muted font-semibold"> · {String(vehicle.rego).toUpperCase()}</span> : null}</span>
                 </div>
                 
                 <div className="space-y-4">
-                  <span className="text-[10px] font-black uppercase text-muted tracking-widest block">Job Breakdown</span>
+                  <span className="text-sm font-semibold text-muted block">Job breakdown</span>
                   {selectedServices.filter(id => !(id === 'thermostat_housing' && selectedServices.includes('water_pump'))).map(id => {
                     const service = SERVICES.find(s => s.id === id);
                     if (!service) return null;
@@ -5520,14 +5544,14 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                   )}
                 </div>
 
-                <div className="flex justify-between items-center py-6 border-t border-b border-border">
-                  <span className="text-[10px] font-black uppercase text-muted tracking-widest">Total Estimate (incl. GST)</span>
+                <div className="flex justify-between items-center gap-4 py-5 border-t border-b border-border">
+                  <span className="text-sm font-semibold text-foreground">Total estimate <span className="font-normal text-muted">GST incl.</span></span>
                   {(selectedMechanic?.estimatedPrice || totalPrice) > 0
-                    ? <span className="text-4xl font-black text-torqued-red tracking-tighter">${selectedMechanic?.estimatedPrice || totalPrice}</span>
-                    : <span className="text-lg font-black text-muted">Confirmed by matched workshop</span>
+                    ? <span className="text-3xl font-bold text-torqued-red tabular-nums">${selectedMechanic?.estimatedPrice || totalPrice}</span>
+                    : <span className="text-base font-semibold text-muted">Confirmed by the workshop</span>
                   }
                 </div>
-                <p className="text-[10px] text-muted italic leading-relaxed">
+                <p className="text-xs text-muted leading-relaxed">
                   Estimates include a standard workshop fee (where applicable, shown per service above) covering freight, sundries, and consumables required to complete the service.
                 </p>
                 {isRepairFromDiagnostic && (
@@ -6289,16 +6313,16 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
               <section className="space-y-4">
                 <div className="flex justify-between items-center gap-3">
                   <div>
-                    <h3 className="text-2xl font-bold tracking-tight">Vehicle Health</h3>
+                    <h3 className="text-2xl font-bold tracking-tight normal-case">Vehicle health</h3>
                     {vehicle && <p className="text-xs text-muted mt-0.5">{vehicle.year} {vehicle.make} {vehicle.model}</p>}
                   </div>
                   <div className="flex gap-2">
                     <input id="history-upload-input" type="file" accept="image/*,application/pdf" multiple className="hidden"
                       onChange={(e) => { handleMultiUpload(Array.from(e.target.files || [])); e.target.value = ''; }} />
                     <button
-                      className="flex items-center gap-1 px-3 py-1 rounded-lg border border-torqued-red/30 text-torqued-red text-[11px] font-bold hover:bg-torqued-red/5 transition-colors"
+                      className="h-9 px-3.5 rounded-xl border border-border text-foreground text-sm font-semibold hover:border-foreground/30 transition-colors"
                       onClick={() => setShowHistorySheet(true)}>
-                      Review / Edit
+                      Service history
                     </button>
                   </div>
                 </div>
@@ -6332,39 +6356,29 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                     const visible = showAllInsights ? sorted : sorted.slice(0, LIMIT);
                     return (
                       <>
-                        <div className="space-y-3">
+                        <Card className="bg-card border-border rounded-3xl divide-y divide-border overflow-hidden">
                           {visible.map((insight, i) => {
                             const isGood     = insight.severity === 'good';
                             const isDue      = insight.severity === 'due';
                             const isOverdue  = insight.severity === 'overdue';
+                            // Short description only: the first sentence, without the "Recommend…" advice.
+                            const short = (() => {
+                              const d = String(insight.detail || '').replace(/\s+/g, ' ').trim();
+                              const first = (d.split(/(?<=[.!?])\s+/).find(x => !/^recommend/i.test(x)) || d).trim();
+                              return first.length > 140 ? first.slice(0, 137).replace(/\s+\S*$/, '') + '…' : first;
+                            })();
+                            const pill = isOverdue ? { t: 'Overdue', c: 'bg-torqued-red/10 text-torqued-red border-torqued-red/30' }
+                              : isDue ? { t: 'Due soon', c: 'bg-amber-500/10 text-amber-600 border-amber-500/30' }
+                              : isGood ? { t: 'Up to date', c: 'bg-emerald-500/10 text-emerald-600 border-emerald-500/30' }
+                              : { t: 'Note', c: 'bg-background text-muted border-border' };
                             return (
-                              <Card
-                                key={i}
-                                className={cn(
-                                  "p-4 flex items-start gap-3 border transition-all",
-                                  isGood    && "border-emerald-500/20 bg-emerald-500/5",
-                                  isDue     && "border-amber-500/20 bg-amber-500/5",
-                                  isOverdue && "border-torqued-red/30 bg-torqued-red/5",
-                                  !isGood && !isDue && !isOverdue && "border-border bg-card"
-                                )}
-                              >
-                                <div className={cn(
-                                  "w-8 h-8 rounded-xl flex items-center justify-center shrink-0 text-base",
-                                  isGood    && "bg-emerald-500/15",
-                                  isDue     && "bg-amber-500/15",
-                                  isOverdue && "bg-torqued-red/15",
-                                  !isGood && !isDue && !isOverdue && "bg-card"
-                                )}>
-                                  {isGood ? '✓' : isOverdue ? '⚠' : isDue ? '🔔' : 'ℹ'}
-                                </div>
-                                <div className="min-w-0 flex-1">
-                                  <p className={cn(
-                                    "text-sm font-bold leading-tight",
-                                    isGood    && "text-emerald-400",
-                                    isDue     && "text-amber-400",
-                                    isOverdue && "text-torqued-red",
-                                  )}>{insight.title}</p>
-                                  <p className="text-xs text-muted mt-0.5 leading-snug">{insight.detail}</p>
+                              <div key={i} className="px-4 sm:px-5 py-4 flex items-start gap-3">
+                                <div className="min-w-0 flex-1 space-y-1">
+                                  <div className="flex items-center gap-2 flex-wrap">
+                                    <span className={cn('text-[11px] font-semibold px-2 py-0.5 rounded-md border shrink-0', pill.c)}>{pill.t}</span>
+                                    <p className="text-sm font-semibold text-foreground leading-snug">{insight.title}</p>
+                                  </div>
+                                  <p className="text-sm text-muted leading-snug">{short}</p>
                                 </div>
                                 {(isDue || isOverdue) && (
                                   <button
@@ -6376,13 +6390,13 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                                       await loadVehicleByRego(vehicle.rego);
                                       setView('quote');
                                     }}
-                                    className="shrink-0 text-[10px] font-black uppercase tracking-widest text-torqued-red hover:underline"
-                                  >Book →</button>
+                                    className="shrink-0 h-9 px-3.5 rounded-xl border border-torqued-red/30 text-sm font-semibold text-torqued-red hover:bg-torqued-red/5 transition-colors"
+                                  >Book</button>
                                 )}
-                              </Card>
+                              </div>
                             );
                           })}
-                        </div>
+                        </Card>
                         {sorted.length > LIMIT && (
                           <button
                             onClick={() => setShowAllInsights(v => !v)}
@@ -6536,7 +6550,7 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
               <Card className="p-12 text-center text-muted italic bg-card border-border">{jobsView === 'past' ? 'No completed jobs yet.' : 'No upcoming jobs. Book a service to see it here.'}</Card>
             ) : (
               visibleJobs.map(job => (
-                <Card key={job.id} className="p-6 space-y-6 bg-card border-border">
+                <Card key={job.id} id={`job-${job.id}`} className="p-6 space-y-6 bg-card border-border scroll-mt-24">
                   <div className="flex justify-between items-start">
                     <div>
                       {(() => {
@@ -7087,7 +7101,7 @@ export const CustomerPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
 
   return (
     <div className={cn(
-      "min-h-screen transition-colors duration-300 flex flex-col",
+      "cust-ui font-raleway min-h-screen transition-colors duration-300 flex flex-col",
       "bg-background text-foreground"
     )}>
       <nav className="px-6 md:px-12 flex justify-between items-center h-20 sticky top-0 z-50 bg-background/80 backdrop-blur-xl border-b border-border relative group transition-all">

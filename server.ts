@@ -7152,7 +7152,7 @@ app.post('/api/ai/health-insights', async (req, res) => {
     const hasHistory = history.length > 0;
 
     // Return cached insights if mileage + history count unchanged
-    const cacheKey = `${formattedRego}|${resolvedMileage ?? 0}|${history.length}`;
+    const cacheKey = `v2|${formattedRego}|${resolvedMileage ?? 0}|${history.length}`;
     const cached = _aiInsightCache.get(cacheKey);
     if (cached && Date.now() - cached.ts < AI_INSIGHT_TTL) {
       return res.json({ insights: cached.insights, hasHistory: cached.hasHistory, cached: true });
@@ -7210,7 +7210,9 @@ Severity:
   "overdue" = interval genuinely exceeded by km or time
   "info"    = not applicable to this vehicle, or general advisory
 
-Return ONLY valid JSON (no markdown): {"insights":[{"title":"short label","detail":"1–2 sentences with specific km/date context.","severity":"good|due|overdue|info"}]}`;
+Writing style: "title" is a short label (max 6 words). "detail" is ONE short plain sentence (max 16 words) describing the vehicle's state with the key km/date fact — e.g. "Slow coolant leak found at the October inspection; flush overdue." No advice, no "Recommend…", no reasoning.
+
+Return ONLY valid JSON (no markdown): {"insights":[{"title":"short label","detail":"one short sentence","severity":"good|due|overdue|info"}]}`;
 
     const raw = await callClaudeChat([{ role: 'user', content: prompt }], 800, true, false);
     const text = raw.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/,'').trim();
@@ -9214,8 +9216,17 @@ ${emailPara(`Your <strong>${vehicle}</strong> booking is confirmed. Reference: <
   </tr>
   <tr><td colspan="2"><span style="background:${EMAIL_DARK};color:#fff;padding:4px 10px;border-radius:6px;font-family:${EMAIL_BODY_FONT};font-size:9px;font-weight:700;text-transform:uppercase;letter-spacing:1px;">${paymentOption === 'deposit' ? 'Deposit paid' : 'Paid in full'} via ${paymentMethod}</span></td></tr>
 </table>
-
+${bookingId ? bookingManageButtonsHtml(String(bookingId)) : ''}
 </td></tr>`);
+}
+
+// Reschedule / Cancel buttons for an online booking. They open My Garage, which asks the
+// customer to verify (passkey or emailed code) and then applies the workshop's policy.
+function bookingManageButtonsHtml(bookingId: string): string {
+  const base = `https://torqued.site/customer?manage_booking=${encodeURIComponent(bookingId)}`;
+  const btn = (href: string, label: string, primary: boolean) => `<a href="${href}" style="display:inline-block;margin:0 8px 8px 0;background:${primary ? EMAIL_DARK : '#ffffff'};color:${primary ? '#ffffff' : EMAIL_DARK};border:1px solid ${EMAIL_DARK};font-family:${EMAIL_BODY_FONT};font-weight:700;font-size:13px;text-decoration:none;padding:11px 22px;border-radius:10px;">${label}</a>`;
+  return `<p style="margin:8px 0 10px;font-family:${EMAIL_BODY_FONT};font-size:13px;color:${EMAIL_MUTED};">Plans changed? You can move or cancel your booking online. The workshop's cancellation policy applies.</p>
+<div>${btn(`${base}&action=reschedule`, 'Reschedule', true)}${btn(`${base}&action=cancel`, 'Cancel booking', false)}</div>`;
 }
 
 // Generates a beautiful HTML booking notice for partner workshops
