@@ -24,6 +24,116 @@ app.use(express.json({
   },
 }));
 
+// ── Mechanic API auth ─────────────────────────────────────────
+// Every /api/mechanic/* route acts as a workshop, so the workshop's identity must
+// come from a verified Supabase session — never from a client-supplied
+// mechanicId. This middleware verifies the `Authorization: Bearer <access token>`
+// header, confirms the user is a mechanic, rejects a body/query mechanicId that
+// names someone else (403), and then overwrites mechanicId with the verified id
+// so every handler below works off the real one. Requests that name a booking
+// (body.bookingId) must also own that booking.
+//
+// Public exceptions: the customer booking flow (profile, prices, slots, hours),
+// pre-login account flows, and the customer's reschedule acceptance.
+const PUBLIC_MECHANIC_ROUTES: Array<[string, RegExp]> = [
+  ['GET', /^\/public\/[^/]+$/],                // direct-booking link profile
+  ['GET', /^\/[^/]+\/package-price$/],         // customer quote (web + iOS)
+  ['GET', /^\/[^/]+\/dropoff-slots$/],         // customer online booking
+  ['GET', /^\/next-available$/],               // customer online booking
+  ['GET', /^\/availability$/],                 // opening hours, read by the customer portal
+  ['POST', /^\/register$/],                    // sign-up (no session yet)
+  ['POST', /^\/ensure-confirmed$/],            // login auto-heal (no session yet)
+  ['POST', /^\/forgot-password$/],             // password reset (no session yet)
+  ['POST', /^\/resend$/],                      // resend sign-in link (no session yet)
+  ['POST', /^\/email-trial$/],                 // trial-code email, not workshop-scoped
+  ['POST', /^\/accept-reschedule$/],           // the CUSTOMER accepts (web + iOS)
+];
+// Routes the admin back-office may call for any workshop with its admin key.
+const ADMIN_MECHANIC_ROUTES: Array<[string, RegExp]> = [
+  ['POST', /^\/update-address$/],
+];
+const matchRoute = (list: Array<[string, RegExp]>, method: string, p: string) =>
+  list.some(([m, re]) => (m === method || (m === 'GET' && method === 'HEAD')) && re.test(p));
+
+// Short-lived cache of verified tokens so a burst of portal requests doesn't
+// round-trip to Supabase Auth for each one. Entries never outlive the token.
+const mechanicTokenCache = new Map<string, { uid: string; until: number }>();
+async function verifyMechanicToken(token: string): Promise<{ uid?: string; status?: number; error?: string }> {
+  const now = Date.now();
+  const hit = mechanicTokenCache.get(token);
+  if (hit && hit.until > now) return { uid: hit.uid };
+  const supabase = getSupabaseAdmin();
+  if (!supabase) return { status: 503, error: 'Auth not configured' };
+  const { data, error } = await supabase.auth.getUser(token);
+  const user = data?.user;
+  if (error || !user) return { status: 401, error: 'Your session has expired — please sign in again.' };
+  const { data: profile } = await supabase.from('profiles').select('role').eq('id', user.id).maybeSingle();
+  if (profile?.role !== 'mechanic') return { status: 403, error: 'This account is not a workshop account.' };
+  let exp = now + 60_000;
+  try {
+    const payload = JSON.parse(Buffer.from(token.split('.')[1], 'base64url').toString());
+    if (payload?.exp) exp = Math.min(exp, payload.exp * 1000);
+  } catch { /* keep the 60s default */ }
+  if (mechanicTokenCache.size > 1000) mechanicTokenCache.clear();
+  mechanicTokenCache.set(token, { uid: user.id, until: exp });
+  return { uid: user.id };
+}
+
+// Route-level guard for mechanic-only routes outside /api/mechanic. `bookingParam`
+// names a route param holding a booking id that must belong to the caller.
+// `allowAdmin` also lets the admin back-office through with its key.
+const requireMechanic = (opts: { bookingParam?: string; allowAdmin?: boolean } = {}): express.RequestHandler =>
+  (req, res, next) => {
+    if (opts.allowAdmin && adminOk(req)) return next();
+    return verifyMechanicRequest(req, res, next, opts.bookingParam);
+  };
+
+app.use('/api/mechanic', (req, res, next) => {
+  const p = req.path.length > 1 ? req.path.replace(/\/+$/, '') : req.path;
+  if (matchRoute(PUBLIC_MECHANIC_ROUTES, req.method, p)) return next();
+  if (matchRoute(ADMIN_MECHANIC_ROUTES, req.method, p) && adminOk(req)) return next();
+  return verifyMechanicRequest(req, res, next);
+});
+
+async function verifyMechanicRequest(req: express.Request, res: express.Response, next: express.NextFunction, bookingParam?: string) {
+  try {
+    const header = req.headers.authorization || '';
+    const token = /^Bearer\s+(.+)$/i.exec(header)?.[1]?.trim();
+    if (!token) return res.status(401).json({ error: 'Please sign in to continue.' });
+    const v = await verifyMechanicToken(token);
+    if (!v.uid) return res.status(v.status || 401).json({ error: v.error || 'Unauthorized' });
+    const uid = v.uid;
+
+    const body = req.body && typeof req.body === 'object' && !Array.isArray(req.body) ? req.body : null;
+    const claimed = [body?.mechanicId, req.query.mechanicId]
+      .filter(x => x != null && x !== '').map(String);
+    if (claimed.some(c => c !== uid)) return res.status(403).json({ error: 'You can only act on your own workshop.' });
+    if (body) body.mechanicId = uid;
+    else req.body = { mechanicId: uid };
+    (req.query as any).mechanicId = uid;
+    (req as any).mechanicId = uid;
+
+    // A request that names a booking must be for one of this workshop's bookings.
+    const bookingIds = [body?.bookingId, bookingParam ? req.params[bookingParam] : undefined]
+      .filter(x => x != null && x !== '').map(String);
+    if (bookingIds.length) {
+      const supabase = getSupabaseAdmin();
+      if (!supabase) return res.status(503).json({ error: 'Database not configured' });
+      for (const id of new Set(bookingIds)) {
+        const { data: bk } = await supabase.from('bookings').select('mechanic_id').eq('id', id).maybeSingle();
+        if (!bk || String(bk.mechanic_id) !== uid) return res.status(404).json({ error: 'Booking not found' });
+      }
+    }
+    next();
+  } catch (err) {
+    console.error('[mechanic auth]', err);
+    res.status(500).json({ error: 'Could not verify your session' });
+  }
+}
+
+// The verified workshop id set by the middleware above.
+const authedMechanicId = (req: express.Request): string => (req as any).mechanicId;
+
 // Lazy-initialized Stripe instance
 let stripeInstance: Stripe | null = null;
 function getStripe(): Stripe | null {
@@ -3953,7 +4063,8 @@ app.post('/api/mechanic/send-quote-pdf', async (req, res) => {
 });
 
 // POST /api/stripe/refund — full or partial refund tied to a booking
-app.post('/api/stripe/refund', async (req, res) => {
+// Admin back-office (key) or the workshop that owns the booking.
+app.post('/api/stripe/refund', requireMechanic({ allowAdmin: true }), async (req, res) => {
   try {
     const { bookingId, amount, reason } = req.body; // amount optional (full if omitted)
     if (!bookingId) return res.status(400).json({ error: 'bookingId required' });
@@ -5346,7 +5457,7 @@ app.post('/api/mechanic/verify-email-otp', async (req, res) => {
 // GET /api/mechanic/onboarding-status — has the mechanic completed onboarding?
 app.get('/api/mechanic/onboarding-status', async (req, res) => {
   try {
-    const id = req.query.id as string;
+    const id = authedMechanicId(req);
     if (!id) return res.status(400).json({ error: 'id required' });
     const supabase = getSupabaseAdmin();
     if (!supabase) return res.json({ complete: true });
@@ -5370,7 +5481,7 @@ app.get('/api/mechanic/onboarding-status', async (req, res) => {
 // GET /api/mechanic/status — reliable subscription status read (service role, no RLS race)
 app.get('/api/mechanic/status', async (req, res) => {
   try {
-    const id = req.query.id as string;
+    const id = authedMechanicId(req);
     if (!id) return res.status(400).json({ error: 'id required' });
     const supabase = getSupabaseAdmin();
     if (!supabase) return res.json({ subscriptionActive: false });
@@ -5452,17 +5563,9 @@ app.post('/api/mechanic/update-address', async (req, res) => {
 // bypasses RLS so it always persists). Used by the activation/return flows.
 app.post('/api/mechanic/activate', async (req, res) => {
   try {
-    const { mechanicId, email } = req.body;
-    if (!mechanicId && !email) return res.status(400).json({ error: 'mechanicId or email required' });
+    const id = authedMechanicId(req);
     const supabase = getSupabaseAdmin();
     if (!supabase) return res.status(500).json({ error: 'Database not configured' });
-
-    let id = mechanicId;
-    if (!id && email) {
-      const { data: p } = await supabase.from('profiles').select('id').eq('email', email).single();
-      id = p?.id;
-    }
-    if (!id) return res.status(404).json({ error: 'Mechanic not found' });
 
     const { error } = await supabase.from('profiles')
       .update({ subscription_active: true })
@@ -5644,7 +5747,7 @@ async function callClaudeChat(messages: any[], maxTokens = 500, jsonMode = false
 }
 
 // POST /api/ai/mechanic-assistant — mechanic data chat with full DB access.
-app.post('/api/ai/mechanic-assistant', async (req, res) => {
+app.post('/api/ai/mechanic-assistant', requireMechanic(), async (req, res) => {
   try {
     const { messages, vehicle, rego, mechanicId } = req.body;
     if (!Array.isArray(messages) || messages.length === 0) return res.status(400).json({ error: 'messages required' });
@@ -5668,8 +5771,16 @@ app.post('/api/ai/mechanic-assistant', async (req, res) => {
         supabase!.from('vehicles').select('rego,make,model,year,variant,mileage,owner_id').eq('rego', plate).single(),
         supabase!.from('vehicle_specs').select('oil_type,oil_capacity_litres,oil_service_interval_km,transmission_fluid_type,transmission_service_interval_km,cambelt_or_chain,cambelt_interval_km').eq('rego', plate).single(),
         supabase!.from('vehicle_history').select('service_date,work_done,mileage,provider,price').eq('rego', plate).order('service_date', { ascending: false }).limit(15),
-        supabase!.from('bookings').select('id,status,service_ids,description,date,quoted_price,total_price,customer_name,email').eq('vehicle_rego', plate).order('created_at', { ascending: false }).limit(10),
+        supabase!.from('bookings').select('id,status,service_ids,description,date,quoted_price,total_price,customer_name,email').eq('vehicle_rego', plate).eq('mechanic_id', mechanicId).order('created_at', { ascending: false }).limit(10),
       ]);
+      // Service history follows the same consent rule as the history-access flow:
+      // only this workshop's own customers' cars, or a customer-granted link.
+      let historyAllowed = !!bRes.data?.length;
+      if (!historyAllowed) {
+        const { data: granted } = await supabase!.from('history_access_links').select('token').eq('mechanic_id', mechanicId).eq('rego', plate).eq('granted', true).gt('expires_at', new Date().toISOString()).limit(1).maybeSingle();
+        historyAllowed = !!granted;
+      }
+      if (!historyAllowed) hRes.data = null;
       let ctx = '';
       if (vRes.data) {
         const v = vRes.data;
@@ -5711,13 +5822,17 @@ app.post('/api/ai/mechanic-assistant', async (req, res) => {
       }
 
       // Customer name lookup — "Sri's car" or "cars for Sri"
+      // Only this workshop's own customers — never a platform-wide name search.
       if (mentionedName) {
-        const { data: matchedProfiles } = await supabase.from('profiles').select('id,name').ilike('name', `%${mentionedName}%`).limit(3);
-        if (matchedProfiles?.length) {
-          const ownerIds = matchedProfiles.map((p: any) => p.id);
-          const { data: ownerVehicles } = await supabase.from('vehicles').select('rego,make,model,year,variant,mileage').in('owner_id', ownerIds);
+        const safeName = mentionedName.replace(/[%_,()]/g, '');
+        const { data: myJobs } = safeName ? await supabase.from('bookings').select('customer_name,vehicle_rego')
+          .eq('mechanic_id', mechanicId).ilike('customer_name', `%${safeName}%`).not('vehicle_rego', 'is', null)
+          .order('created_at', { ascending: false }).limit(10) : { data: null };
+        const regos = [...new Set((myJobs || []).map((j: any) => j.vehicle_rego))].slice(0, 5);
+        if (regos.length) {
+          const { data: ownerVehicles } = await supabase.from('vehicles').select('rego,make,model,year,variant,mileage').in('rego', regos);
           if (ownerVehicles?.length) {
-            customerCtx = `Vehicles for ${matchedProfiles[0].name}: ` + ownerVehicles.map((v: any) => `${v.rego} – ${v.year} ${v.make} ${v.model}${v.variant ? ` ${v.variant}` : ''}${v.mileage ? ` @${Number(v.mileage).toLocaleString()}km` : ''}`).join(', ');
+            customerCtx = `Vehicles for ${myJobs![0].customer_name}: ` + ownerVehicles.map((v: any) => `${v.rego} – ${v.year} ${v.make} ${v.model}${v.variant ? ` ${v.variant}` : ''}${v.mileage ? ` @${Number(v.mileage).toLocaleString()}km` : ''}`).join(', ');
           }
         }
       }
@@ -7266,7 +7381,7 @@ Return ONLY valid JSON (no markdown): {"insights":[{"title":"short label","detai
 });
 
 // POST /api/ai/oil-price — looks up current NZ retail price per litre for a given oil grade via Claude
-app.post('/api/ai/oil-price', async (req, res) => {
+app.post('/api/ai/oil-price', requireMechanic(), async (req, res) => {
   try {
     const { grade } = req.body;
     if (!grade?.trim()) return res.status(400).json({ error: 'Oil grade is required (e.g. 5W-30).' });
@@ -7288,7 +7403,7 @@ Use a realistic mid-market figure. Do not include $ symbol.`;
 });
 
 // POST /api/ai/service-lookup — AI lookup for oil/fluid capacity + filter cost given a vehicle or service query
-app.post('/api/ai/service-lookup', async (req, res) => {
+app.post('/api/ai/service-lookup', requireMechanic(), async (req, res) => {
   try {
     const { query, type } = req.body;
     if (!query?.trim()) return res.status(400).json({ error: 'query is required (e.g. Toyota Camry 2.5L 2018).' });
@@ -7350,7 +7465,11 @@ app.post('/api/mechanic/ppi', async (req, res) => {
       status: complete ? 'completed' : 'in_progress',
       completed_at: complete ? new Date().toISOString() : null,
     };
-    if (id) payload.id = id;
+    if (id) {
+      const { data: existingPpi } = await supabase.from('ppi_inspections').select('mechanic_id').eq('id', id).maybeSingle();
+      if (existingPpi && String(existingPpi.mechanic_id) !== String(mechanicId)) return res.status(404).json({ error: 'Inspection not found' });
+      payload.id = id;
+    }
     const { data, error } = await supabase.from('ppi_inspections').upsert(payload, { onConflict: 'id' }).select().single();
     if (error) return res.status(500).json({ error: error.message });
 
@@ -7545,7 +7664,7 @@ app.delete('/api/mechanic/availability/:id', async (req, res) => {
   try {
     const supabase = getSupabaseAdmin();
     if (!supabase) return res.status(500).json({ error: 'DB unavailable' });
-    await supabase.from('mechanic_availability').delete().eq('id', req.params.id);
+    await supabase.from('mechanic_availability').delete().eq('id', req.params.id).eq('mechanic_id', authedMechanicId(req));
     res.json({ success: true });
   } catch (err: any) {
     res.status(500).json({ error: err?.message || 'Failed' });
@@ -7575,7 +7694,7 @@ app.delete('/api/mechanic/closed-periods/:id', async (req, res) => {
   try {
     const supabase = getSupabaseAdmin();
     if (!supabase) return res.status(500).json({ error: 'DB unavailable' });
-    await supabase.from('mechanic_closed_periods').delete().eq('id', req.params.id);
+    await supabase.from('mechanic_closed_periods').delete().eq('id', req.params.id).eq('mechanic_id', authedMechanicId(req));
     res.json({ success: true });
   } catch (err: any) {
     res.status(500).json({ error: err?.message || 'Failed' });
@@ -7631,7 +7750,7 @@ app.delete('/api/mechanic/staff/:id', async (req, res) => {
   try {
     const supabase = getSupabaseAdmin();
     if (!supabase) return res.status(500).json({ error: 'DB unavailable' });
-    await supabase.from('mechanic_staff').delete().eq('id', req.params.id);
+    await supabase.from('mechanic_staff').delete().eq('id', req.params.id).eq('mechanic_id', authedMechanicId(req));
     res.json({ success: true });
   } catch (err: any) {
     res.status(500).json({ error: err?.message || 'Failed' });
@@ -7647,6 +7766,8 @@ app.post('/api/mechanic/roster/shift', async (req, res) => {
     }
     const supabase = getSupabaseAdmin();
     if (!supabase) return res.status(500).json({ error: 'DB unavailable' });
+    const { data: staffRow } = await supabase.from('mechanic_staff').select('id').eq('id', staffId).eq('mechanic_id', mechanicId).maybeSingle();
+    if (!staffRow) return res.status(404).json({ error: 'Team member not found' });
     const { data, error } = await supabase.from('mechanic_roster').insert({
       mechanic_id: mechanicId, staff_id: staffId, shift_date: shiftDate,
       start_time: startTime, end_time: endTime,
@@ -7665,7 +7786,7 @@ app.delete('/api/mechanic/roster/shift/:id', async (req, res) => {
   try {
     const supabase = getSupabaseAdmin();
     if (!supabase) return res.status(500).json({ error: 'DB unavailable' });
-    await supabase.from('mechanic_roster').delete().eq('id', req.params.id);
+    await supabase.from('mechanic_roster').delete().eq('id', req.params.id).eq('mechanic_id', authedMechanicId(req));
     res.json({ success: true });
   } catch (err: any) {
     res.status(500).json({ error: err?.message || 'Failed' });
@@ -7674,7 +7795,7 @@ app.delete('/api/mechanic/roster/shift/:id', async (req, res) => {
 
 // ── Booking Notes ──────────────────────────────────────────────────────────────
 // GET /api/booking/:id/notes — list mechanic notes for a booking (newest first)
-app.get('/api/booking/:id/notes', async (req, res) => {
+app.get('/api/booking/:id/notes', requireMechanic({ bookingParam: 'id' }), async (req, res) => {
   try {
     const supabase = getSupabaseAdmin();
     if (!supabase) return res.status(503).json({ error: 'DB unavailable' });
@@ -7690,7 +7811,7 @@ app.get('/api/booking/:id/notes', async (req, res) => {
 });
 
 // POST /api/booking/:id/notes — add a mechanic note to a booking
-app.post('/api/booking/:id/notes', async (req, res) => {
+app.post('/api/booking/:id/notes', requireMechanic({ bookingParam: 'id' }), async (req, res) => {
   try {
     const supabase = getSupabaseAdmin();
     if (!supabase) return res.status(503).json({ error: 'DB unavailable' });
@@ -7707,7 +7828,7 @@ app.post('/api/booking/:id/notes', async (req, res) => {
 });
 
 // DELETE /api/booking/:id/notes/:noteId — delete a note
-app.delete('/api/booking/:id/notes/:noteId', async (req, res) => {
+app.delete('/api/booking/:id/notes/:noteId', requireMechanic({ bookingParam: 'id' }), async (req, res) => {
   try {
     const supabase = getSupabaseAdmin();
     if (!supabase) return res.status(503).json({ error: 'DB unavailable' });
@@ -7776,10 +7897,16 @@ app.post('/api/vehicle-photos', async (req, res) => {
 });
 
 // DELETE /api/vehicle-photos/:id — remove a photo record
-app.delete('/api/vehicle-photos/:id', async (req, res) => {
+// Only the workshop whose booking the photo was taken on may remove it.
+app.delete('/api/vehicle-photos/:id', requireMechanic(), async (req, res) => {
   try {
     const supabase = getSupabaseAdmin();
     if (!supabase) return res.status(503).json({ error: 'DB unavailable' });
+    const { data: photo } = await supabase.from('vehicle_photos').select('booking_id').eq('id', req.params.id).maybeSingle();
+    const { data: bk } = photo?.booking_id
+      ? await supabase.from('bookings').select('mechanic_id').eq('id', photo.booking_id).maybeSingle()
+      : { data: null };
+    if (!bk || String(bk.mechanic_id) !== authedMechanicId(req)) return res.status(404).json({ error: 'Photo not found' });
     const { error } = await supabase.from('vehicle_photos').delete().eq('id', req.params.id);
     if (error) throw error;
     res.json({ success: true });
@@ -7789,7 +7916,7 @@ app.delete('/api/vehicle-photos/:id', async (req, res) => {
 });
 
 // POST /api/ai/parts-lookup — AI-assisted NZ parts lookup (name, OEM #, price, suppliers)
-app.post('/api/ai/parts-lookup', async (req, res) => {
+app.post('/api/ai/parts-lookup', requireMechanic(), async (req, res) => {
   try {
     const { query, make, model, year } = req.body;
     if (!query?.trim()) return res.status(400).json({ error: 'query required' });
@@ -9061,7 +9188,7 @@ app.get('/api/plans', (_req, res) => {
   });
 });
 
-app.post('/api/stripe/create-subscription', async (req, res) => {
+app.post('/api/stripe/create-subscription', requireMechanic(), async (req, res) => {
   try {
     const { email, mechanicId, tier, billing } = req.body;
     if (!email || !mechanicId) return res.status(400).json({ error: 'Email and mechanicId are required' });

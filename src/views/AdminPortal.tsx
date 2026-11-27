@@ -208,7 +208,7 @@ export const AdminPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) => {
     try {
       const r = await fetch('/api/mechanic/update-address', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ mechanicId, address: adminAddress.trim() }),
+        body: JSON.stringify({ key, mechanicId, address: adminAddress.trim() }),
       });
       const d = await r.json();
       if (r.ok) {
@@ -478,7 +478,7 @@ export const AdminPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) => {
     if (amt == null) return;
     const r = await fetch('/api/stripe/refund', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ bookingId: b.id, amount: amt.trim() ? parseFloat(amt) : undefined }),
+      body: JSON.stringify({ key, bookingId: b.id, amount: amt.trim() ? parseFloat(amt) : undefined }),
     });
     const d = await r.json();
     window.alert(d.success ? `Refunded $${d.refunded}.` : (d.error || 'Refund failed.'));
