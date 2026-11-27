@@ -2,7 +2,7 @@ import React, { useState, useMemo, useRef } from 'react';
 import { jsPDF } from 'jspdf';
 import { PLANS, LAUNCH_OFFER, planById, PlanTier } from '../plans';
 import { motion, AnimatePresence } from 'motion/react';
-import {
+import { ChevronDown,
   LayoutDashboard,
   Inbox,
   Calendar as CalendarIcon,
@@ -1685,8 +1685,18 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
   const [checkoutKm, setCheckoutKm] = useState('');
   const [checkoutNotes, setCheckoutNotes] = useState('');
   const [checkoutBusy, setCheckoutBusy] = useState(false);
+  const [checkoutSendInvoice, setCheckoutSendInvoice] = useState(false);
+  const [checkoutNotify, setCheckoutNotify] = useState(true);
+  const [payMenu, setPayMenu] = useState<string | null>(null);
 
-  const openCheckout = (job: any) => { setCheckoutModal({ job }); setCheckoutKm(''); setCheckoutNotes(''); };
+  const openCheckout = (job: any) => {
+    const row = allJobRows.find((r: any) => r.id === job.id);
+    const ps = row ? paySummary(row) : null;
+    setCheckoutModal({ job }); setCheckoutKm(''); setCheckoutNotes('');
+    // Default: send the invoice when something is still owed on a phone / walk-in job.
+    setCheckoutSendInvoice(!!(row?.is_cold_quote && ps && ps.balance > 0));
+    setCheckoutNotify(true);
+  };
 
   const confirmCheckout = async () => {
     if (!checkoutModal) return;
@@ -1697,12 +1707,17 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
     try {
       const r = await fetch('/api/mechanic/car-ready', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ bookingId: job.id, km, notes: checkoutNotes.trim() || undefined, mechanicName: profileData.name }),
+        body: JSON.stringify({ bookingId: job.id, km, notes: checkoutNotes.trim() || undefined, mechanicName: profileData.name, sendInvoice: checkoutSendInvoice, notifyCustomer: checkoutNotify }),
       });
-      if (!r.ok) { alert('Could not complete checkout. Please try again.'); return; }
-      patchRow(job.id, { status: 'completed', completed_at: new Date().toISOString() });
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok) { alert(d.error || 'Could not complete checkout. Please try again.'); return; }
+      if (d.row) upsertRow(d.row); else patchRow(job.id, { status: 'completed', completed_at: new Date().toISOString() });
       setIncomingJobs(prev => prev.filter(j => j.id !== job.id));
       setCheckoutModal(null);
+      const bits = [`Checked out at ${km.toLocaleString()} km.`];
+      if (checkoutSendInvoice) bits.push(d.invoice?.emailed ? `Invoice ${d.invoice.invoiceNo || ''} emailed to ${d.invoice.sentTo}.` : `Invoice not emailed: ${d.invoice?.reason || 'unknown error'} You can send it from Payments.`);
+      if (checkoutNotify) bits.push(d.notified ? 'Customer told their car is ready.' : 'No customer email on file — give them a call.');
+      alert(bits.join('\n'));
     } catch { alert('Could not complete checkout.'); }
     finally { setCheckoutBusy(false); }
   };
@@ -3888,7 +3903,7 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
         const flag = paymentFlag(j);
         const ps = paySummary(j);
         return (
-          <Card key={j.id} className={cn('p-4 sm:p-5 bg-card space-y-3', flag?.tone === 'red' ? 'border-torqued-red/50' : flag ? 'border-amber-500/50' : 'border-border')}>
+          <Card key={j.id} className={cn('p-4 sm:p-5 bg-card space-y-3 overflow-visible', payMenu === j.id && 'relative z-30', flag?.tone === 'red' ? 'border-torqued-red/50' : flag ? 'border-amber-500/50' : 'border-border')}>
             {(() => {
               const custName = j.customer_name && j.customer_name !== j.vehicle_rego ? j.customer_name : null;
               const carDesc = j.vehicle_label || (j.vehicle_make ? `${j.vehicle_year ? j.vehicle_year + ' ' : ''}${j.vehicle_make}${j.vehicle_model ? ' ' + j.vehicle_model : ''}`.trim() : null);
@@ -3927,59 +3942,67 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
                 </div>
               );
             })()}
-            {(flag || (!ps.online && ps.total > 0)) && (
-              <div className={cn('rounded-xl border px-3 py-2.5 flex flex-wrap items-center gap-x-4 gap-y-1 text-xs', flag?.tone === 'red' ? 'border-torqued-red/40 bg-torqued-red/5' : flag ? 'border-amber-500/40 bg-amber-500/5' : 'border-border bg-background')}>
-                <span className={cn('font-bold', flag?.tone === 'red' ? 'text-torqued-red' : flag ? 'text-amber-600' : 'text-emerald-600')}>{flag ? flag.text : 'Paid in full'}</span>
-                {!ps.online && <span className="text-muted">Total {formatCurrency(ps.total)} · Paid {formatCurrency(ps.paid)}{ps.balance > 0 ? ` · Balance ${formatCurrency(ps.balance)}` : ''}</span>}
-                {!ps.online && ps.billTo && <span className="text-muted">{billToWho(ps.billTo)} pays {formatCurrency(ps.accountShare)}{ps.billTo.reference ? ` (claim/PO ${ps.billTo.reference})` : ''} · customer {formatCurrency(ps.customerShare)}</span>}
-                {!ps.online && ps.terms.require !== 'none' && !(ps.billTo && !(ps.customerShare > 0)) && <span className="text-muted">{PAY_REQ_LABEL[ps.terms.require] || ''}{ps.terms.require === 'deposit' && ps.depositRequired ? ` (${formatCurrency(ps.depositRequired)})` : ''}</span>}
-              </div>
-            )}
-            <div className="flex flex-wrap gap-2">
-              {!ps.online && ps.balance > 0 && (
-                <button type="button" className={actCls(flag?.tone === 'red' ? 'primary' : 'green')} onClick={() => openPayModal(j)}>Record payment</button>
-              )}
-              {!ps.online && ps.balance > 0 && ps.total > 0 && (
-                <button type="button" className={actCls('plain')} onClick={() => invoiceWithTorqued(j)}>Invoice with Torqued</button>
-              )}
-              {j.is_cold_quote && (
-                <button type="button" className={actCls('plain')} onClick={() => setCustPanel(customerForRow(j))}>Payments & customer</button>
-              )}
-              {(j.service_ids || []).includes('ppi') && j.status !== 'completed' && (
-                <button type="button" className={actCls('primary')} onClick={() => {
+            {(flag || (!ps.online && ps.total > 0)) && (() => {
+              const who = billToWho(ps.billTo);
+              const label = flag ? flag.text
+                : ps.balance <= 0 ? 'Paid in full'
+                : ps.billTo && ps.accountBalance > 0 && !(ps.customerBalance > 0) ? `${who} is invoiced at check-out`
+                : `${formatCurrency(ps.balance)} to pay`;
+              return (
+                <div className={cn('rounded-xl border px-3 py-2.5 flex flex-wrap items-center gap-x-4 gap-y-1 text-xs', flag?.tone === 'red' ? 'border-torqued-red/40 bg-torqued-red/5' : flag ? 'border-amber-500/40 bg-amber-500/5' : 'border-border bg-background')}>
+                  <span className={cn('font-bold', flag?.tone === 'red' ? 'text-torqued-red' : flag ? 'text-amber-600' : ps.balance > 0 ? 'text-foreground' : 'text-emerald-600')}>{label}</span>
+                  {!ps.online && <span className="text-muted">Total {formatCurrency(ps.total)} · Paid {formatCurrency(ps.paid)}{ps.balance > 0 ? ` · Balance ${formatCurrency(ps.balance)}` : ''}</span>}
+                  {!ps.online && ps.billTo && <span className="text-muted">{who} pays {formatCurrency(ps.accountShare)}{ps.billTo.reference ? ` (claim/PO ${ps.billTo.reference})` : ''} · customer {formatCurrency(ps.customerShare)}</span>}
+                  {!ps.online && ps.terms.require !== 'none' && !(ps.billTo && !(ps.customerShare > 0)) && <span className="text-muted">{PAY_REQ_LABEL[ps.terms.require] || ''}{ps.terms.require === 'deposit' && ps.depositRequired ? ` (${formatCurrency(ps.depositRequired)})` : ''}</span>}
+                </div>
+              );
+            })()}
+            <div className="flex flex-wrap gap-2 items-center">
+              {(j.service_ids || []).includes('ppi') && (
+                <button type="button" className={actCls(j.status === 'completed' ? 'plain' : 'primary')} onClick={() => {
                   setPpiPreloadRego(j.vehicle_rego || '');
                   setPpiPreloadName(j.customer_name && j.customer_name !== j.vehicle_rego ? j.customer_name : '');
                   setPpiPreloadEmail(j.email || j.customer_email || '');
-                  setPpiPreloadMileage(j.mileage_in ? String(j.mileage_in) : '');
+                  setPpiPreloadMileage(j.status === 'completed' && j.mileage_out ? String(j.mileage_out) : j.mileage_in ? String(j.mileage_in) : '');
                   setActiveTab('health'); setHealthSubtab('ppi');
-                }}>Start PPI</button>
-              )}
-              {(j.service_ids || []).includes('ppi') && j.status === 'completed' && (
-                <button type="button" className={actCls('plain')} onClick={() => {
-                  setPpiPreloadRego(j.vehicle_rego || '');
-                  setPpiPreloadName(j.customer_name && j.customer_name !== j.vehicle_rego ? j.customer_name : '');
-                  setPpiPreloadEmail(j.email || j.customer_email || '');
-                  setPpiPreloadMileage(j.mileage_out ? String(j.mileage_out) : j.mileage_in ? String(j.mileage_in) : '');
-                  setActiveTab('health'); setHealthSubtab('ppi');
-                }}>Download PPI report</button>
+                }}>{j.status === 'completed' ? 'PPI report' : 'Start PPI'}</button>
               )}
               <button type="button" className={actCls('plain')} onClick={() => openQuoteEditor(jobShape)}>Edit quote</button>
               <button type="button" className={actCls('plain')} onClick={() => messageCustomer(jobShape)}>Message customer</button>
-              {j.status === 'in_progress' && (
-                <button type="button" className={actCls('blue')} onClick={() => { setRescheduleModal({ job: jobShape }); setRescheduleDate(''); setRescheduleComment(''); }}>Request reschedule</button>
-              )}
-              <button type="button" className={actCls('plain')} onClick={() => recordMileage(jobShape, 'out')}>Check-out km</button>
-              {ps.billTo && ps.accountShare > 0 && <button type="button" className={actCls(ps.accountBalance > 0 && j.status === 'completed' && !j.quote_items?.meta?.invoicedAt ? 'primary' : 'plain')} onClick={() => accountInvoice(j, true)}>{j.quote_items?.meta?.invoiceSentAt ? 'Re-send' : 'Email'} invoice to {billToWho(ps.billTo)}</button>}
-              <button type="button" className={actCls('plain')} onClick={() => ps.billTo ? accountInvoice(j, false) : exportInvoice(j)}>{ps.billTo || j.payment_status === 'confirmed' ? 'Invoice PDF' : 'Download PDF'}</button>
-              {j.status === 'completed' && j.payment_status === 'confirmed' && j.quote_items?.meta?.paidVia !== 'ledger' && (
-                <button type="button" className={actCls('amber')} onClick={() => { setRefundModal({ job: j }); setRefundAmount(''); setRefundReason(''); }}>Refund</button>
-              )}
+              {j.status !== 'completed' && <button type="button" className={actCls('primary')} onClick={() => recordMileage(jobShape, 'out')}>Check out</button>}
+              <button type="button" className={actCls('plain')} onClick={() => ps.billTo ? accountInvoice(j, false) : exportInvoice(j)}>PDF</button>
               <button type="button" className={actCls('plain')} onClick={() => jobNotes[j.id]?.open ? setJobNotes(p => ({...p, [j.id]: {...p[j.id], open: false}})) : openJobNotes(j.id)}>
-                Notes {(jobNotes[j.id]?.notes?.length ?? 0) > 0 ? `(${jobNotes[j.id]!.notes.length})` : ''}
+                Notes{(jobNotes[j.id]?.notes?.length ?? 0) > 0 ? ` (${jobNotes[j.id]!.notes.length})` : ''}
               </button>
               <button type="button" className={actCls('plain')} onClick={() => vehiclePhotos[j.vehicle_rego]?.open ? setVehiclePhotos(p => ({...p, [j.vehicle_rego]: {...p[j.vehicle_rego], open: false}})) : openVehiclePhotos(j.vehicle_rego)}>
-                Photos {(vehiclePhotos[j.vehicle_rego]?.photos?.length ?? 0) > 0 ? `(${vehiclePhotos[j.vehicle_rego]!.photos.length})` : ''}
+                Photos{(vehiclePhotos[j.vehicle_rego]?.photos?.length ?? 0) > 0 ? ` (${vehiclePhotos[j.vehicle_rego]!.photos.length})` : ''}
               </button>
+              <div className="relative">
+                <button type="button" aria-haspopup="menu" aria-expanded={payMenu === j.id} className={actCls(flag?.tone === 'red' ? 'amber' : 'plain')} onClick={() => setPayMenu(payMenu === j.id ? null : j.id)}>
+                  Payments{!ps.online && ps.balance > 0 ? <span className="text-xs text-muted font-normal">· {formatCurrency(ps.balance)}</span> : null} <ChevronDown size={14} />
+                </button>
+                {payMenu === j.id && (<>
+                  <div className="fixed inset-0 z-40" onClick={() => setPayMenu(null)} />
+                  <div role="menu" className="absolute right-0 sm:left-0 sm:right-auto top-full mt-2 z-50 w-72 rounded-2xl border border-border bg-card shadow-2xl p-1.5 font-raleway">
+                    {(() => {
+                      const item = (label: string, sub: string | null, onClick: () => void, tone?: string) => (
+                        <button key={label} type="button" role="menuitem" onClick={() => { setPayMenu(null); onClick(); }}
+                          className={cn('w-full text-left rounded-xl px-3 py-2.5 hover:bg-background transition-colors', tone)}>
+                          <span className="block text-sm font-semibold">{label}</span>{sub && <span className="block text-xs text-muted">{sub}</span>}
+                        </button>
+                      );
+                      const out: React.ReactNode[] = [];
+                      if (!ps.online && ps.balance > 0) out.push(item('Record payment', 'Cash, EFTPOS, bank transfer or internal', () => openPayModal(j)));
+                      if (!ps.online && ps.balance > 0 && ps.total > 0) out.push(item('Invoice with Torqued', 'Email a pay link — card, Afterpay, Klarna', () => invoiceWithTorqued(j)));
+                      if (ps.billTo && ps.accountShare > 0) out.push(item(`${j.quote_items?.meta?.invoiceSentAt ? 'Re-send' : 'Email'} invoice to ${billToWho(ps.billTo)}`, ps.billTo.email || 'Tax invoice PDF', () => accountInvoice(j, true)));
+                      if (j.is_cold_quote) out.push(item('Customer & transactions', 'Ledger, deposits and credit', () => setCustPanel(customerForRow(j))));
+                      if (j.status === 'completed' && j.payment_status === 'confirmed' && j.quote_items?.meta?.paidVia !== 'ledger') out.push(item('Refund', 'Refund an online payment', () => { setRefundModal({ job: j }); setRefundAmount(''); setRefundReason(''); }, 'text-amber-600'));
+                      if (j.status === 'in_progress') out.push(item('Request a reschedule', 'Ask the customer to move the booking', () => { setRescheduleModal({ job: jobShape }); setRescheduleDate(''); setRescheduleComment(''); }));
+                      return out.length ? out : <p className="px-3 py-2.5 text-sm text-muted">Paid online — nothing to collect.</p>;
+                    })()}
+                  </div>
+                </>)}
+              </div>
             </div>
 
             {/* Job Notes Panel */}
@@ -6508,47 +6531,96 @@ export const MechanicPortal: React.FC<{ onBack?: () => void }> = ({ onBack }) =>
           </div>
         )}
 
-        {checkoutModal && (
-          <div className="fixed inset-0 z-[200] flex items-center justify-center p-4 bg-foreground/30 backdrop-blur-sm" onClick={() => !checkoutBusy && setCheckoutModal(null)}>
-            <motion.div
-              initial={{ opacity: 0, scale: 0.95 }} animate={{ opacity: 1, scale: 1 }} exit={{ opacity: 0, scale: 0.95 }}
-              onClick={e => e.stopPropagation()}
-              className="bg-background border border-border rounded-2xl p-6 w-full max-w-md space-y-5 shadow-2xl"
-            >
-              <div className="flex justify-between items-center">
-                <h3 className="text-lg font-black text-foreground">Check-out · Car Ready</h3>
-                <button onClick={() => setCheckoutModal(null)} className="text-muted hover:text-foreground text-xl">✕</button>
-              </div>
-              <p className="text-sm text-muted">Record the odometer for job <strong className="text-foreground">#{checkoutModal.job.id}</strong>. The customer will be notified their vehicle is ready.</p>
-              <div className="space-y-3">
-                <div>
-                  <label className="text-[10px] font-black uppercase tracking-widest text-muted block mb-1">Odometer at check-out (km)</label>
-                  <input type="text" inputMode="numeric" value={checkoutKm} onChange={e => setCheckoutKm(e.target.value)} placeholder="e.g. 124500"
-                    className="w-full bg-card border border-border rounded-xl px-3 py-2.5 text-sm text-foreground focus:outline-none focus:border-torqued-red" />
-                </div>
-                <div>
-                  <label className="text-[10px] font-black uppercase tracking-widest text-muted block mb-1">Notes for the customer (optional)</label>
-                  <textarea value={checkoutNotes} onChange={e => setCheckoutNotes(e.target.value)} rows={3} placeholder="e.g. Replaced front pads, recommend rear pads next service…"
-                    className="w-full bg-card border border-border rounded-xl px-3 py-2.5 text-sm text-foreground focus:outline-none focus:border-torqued-red resize-none" />
-                </div>
-              </div>
-              {(() => {
-                const row = allJobRows.find((r: any) => r.id === checkoutModal.job.id);
-                const ps = row ? paySummary(row) : null;
-                return row && ps && !ps.online && ps.balance > 0 ? (
-                  <div className="rounded-xl border border-torqued-red/40 bg-torqued-red/5 p-3 flex items-center justify-between gap-3">
-                    <p className="text-sm"><span className="font-bold text-foreground">{formatCurrency(ps.balance)} still to pay.</span> <span className="text-muted">Take payment before the car goes.</span></p>
-                    <Button size="sm" className="bg-torqued-red text-white shrink-0" onClick={() => openPayModal(row)}>Record payment</Button>
+        {checkoutModal && (() => {
+          const job = checkoutModal.job;
+          const row = allJobRows.find((r: any) => r.id === job.id) || null;
+          const ps = row ? paySummary(row) : null;
+          const qi = row?.quote_items || {};
+          const { meta: _m, draft, ...live } = qi as any;
+          const lines: { label: string; amount: number }[] = [];
+          (live.parts || []).filter((p: any) => p?.name).forEach((p: any) => lines.push({ label: `${p.name}${(p.qty || 1) > 1 ? ` ×${p.qty}` : ''}`, amount: (Number(p.qty) || 1) * (Number(p.unitPrice) || 0) }));
+          if (Number(live.labourHours) > 0) lines.push({ label: `Labour (${live.labourHours} h)`, amount: Number(live.labourHours) * (Number(live.labourRate) || 0) });
+          (live.other || []).filter((o: any) => o?.name || o?.label).forEach((o: any) => lines.push({ label: o.name || o.label, amount: Number(o.amount) || 0 }));
+          if (Number(live.shopFee) > 0) lines.push({ label: 'Workshop fee', amount: Number(live.shopFee) });
+          if (Number(live.discount) > 0) lines.push({ label: 'Discount', amount: -Number(live.discount) });
+          const bt = ps?.billTo || null;
+          const custName = row?.customer_name && row.customer_name !== row.vehicle_rego ? row.customer_name : 'the customer';
+          const custEmail = row?.email || row?.customer_email || '';
+          const invoiceTo = bt ? billToWho(bt) : custName;
+          const invoiceEmail = bt?.email || custEmail;
+          const check = (on: boolean, set: (v: boolean) => void, title: React.ReactNode, sub: React.ReactNode, disabled = false) => (
+            <label className={cn('flex items-start gap-3 rounded-xl border p-3 cursor-pointer transition-colors', on ? 'border-torqued-red/40 bg-torqued-red/5' : 'border-border', disabled && 'opacity-50 cursor-not-allowed')}>
+              <input type="checkbox" checked={on} disabled={disabled} onChange={e => set(e.target.checked)} className="mt-0.5 w-4 h-4 accent-[#FF1800] shrink-0" />
+              <span className="min-w-0"><span className="block text-sm font-semibold text-foreground">{title}</span><span className="block text-xs text-muted">{sub}</span></span>
+            </label>
+          );
+          return (
+            <div className="fixed inset-0 z-[200] flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm" onClick={() => !checkoutBusy && setCheckoutModal(null)}>
+              <motion.div role="dialog" aria-modal="true" aria-label="Check out"
+                initial={{ opacity: 0, scale: 0.97 }} animate={{ opacity: 1, scale: 1 }} exit={{ opacity: 0, scale: 0.97 }}
+                onClick={e => e.stopPropagation()}
+                className="font-raleway bg-background border border-border rounded-3xl p-6 w-full max-w-lg max-h-[92vh] overflow-y-auto space-y-5 shadow-2xl">
+                <div className="flex justify-between items-start gap-3">
+                  <div>
+                    <h3 className="text-xl tracking-tight">Check out</h3>
+                    <p className="text-sm text-muted">{[row?.vehicle_label || row?.vehicle_rego, row?.customer_name].filter(Boolean).join(' · ')}</p>
                   </div>
-                ) : null;
-              })()}
-              <div className="flex gap-3">
-                <Button variant="outline" className="flex-1 border-border text-foreground" disabled={checkoutBusy} onClick={() => setCheckoutModal(null)}>Cancel</Button>
-                <Button disabled={!checkoutKm.trim() || checkoutBusy} className="flex-1 bg-torqued-red text-white" onClick={confirmCheckout}>{checkoutBusy ? 'Saving…' : 'Mark car ready'}</Button>
-              </div>
-            </motion.div>
-          </div>
-        )}
+                  <button onClick={() => setCheckoutModal(null)} aria-label="Close" className="w-9 h-9 rounded-xl hover:bg-card flex items-center justify-center text-muted hover:text-foreground"><X size={20} /></button>
+                </div>
+
+                <section className="space-y-2">
+                  <div className="flex items-center justify-between gap-2">
+                    <p className="text-sm font-bold text-foreground">1. Review the quote</p>
+                    <button type="button" className="text-sm font-semibold text-muted hover:text-foreground underline underline-offset-2" onClick={() => { setCheckoutModal(null); openQuoteEditor(job, row); }}>Edit quote</button>
+                  </div>
+                  <div className="rounded-2xl border border-border bg-card p-3 space-y-1.5">
+                    {lines.length ? lines.map((l, i) => (
+                      <div key={i} className="flex justify-between gap-3 text-sm"><span className="text-foreground/80">{l.label}</span><span className="tabular-nums text-muted">{l.amount < 0 ? '−' : ''}{formatCurrency(Math.abs(l.amount))}</span></div>
+                    )) : <p className="text-sm text-muted">{row?.description || 'No itemised quote.'}</p>}
+                    <div className="flex justify-between gap-3 border-t border-border pt-2 text-sm font-bold"><span>Total <span className="font-normal text-muted">GST incl.</span></span><span className="tabular-nums text-torqued-red">{formatCurrency(ps?.total || 0)}</span></div>
+                    {ps && !ps.online && <p className="text-xs text-muted">Paid {formatCurrency(ps.paid)}{ps.balance > 0 ? ` · ${formatCurrency(ps.balance)} to pay` : ' · paid in full'}{bt ? ` · ${billToWho(bt)} ${formatCurrency(ps.accountShare)} / customer ${formatCurrency(ps.customerShare)}` : ''}</p>}
+                  </div>
+                  {draft && <p className="text-xs font-semibold text-amber-600">This quote has unsaved changes — open Edit quote and save it so the invoice is right.</p>}
+                </section>
+
+                <section className="space-y-2">
+                  <label htmlFor="co-km" className="text-sm font-bold text-foreground block">2. Odometer at check-out (km)</label>
+                  <input id="co-km" type="text" inputMode="numeric" value={checkoutKm} onChange={e => setCheckoutKm(e.target.value)} placeholder={row?.mileage_in ? `Checked in at ${Number(row.mileage_in).toLocaleString()}` : 'e.g. 124500'}
+                    className="w-full bg-card border border-border rounded-xl px-3 h-11 text-sm text-foreground focus:outline-none focus:border-torqued-red" />
+                </section>
+
+                <section className="space-y-2">
+                  <p className="text-sm font-bold text-foreground">3. Send</p>
+                  {check(checkoutSendInvoice, setCheckoutSendInvoice,
+                    <>Email the invoice to {invoiceTo}{bt ? <span className="font-normal text-muted"> (bill to)</span> : null}</>,
+                    invoiceEmail ? `${invoiceEmail} · tax invoice PDF${bt && ps ? ` for ${formatCurrency(ps.accountShare)}` : ''}` : 'No email on file — download the PDF instead',
+                    !invoiceEmail || !(ps && ps.total > 0))}
+                  {check(checkoutNotify, setCheckoutNotify,
+                    <>Tell {custName} their car is ready<span className="font-normal text-muted"> (ship to)</span></>,
+                    custEmail ? `${custEmail}${row?.customer_phone ? ` · ${row.customer_phone}` : ''} · includes a review link` : 'No email on file — give them a call')}
+                  {checkoutNotify && (
+                    <textarea value={checkoutNotes} onChange={e => setCheckoutNotes(e.target.value)} rows={2} placeholder="Note for the customer (optional) — e.g. rear pads due next service"
+                      className="w-full bg-card border border-border rounded-xl px-3 py-2.5 text-sm text-foreground focus:outline-none focus:border-torqued-red resize-none" />
+                  )}
+                </section>
+
+                {row && ps && !ps.online && ps.customerBalance > 0 && (
+                  <div className="rounded-xl border border-amber-500/40 bg-amber-500/5 p-3 flex items-center justify-between gap-3">
+                    <p className="text-sm"><span className="font-bold text-foreground">{formatCurrency(ps.customerBalance)} to collect from {custName}.</span> <span className="text-muted">Take it before the car goes.</span></p>
+                    <button type="button" className={cn(actCls('plain'), 'shrink-0')} onClick={() => openPayModal(row)}>Record payment</button>
+                  </div>
+                )}
+
+                <div className="flex gap-3">
+                  <button type="button" className={cn(actCls('plain'), 'flex-1 justify-center h-11')} disabled={checkoutBusy} onClick={() => setCheckoutModal(null)}>Cancel</button>
+                  <button type="button" className={cn(actCls('primary'), 'flex-1 justify-center h-11')} disabled={!checkoutKm.trim() || checkoutBusy} onClick={confirmCheckout}>
+                    {checkoutBusy ? 'Checking out…' : checkoutSendInvoice || checkoutNotify ? 'Check out & send' : 'Check out'}
+                  </button>
+                </div>
+              </motion.div>
+            </div>
+          );
+        })()}
       </AnimatePresence>
     </div>
   );

@@ -4048,6 +4048,10 @@ app.post('/api/mechanic/packages/delete', async (req, res) => {
 app.post('/api/mechanic/car-ready', async (req, res) => {
   try {
     const { bookingId, km, notes, mechanicName } = req.body;
+    // sendInvoice: true = email the tax invoice (to the bill-to account, else the customer);
+    // false = don't; omitted = old behaviour (account customers with auto-email on).
+    const sendInvoice: boolean | undefined = typeof req.body.sendInvoice === 'boolean' ? req.body.sendInvoice : undefined;
+    const notifyCustomer = req.body.notifyCustomer !== false;
     if (!bookingId) return res.status(400).json({ error: 'bookingId required' });
     const supabase = getSupabaseAdmin();
     if (!supabase) return res.status(503).json({ error: 'DB unavailable' });
@@ -4064,17 +4068,23 @@ app.post('/api/mechanic/car-ready', async (req, res) => {
     }
     await supabase.from('bookings').update(updatePayload).eq('id', bookingId);
 
-    // Account customers: email the tax invoice automatically when the job is done.
+    // Invoice: the mechanic's choice at check-out, or (older clients) automatic for accounts.
     const billTo = booking.quote_items?.meta?.billTo;
-    if (booking.is_cold_quote && billTo?.accountId) {
-      try {
+    const doneRow = { ...booking, ...updatePayload };
+    let invoice: any = null;
+    try {
+      let send = sendInvoice === true && paymentSummary(doneRow).total > 0;
+      if (sendInvoice === undefined && booking.is_cold_quote && billTo?.accountId) {
         const { data: acct } = await supabase.from('customer_accounts').select('auto_email_invoice').eq('id', billTo.accountId).maybeSingle();
-        const doneRow = { ...booking, ...updatePayload };
-        if (acct?.auto_email_invoice !== false && paymentSummary(doneRow).accountBalance > 0) {
-          await emailsWithin(8000, sendTaxInvoice(supabase, doneRow, { email: true }));
-        }
-      } catch (e: any) { console.error('[car-ready] auto invoice', e?.message); }
-    }
+        send = acct?.auto_email_invoice !== false && paymentSummary(doneRow).accountBalance > 0;
+      }
+      if (send) {
+        const settled: any = await emailsWithin(8000, sendTaxInvoice(supabase, doneRow, { email: true }));
+        const r = Array.isArray(settled) ? settled[0] : null;
+        invoice = r?.status === 'fulfilled' ? { emailed: r.value.emailed, sentTo: r.value.sentTo, reason: r.value.reason, invoiceNo: r.value.invoiceNo }
+          : { emailed: false, reason: r ? 'The invoice could not be sent.' : 'Email is taking too long — check Payments in a minute.' };
+      }
+    } catch (e: any) { console.error('[car-ready] invoice', e?.message); invoice = { emailed: false, reason: 'The invoice could not be sent.' }; }
 
     // Save mechanic note with timestamp
     if (notes?.trim()) {
@@ -4084,6 +4094,10 @@ app.post('/api/mechanic/car-ready', async (req, res) => {
     // In-app notification: car ready
     const vLabel = ctx.vehicleLabel || `(${booking.vehicle_rego})`;
     const mechDisplayName = ctx.mechanicName || mechanicName || 'your workshop';
+    if (!notifyCustomer) {
+      const { data: fresh } = await supabase.from('bookings').select('*').eq('id', bookingId).maybeSingle();
+      return res.json({ success: true, invoice, notified: false, row: fresh });
+    }
     await notify({
       bookingId, rego: booking.vehicle_rego, ownerId: booking.customer_id,
       type: 'car_ready',
@@ -4115,7 +4129,8 @@ ${notesHtml}
       }).catch(() => {});
     }
 
-    res.json({ success: true });
+    const { data: fresh } = await supabase.from('bookings').select('*').eq('id', bookingId).maybeSingle();
+    res.json({ success: true, invoice, notified: !!to, row: fresh });
   } catch (err: any) {
     console.error('[mechanic/car-ready]', err);
     res.status(500).json({ error: err?.message || 'Failed' });
